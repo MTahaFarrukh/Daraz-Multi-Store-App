@@ -1,25 +1,22 @@
-# Daraz Multi-Store Manager — Investigation POC
+# Daraz Multi-Store Manager — Phase 2 Live Verification
 
-Proof-of-concept for investigating the **official Daraz Open Platform API (Pakistan)** before building a multi-store dashboard.
+Phase 1 investigation: [docs/DARAZ_API_FINDINGS.md](docs/DARAZ_API_FINDINGS.md)  
+Phase 2 test report: [docs/PHASE2_LIVE_TEST.md](docs/PHASE2_LIVE_TEST.md)  
+Label processing (Mini Phase 3A): [docs/LABEL_PROCESSING.md](docs/LABEL_PROCESSING.md) | [docs/MINI_PHASE_3A_REPORT.md](docs/MINI_PHASE_3A_REPORT.md)
 
-**Full findings:** [docs/DARAZ_API_FINDINGS.md](docs/DARAZ_API_FINDINGS.md)
+## Phase 2 objective
 
-## What this is
+Connect **one** real Daraz Pakistan seller store via OAuth and verify:
 
-- Minimal Python client with HMAC-SHA256 signing
-- Placeholders for credentials via `.env`
-- No frontend, database, or deployment
-- Does **not** call Daraz unless you add real credentials
+> Can we retrieve a real shipping label using `GET /order/document/get` with `doc_type=shippingLabel`?
 
-## What this is not
-
-- Not the final application
-- Not tested against live Daraz PK data (requires your app approval + seller OAuth)
+**Read-only.** Does **not** call `/order/pack` or `/order/rts`. Does **not** modify orders.
 
 ## Requirements
 
 - Python 3.12+
 - Daraz Open Platform app ([open.daraz.com](https://open.daraz.com/))
+- App callback URL: `http://127.0.0.1:8000/oauth/callback` (must match App Console exactly)
 
 ## Setup
 
@@ -29,46 +26,44 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
-# Edit .env with your App Key and App Secret (never commit .env)
+# Edit .env — set DARAZ_APP_KEY and DARAZ_APP_SECRET only (never commit .env)
 ```
 
-## OAuth (manual step)
+Register the callback URL in **App Console → Manage → Callback URL**.
 
-1. Register callback URL in App Console (e.g. `http://localhost:8765/callback`).
-2. Run offline demo to print authorize URL:
+## Run OAuth + smoke test
 
 ```powershell
-python -m src.daraz_api
+uvicorn src.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-3. Open the URL, sign in as seller, approve the app.
-4. Capture `code` from redirect URL.
-5. Exchange code (Python shell):
+1. Open http://127.0.0.1:8000/
+2. Click **Connect seller store** → `/oauth/login` (Daraz browser login)
+3. After redirect, tokens are saved to `data/tokens.json` (gitignored)
+4. Open http://127.0.0.1:8000/test/live — runs live smoke test
+5. Review `docs/PHASE2_LIVE_TEST.md` and `data/test-label.pdf` or `.html`
 
-```python
-from src.daraz_api import DarazClient
-client = DarazClient()
-tokens = client.create_token_from_code("PASTE_CODE_HERE")
-print(tokens)
-```
-
-6. Save `access_token` and `refresh_token` to `.env`.
-
-## Live smoke test (after tokens)
-
-Set `DARAZ_ACCESS_TOKEN` in `.env`, then:
+CLI alternative (after OAuth):
 
 ```powershell
-python -m src.daraz_api
+python -m src.smoke_test
 ```
 
-Optional: set `POC_CREATED_AFTER=2026-01-01T00:00:00+05:00`
+## Endpoints
 
-This attempts:
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | POC info page |
+| GET | `/oauth/login` | Redirect to Daraz OAuth |
+| GET | `/oauth/callback` | Exchange code → save tokens |
+| GET | `/stores` | Sanitized store info (no tokens) |
+| GET | `/test/live` | Read-only smoke test + report |
 
-- `GetOrders` with `status=ready_to_ship`
-- `GetOrderItems` for first orders
-- `GetDocument` shipping labels (saved under `labels/`)
+## Security
+
+- Tokens stored in `data/tokens.json` (development only, gitignored)
+- App Secret, access tokens, and refresh tokens are **never** logged or returned by API
+- `/stores` returns account, seller_id, country, expiry only
 
 ## Project layout
 
@@ -78,23 +73,33 @@ daraz-multi-store/
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
+├── data/                  # gitignored — tokens + test label
+│   ├── tokens.json
+│   └── test-label.*
 ├── src/
-│   ├── __init__.py
-│   └── daraz_api.py
+│   ├── app.py             # FastAPI OAuth + test server
+│   ├── daraz_api.py       # Signed Daraz client
+│   ├── token_store.py     # Local token JSON
+│   ├── smoke_test.py      # Live test + report writer
+│   └── config.py
 └── docs/
-    └── DARAZ_API_FINDINGS.md
+    ├── DARAZ_API_FINDINGS.md
+    └── PHASE2_LIVE_TEST.md
 ```
-
-## Key official endpoints (Pakistan)
-
-| Purpose | Path |
-|---------|------|
-| REST base | `https://api.daraz.pk/rest` |
-| OAuth | `https://api.daraz.pk/oauth/authorize` |
-| Orders | `/orders/get` |
-| Order items | `/order/items/get` |
-| Shipping label | `/order/document/get` (`doc_type=shippingLabel`) |
 
 ## Support
 
 Official API support: **support-api@daraz.pk**
+
+## Label processing (local — no Daraz API)
+
+While developer registration is pending, test the label merge engine:
+
+```powershell
+python -m src.label_cli generate-test-labels
+python -m src.label_cli list-labels
+python -m src.label_cli merge-labels
+pytest
+```
+
+Output: `data/output/combined-test-labels.pdf` (5 pages from 5 synthetic store labels).

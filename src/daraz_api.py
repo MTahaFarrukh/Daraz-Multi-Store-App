@@ -33,10 +33,20 @@ DEFAULT_API_BASE = "https://api.daraz.pk/rest"
 class DarazApiError(Exception):
     """Raised when Daraz returns a non-success API response."""
 
-    def __init__(self, message: str, *, code: str | None = None, payload: dict | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        payload: dict | None = None,
+        http_status: int | None = None,
+        request_id: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.payload = payload or {}
+        self.http_status = http_status
+        self.request_id = request_id or (self.payload.get("request_id") if self.payload else None)
 
 
 class DarazClient:
@@ -123,13 +133,28 @@ class DarazClient:
                     headers={"Content-Type": "application/json"},
                 )
 
-        response.raise_for_status()
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DarazApiError(
+                f"Non-JSON response (HTTP {response.status_code})",
+                http_status=response.status_code,
+            ) from exc
+
+        if response.status_code >= 400:
+            raise DarazApiError(
+                data.get("message") or data.get("type") or f"HTTP {response.status_code}",
+                code=str(data.get("code")) if data.get("code") is not None else None,
+                payload=data,
+                http_status=response.status_code,
+            )
+
         if str(data.get("code", "0")) != "0":
             raise DarazApiError(
                 data.get("message") or data.get("type") or "Daraz API error",
                 code=str(data.get("code")),
                 payload=data,
+                http_status=response.status_code,
             )
         return data
 
@@ -262,16 +287,28 @@ class DarazClient:
         return base64.b64decode(encoded)
 
     @staticmethod
+    def extension_for_mime(mime_type: str, content: bytes) -> str:
+        """Pick a file extension from mime_type or content magic bytes."""
+        mime = (mime_type or "").lower()
+        if "pdf" in mime:
+            return ".pdf"
+        if "html" in mime:
+            return ".html"
+        if content.startswith(b"%PDF"):
+            return ".pdf"
+        if content.lstrip().startswith(b"<") or b"<html" in content[:256].lower():
+            return ".html"
+        return ".bin"
+
+    @staticmethod
     def save_document(document: dict[str, Any], output_path: str | Path) -> Path:
         """Write decoded document bytes to disk."""
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         mime = (document.get("mime_type") or document.get("MimeType") or "").lower()
         content = DarazClient.decode_document_file(document)
-        if mime == "text/html" and not path.suffix:
-            path = path.with_suffix(".html")
-        elif "pdf" in mime and not path.suffix:
-            path = path.with_suffix(".pdf")
+        if not path.suffix:
+            path = path.with_suffix(DarazClient.extension_for_mime(mime, content))
         path.write_bytes(content)
         return path
 
