@@ -19,11 +19,8 @@ from src.config import (
     get_env,
 )
 from src.daraz_api import DarazApiError, DarazClient
-from src.token_store import load_tokens, sanitize_store_view
-
-LABEL_ELIGIBLE_STATUSES = frozenset(
-    {"packed", "ready_to_ship", "ready to ship", "rts", "shipped"}
-)
+from src.orders import eligible_item_ids, extract_order_items, extract_orders, order_preview
+from src.token_store import get_primary_store, get_store, sanitize_store_view
 
 
 @dataclass
@@ -63,34 +60,15 @@ class SmokeTestResult:
         return "PASS" if self.file_decoded else "FAIL"
 
 
-def _client_from_tokens() -> tuple[DarazClient, dict[str, Any]]:
-    tokens = load_tokens()
-    if not tokens or not tokens.get("access_token"):
-        raise ValueError(
-            "No stored tokens. Complete OAuth first: GET /oauth/login"
-        )
-    client = DarazClient(
+def _client_from_store(store: dict[str, Any]) -> DarazClient:
+    if not store.get("access_token"):
+        raise ValueError("No stored tokens. Complete OAuth first: GET /oauth/login")
+    return DarazClient(
         app_key=get_env("DARAZ_APP_KEY"),
         app_secret=get_env("DARAZ_APP_SECRET"),
-        access_token=tokens["access_token"],
+        access_token=store["access_token"],
         api_base=get_env("DARAZ_API_BASE", DEFAULT_API_BASE),
     )
-    return client, tokens
-
-
-def _is_label_eligible(item: dict[str, Any]) -> bool:
-    status = str(item.get("status", "")).strip().lower()
-    return status in LABEL_ELIGIBLE_STATUSES or "ready" in status or status == "packed"
-
-
-def _order_preview(order: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "order_id": order.get("order_id"),
-        "order_number": order.get("order_number"),
-        "items_count": order.get("items_count"),
-        "statuses": order.get("statuses"),
-        "created_at": order.get("created_at"),
-    }
 
 
 def run_live_smoke_test(
@@ -98,10 +76,11 @@ def run_live_smoke_test(
     created_after: str | None = None,
     order_limit: int = 10,
     write_report: bool = True,
+    store_id: str | None = None,
 ) -> SmokeTestResult:
     """Run read-only production smoke test and optionally write PHASE2_LIVE_TEST.md."""
     result = SmokeTestResult()
-    tokens = load_tokens()
+    tokens = get_store(store_id) if store_id else get_primary_store()
     result.store = sanitize_store_view(tokens)
     result.oauth_connected = bool(tokens and tokens.get("access_token"))
 
@@ -111,7 +90,8 @@ def run_live_smoke_test(
             write_phase2_report(result)
         return result
 
-    client, _ = _client_from_tokens()
+    assert tokens is not None
+    client = _client_from_store(tokens)
     created_after = created_after or get_env(
         "POC_CREATED_AFTER", "2026-01-01T00:00:00+05:00"
     )
@@ -125,9 +105,9 @@ def run_live_smoke_test(
             offset=0,
         )
         result.get_orders_ok = True
-        orders = (orders_resp.get("data") or {}).get("orders") or []
+        orders = extract_orders(orders_resp)
         result.ready_to_ship_count = len(orders)
-        result.orders_preview = [_order_preview(o) for o in orders[:5]]
+        result.orders_preview = [order_preview(o) for o in orders[:5]]
         result.request_id = orders_resp.get("request_id") or result.request_id
     except DarazApiError as exc:
         result.daraz_code = exc.code
@@ -155,17 +135,13 @@ def run_live_smoke_test(
         try:
             items_resp = client.get_order_items(order_id)
             result.get_order_items_ok = True
-            items = items_resp.get("data") or []
-            eligible = [i for i in items if _is_label_eligible(i)]
-            if not eligible:
+            items = extract_order_items(items_resp)
+            item_ids = eligible_item_ids(items)
+            if not item_ids:
                 result.notes.append(
                     f"Order {order_id}: no label-eligible items (statuses: "
                     f"{[i.get('status') for i in items]}). Skipping."
                 )
-                continue
-
-            item_ids = [str(i["order_item_id"]) for i in eligible if i.get("order_item_id")]
-            if not item_ids:
                 continue
 
             result.tested_order_id = str(order_id)

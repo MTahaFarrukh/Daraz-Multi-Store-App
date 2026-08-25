@@ -1,25 +1,28 @@
-.env
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-dist/
-build/
-*.log
-labels/
-
-# Local runtime data (tokens, test labels, merged output)
-data/tokens.json
-data/test_labels/**/*.pdf
-data/test_labels/**/*.html
-data/output/**/*.pdf
-data/output/**/*.html
-
-# Legacy / ad-hoc label output
-*.pdf
-*.html
-!docs/**/*.md
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.log
+labels/
+
+# Local runtime data (tokens, keys, labels, merged output)
+data/tokens.json
+data/.token_key
+data/labels/
+data/test_labels/**/*.pdf
+data/test_labels/**/*.html
+data/output/**/*.pdf
+data/output/**/*.html
+data/test-label.*
+
+# Legacy / ad-hoc label output
+*.pdf
+*.html
+!docs/**/*.md

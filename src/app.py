@@ -21,7 +21,12 @@ from src.config import (
 )
 from src.daraz_api import DarazApiError, DarazClient
 from src.smoke_test import run_live_smoke_test
-from src.token_store import build_token_record, load_tokens, sanitize_store_view, save_tokens
+from src.token_store import (
+    build_token_record,
+    list_sanitized_stores,
+    sanitize_store_view,
+    upsert_store,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,10 +89,10 @@ def oauth_callback(
             api_base=get_env("DARAZ_API_BASE", DEFAULT_API_BASE),
         )
         token_response = client.create_token_from_code(code)
-        record = build_token_record(token_response)
-        save_tokens(record)
+        record = upsert_store(build_token_record(token_response))
         logger.info(
-            "OAuth success account=%s seller_id=%s",
+            "OAuth success store_id=%s account=%s seller_id=%s",
+            record.get("store_id", ""),
             record.get("account", ""),
             record.get("seller_id", ""),
         )
@@ -95,7 +100,7 @@ def oauth_callback(
             "status": "authorized",
             "message": "Store connected. Tokens saved locally (not shown).",
             "store": sanitize_store_view(record),
-            "next_step": "GET /test/live to run the production smoke test",
+            "next_step": "GET /test/live or python -m src.cli list-stores",
         }
     except DarazApiError as exc:
         logger.error("Token exchange failed code=%s request_id=%s", exc.code, exc.request_id)
@@ -116,8 +121,7 @@ def oauth_callback(
 @app.get("/stores")
 def stores() -> dict:
     """Sanitized connected store metadata — never exposes tokens."""
-    record = load_tokens()
-    return {"stores": [sanitize_store_view(record)] if record else []}
+    return {"stores": list_sanitized_stores()}
 
 
 @app.get("/test/live")

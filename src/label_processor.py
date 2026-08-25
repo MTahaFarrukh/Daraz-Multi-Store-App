@@ -21,6 +21,7 @@ from pypdf import PdfReader, PdfWriter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_LABELS_DIR = PROJECT_ROOT / "data" / "test_labels"
+LABELS_DIR = PROJECT_ROOT / "data" / "labels"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 
 SUPPORTED_MIME_TYPES = frozenset(
@@ -118,17 +119,97 @@ class UnavailableHtmlConverter:
     """
     Placeholder converter when no HTML rendering backend is installed.
 
-    WeasyPrint on Windows typically requires extra system libraries (GTK/Pango).
-    Install optionally: pip install weasyprint
-    See docs/LABEL_PROCESSING.md for details.
+    Prefer Edge/Chrome headless on Windows, or WeasyPrint where GTK is available.
+    See docs/LABEL_PROCESSING.md / docs/PHASE3_CLI.md.
     """
 
     def convert(self, html_bytes: bytes) -> bytes:
         raise HtmlConversionError(
             "HTML to PDF conversion is not available in this environment. "
-            "Install WeasyPrint and its system dependencies, or pre-convert HTML "
-            "labels to PDF before merging. See docs/LABEL_PROCESSING.md."
+            "Install Microsoft Edge or Google Chrome (used headless), or WeasyPrint. "
+            "See docs/PHASE3_CLI.md."
         )
+
+
+class ChromiumHtmlConverter:
+    """HTML→PDF via Edge/Chrome headless --print-to-pdf (Windows-friendly)."""
+
+    def __init__(self, browser_path: str | Path) -> None:
+        self.browser_path = Path(browser_path)
+
+    def convert(self, html_bytes: bytes) -> bytes:
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="daraz_label_") as tmp:
+            tmp_path = Path(tmp)
+            html_path = tmp_path / "label.html"
+            pdf_path = tmp_path / "label.pdf"
+            html_path.write_bytes(html_bytes)
+            # file:/// URL for local HTML
+            file_url = html_path.resolve().as_uri()
+            cmd = [
+                str(self.browser_path),
+                "--headless=new",
+                "--disable-gpu",
+                "--no-pdf-header-footer",
+                f"--print-to-pdf={pdf_path}",
+                file_url,
+            ]
+            try:
+                completed = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise HtmlConversionError(
+                    f"Browser HTML→PDF failed ({self.browser_path.name}): {exc}"
+                ) from exc
+
+            if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+                stderr = (completed.stderr or completed.stdout or "").strip()
+                raise HtmlConversionError(
+                    f"Browser did not produce a PDF ({self.browser_path.name}). {stderr}"
+                )
+            return pdf_path.read_bytes()
+
+
+def _candidate_browser_paths() -> list[Path]:
+    import os
+    import shutil
+
+    names = ("msedge", "chrome", "google-chrome", "chromium", "chromium-browser")
+    found: list[Path] = []
+    for name in names:
+        which = shutil.which(name)
+        if which:
+            found.append(Path(which))
+
+    local = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    program_files_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+    candidates = [
+        Path(program_files) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(program_files_x86) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(program_files_x86) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe",
+    ]
+    for path in candidates:
+        if path.is_file():
+            found.append(path)
+    # Dedupe while preserving order
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in found:
+        key = str(path.resolve()).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
 
 
 class WeasyPrintHtmlConverter:
@@ -151,7 +232,9 @@ class WeasyPrintHtmlConverter:
 
 
 def get_html_converter() -> HtmlToPdfConverter:
-    """Return the best available HTML converter, or a clear unavailable stub."""
+    """Return Edge/Chrome headless if found, else WeasyPrint, else unavailable stub."""
+    for browser in _candidate_browser_paths():
+        return ChromiumHtmlConverter(browser)
     try:
         from weasyprint import HTML  # noqa: F401
 

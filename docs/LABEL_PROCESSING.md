@@ -65,10 +65,10 @@ pdf_bytes = html_to_pdf(html_bytes)
 
 **Current status on Windows:**
 
-- HTML → PDF requires **WeasyPrint** (`pip install weasyprint`) plus system libraries (GTK/Pango/Cairo), which are often difficult on Windows.
-- By default, an `UnavailableHtmlConverter` is used and raises a clear `HtmlConversionError`.
-- **PDF merging is fully functional** without WeasyPrint.
-- Pre-convert HTML labels to PDF before merge, or install WeasyPrint when ready.
+- HTML → PDF prefers **Microsoft Edge / Google Chrome** headless `--print-to-pdf` (see `ChromiumHtmlConverter` in `label_processor.py`).
+- WeasyPrint remains an optional fallback (`pip install weasyprint`) but often needs GTK/Pango on Windows.
+- If neither backend is available, `UnavailableHtmlConverter` raises a clear `HtmlConversionError`.
+- **PDF merging is fully functional** without HTML conversion when inputs are already PDF.
 
 Optional install (Linux/macOS or Windows with dependencies):
 
