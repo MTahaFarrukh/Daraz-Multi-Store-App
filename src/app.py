@@ -1,5 +1,5 @@
 """
-Phase 2 — FastAPI OAuth + live smoke test server.
+Daraz Multi-Store — FastAPI app (OAuth + dashboard API + UI).
 
 Run:
   uvicorn src.app:app --reload --host 127.0.0.1 --port 8000
@@ -8,9 +8,11 @@ Run:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.config import (
     DEFAULT_API_BASE,
@@ -20,7 +22,10 @@ from src.config import (
     require_env,
 )
 from src.daraz_api import DarazApiError, DarazClient
+from src.label_processor import OUTPUT_DIR
+from src.ops import fetch_orders, print_labels
 from src.smoke_test import run_live_smoke_test
+from src.token_refresh import refresh_store_tokens
 from src.token_store import (
     build_token_record,
     list_sanitized_stores,
@@ -31,31 +36,37 @@ from src.token_store import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 app = FastAPI(
-    title="Daraz Phase 2 OAuth POC",
-    description="Live production verification — OAuth + read-only order/label test",
-    version="0.2.0",
+    title="Daraz Multi-Store Manager",
+    description="Multi-store orders and shipping label printing for Daraz Pakistan",
+    version="0.3.0",
 )
 
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-@app.get("/", response_class=HTMLResponse)
-def root() -> str:
-    return """
-<!DOCTYPE html>
-<html>
-<head><title>Daraz Phase 2 POC</title></head>
-<body>
-  <h1>Daraz Multi-Store — Phase 2 OAuth POC</h1>
-  <p>Live production verification for Daraz Pakistan (read-only + GetDocument).</p>
-  <ul>
-    <li><a href="/oauth/login">Connect seller store (OAuth)</a></li>
-    <li><a href="/stores">View connected store (sanitized)</a></li>
-    <li><a href="/test/live">Run live smoke test</a></li>
-  </ul>
-  <p><small>Does not modify orders. Does not call /order/pack or /order/rts.</small></p>
-</body>
-</html>
-"""
+
+def _daraz_http_error(exc: DarazApiError) -> HTTPException:
+    return HTTPException(
+        status_code=502,
+        detail={
+            "error": "daraz_api_error",
+            "daraz_code": exc.code,
+            "message": str(exc),
+            "request_id": exc.request_id,
+            "http_status": exc.http_status,
+        },
+    )
+
+
+@app.get("/", response_model=None)
+def root():
+    index = STATIC_DIR / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    return HTMLResponse("<p>UI missing. Open /docs for API.</p>")
 
 
 @app.get("/oauth/login")
@@ -75,13 +86,14 @@ def oauth_login() -> RedirectResponse:
     return RedirectResponse(url, status_code=302)
 
 
-@app.get("/oauth/callback")
+@app.get("/oauth/callback", response_model=None)
 def oauth_callback(
+    request: Request,
     code: str = Query(..., description="Authorization code from Daraz"),
     state: str | None = Query(None),
-) -> dict:
-    """Exchange authorization code for tokens and persist locally."""
-    _ = state  # reserved for future CSRF validation
+):
+    """Exchange authorization code for tokens and redirect to the dashboard."""
+    _ = state
     try:
         client = DarazClient(
             app_key=require_env("DARAZ_APP_KEY"),
@@ -91,51 +103,109 @@ def oauth_callback(
         token_response = client.create_token_from_code(code)
         record = upsert_store(build_token_record(token_response))
         logger.info(
-            "OAuth success store_id=%s account=%s seller_id=%s",
+            "OAuth success store_id=%s account=%s",
             record.get("store_id", ""),
             record.get("account", ""),
-            record.get("seller_id", ""),
         )
-        return {
-            "status": "authorized",
-            "message": "Store connected. Tokens saved locally (not shown).",
-            "store": sanitize_store_view(record),
-            "next_step": "GET /test/live or python -m src.cli list-stores",
-        }
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept and "text/html" not in accept:
+            return {
+                "status": "authorized",
+                "message": "Store connected. Tokens saved locally (not shown).",
+                "store": sanitize_store_view(record),
+            }
+        store_id = record.get("store_id", "")
+        return RedirectResponse(f"/?connected=1&store={store_id}", status_code=302)
     except DarazApiError as exc:
         logger.error("Token exchange failed code=%s request_id=%s", exc.code, exc.request_id)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "token_exchange_failed",
-                "daraz_code": exc.code,
-                "message": str(exc),
-                "request_id": exc.request_id,
-                "http_status": exc.http_status,
-            },
-        ) from exc
+        raise _daraz_http_error(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/stores")
+def api_stores() -> dict:
+    return {"stores": list_sanitized_stores()}
+
+
 @app.get("/stores")
 def stores() -> dict:
-    """Sanitized connected store metadata — never exposes tokens."""
-    return {"stores": list_sanitized_stores()}
+    """Backward-compatible alias."""
+    return api_stores()
+
+
+@app.post("/api/refresh-tokens")
+def api_refresh_tokens(
+    store: str | None = Query(None),
+    force: bool = Query(False),
+) -> dict:
+    try:
+        results = refresh_store_tokens(store_id=store, force=force)
+        return {"results": results}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/orders")
+def api_orders(
+    store: str | None = Query(None),
+    status: str = Query("ready_to_ship"),
+    limit: int = Query(10, ge=1, le=50),
+    created_after: str | None = Query(None),
+) -> dict:
+    try:
+        orders = fetch_orders(
+            store_id=store,
+            status=status,
+            limit=limit,
+            created_after=created_after,
+        )
+        return {"orders": orders, "count": len(orders)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DarazApiError as exc:
+        raise _daraz_http_error(exc) from exc
+
+
+@app.post("/api/print-labels")
+def api_print_labels(
+    store: str | None = Query(None),
+    status: str = Query("ready_to_ship"),
+    limit: int = Query(10, ge=1, le=50),
+    created_after: str | None = Query(None),
+    reuse_saved: bool = Query(False),
+) -> dict:
+    try:
+        result = print_labels(
+            store_id=store,
+            status=status,
+            limit=limit,
+            created_after=created_after,
+            reuse_saved=reuse_saved,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DarazApiError as exc:
+        raise _daraz_http_error(exc) from exc
+
+
+@app.get("/api/download/combined-labels")
+def download_combined_labels() -> FileResponse:
+    path = OUTPUT_DIR / "combined-labels.pdf"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No combined PDF yet. Print labels first.")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename="combined-labels.pdf",
+    )
 
 
 @app.get("/test/live")
 def test_live(
-    created_after: str | None = Query(
-        None,
-        description="ISO8601 lower bound for GetOrders (default from POC_CREATED_AFTER env)",
-    ),
+    created_after: str | None = Query(None),
 ) -> dict:
-    """
-    Run read-only production smoke test:
-    GetOrders → GetOrderItems → GetDocument (shippingLabel).
-    Writes docs/PHASE2_LIVE_TEST.md and saves label to data/test-label.*
-    """
     try:
         result = run_live_smoke_test(created_after=created_after, write_report=True)
     except ValueError as exc:

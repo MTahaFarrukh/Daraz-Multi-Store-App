@@ -23,18 +23,16 @@ copy .env.example .env
 # Edit .env — set DARAZ_APP_KEY and DARAZ_APP_SECRET only (never commit .env)
 ```
 
-## OAuth (connect a store)
+## Web UI
 
 ```powershell
 uvicorn src.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-1. Open http://127.0.0.1:8000/oauth/login  
-2. Authorize the seller  
-3. Tokens saved encrypted to `data/tokens.json`  
-4. Optional: http://127.0.0.1:8000/test/live  
+Open http://127.0.0.1:8000/ — dashboard to connect stores, load ready-to-ship orders, and print a combined shipping-label PDF.
 
-Authorize additional sellers the same way — stores are upserted, not overwritten.
+OAuth callback returns to the dashboard. For ngrok callbacks, keep `DARAZ_REDIRECT_URI` pointing at your tunnel `/oauth/callback`.
+
 
 ## Phase 3 CLI
 

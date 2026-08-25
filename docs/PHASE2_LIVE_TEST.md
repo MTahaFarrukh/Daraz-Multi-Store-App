@@ -5,7 +5,7 @@
 * API base: `https://api.daraz.pk/rest`
 * Account: `mtfdigitalemporiumofficial@gmail.com`
 * Seller ID: ``
-* Test date: 2026-08-25 19:19 UTC
+* Test date: 2026-08-25 19:49 UTC
 
 Do NOT put credentials/tokens in this file.
 
@@ -18,7 +18,7 @@ Do NOT put credentials/tokens in this file.
 ## Orders
 
 * GetOrders successful: YES
-* Ready-to-ship orders found: 17
+* Ready-to-ship orders found: 19
 * GetOrderItems successful: YES
 
 ### Order preview (no customer PII)
@@ -38,7 +38,7 @@ Do NOT put credentials/tokens in this file.
 * HTTP status: `n/a`
 * Daraz code: `n/a`
 * Daraz message: `n/a`
-* request_id: `2101055117876855444617968`
+* request_id: `2140f1fa17876873897902480`
 * MIME type: `text/html`
 * File successfully decoded: YES
 * Output file: `data\test-label.html`
