@@ -75,8 +75,6 @@ pytest
 
 Official API support: **support-api@daraz.pk**
 
-## Deploy on Render
+## Deploy on Render (free)
 
-See [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md) for Docker + Render setup (HTTPS, persistent disk, env vars).
-
-Quick steps: push to GitHub → Render **New Blueprint** → set `DARAZ_APP_KEY`, `DARAZ_APP_SECRET`, `DARAZ_TOKEN_KEY`, `DARAZ_REDIRECT_URI` → match callback in Daraz Console.
+See [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md) — **$0** free web service via Docker + Blueprint (`render.yaml`). Two users: share one Render URL; re-OAuth after deploys (no persistent disk on free).

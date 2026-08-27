@@ -1,18 +1,12 @@
-# Render Blueprint — https://render.com/docs/blueprint-spec
+# Render Blueprint (free web service) — https://render.com/docs/blueprint-spec
 services:
   - type: web
     name: daraz-multi-store
     runtime: docker
-    plan: starter
+    plan: free
     region: singapore
     healthCheckPath: /
-    disk:
-      name: daraz-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
-      - key: DARAZ_DATA_DIR
-        value: /var/data
       - key: CHROMIUM_PATH
         value: /usr/bin/chromium
       - key: DARAZ_APP_KEY

@@ -1,82 +1,119 @@
-# Deploy on Render
+# Deploy on Render (free web service)
 
-Host the Daraz Multi-Store UI on [Render](https://render.com) using Docker (includes Chromium for PDF label merge).
+Host the Daraz Multi-Store UI on [Render](https://render.com) **free tier** using Docker (includes Chromium for PDF labels).
 
-## Prerequisites
+**Cost: $0** — good for ~2 users. Tradeoffs below.
 
-- GitHub repo with this project pushed
-- Render account
-- Daraz Open Platform app ([open.daraz.com](https://open.daraz.com/))
-- Fernet key for token encryption (generate once, keep forever):
+## What you get on free
+
+- HTTPS URL like `https://daraz-multi-store.onrender.com`
+- OAuth + dashboard + label PDF merge
+- **No credit card required** for the free web service
+
+## Tradeoffs (read this)
+
+| Free tier behavior | What it means for you |
+|--------------------|------------------------|
+| Sleeps after ~15 min idle | First visit may take **30–60 seconds** to wake up |
+| No persistent disk | **Re-connect store (OAuth)** after each deploy or long restart |
+| 512 MB RAM | PDF print may be slow; use **limit 3** labels first |
+| 750 hours/month | Enough for 2 users if not running 24/7 constantly |
+
+Tokens live in the container filesystem while it is running. **`DARAZ_TOKEN_KEY` in env** keeps encryption consistent across deploys, but you still OAuth again after a fresh deploy.
+
+---
+
+## Step-by-step deploy
+
+### 1. Push to GitHub
+
+Commit and push this repo to GitHub.
+
+### 2. Create Render service
+
+**Option A — Blueprint (easiest)**
+
+1. [Render Dashboard](https://dashboard.render.com) → **New → Blueprint**
+2. Connect your GitHub repo
+3. Render reads [`render.yaml`](../render.yaml) (free plan, no disk)
+
+**Option B — Manual**
+
+1. **New → Web Service** → connect repo
+2. **Runtime:** Docker
+3. **Instance type:** Free
+4. **Region:** Singapore
+
+### 3. Environment variables
+
+In Render → your service → **Environment**:
+
+| Key | Value |
+|-----|--------|
+| `DARAZ_APP_KEY` | your Daraz app key |
+| `DARAZ_APP_SECRET` | your app secret |
+| `DARAZ_TOKEN_KEY` | generate once (keep forever): |
 
 ```powershell
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-## Option 1 — Blueprint (recommended)
-
-1. Push this repo to GitHub.
-2. In Render: **New → Blueprint** → connect the repo.
-3. Render reads [`render.yaml`](../render.yaml) and creates the web service + 1 GB disk.
-4. Set secret env vars in the Render dashboard when prompted:
-   - `DARAZ_APP_KEY`
-   - `DARAZ_APP_SECRET`
-   - `DARAZ_TOKEN_KEY` (from command above)
-5. After first deploy, copy your Render URL, e.g. `https://daraz-multi-store.onrender.com`.
-6. Set **`DARAZ_REDIRECT_URI`** in Render env:
-
-   ```
-   https://daraz-multi-store.onrender.com/oauth/callback
-   ```
-
-   (Use your actual service URL.)
-
-7. In **Daraz App Console → Callback URL**, set the **same** URL.
-8. Redeploy if needed, then open your Render URL and connect a store.
-
-## Option 2 — Manual web service
-
-1. **New → Web Service** → connect GitHub repo.
-2. **Runtime:** Docker
-3. **Region:** Singapore (closest to Pakistan)
-4. Add **Persistent Disk**: mount `/var/data`, 1 GB (Starter plan or higher).
-5. Environment variables:
-
 | Key | Value |
 |-----|--------|
-| `DARAZ_DATA_DIR` | `/var/data` |
 | `CHROMIUM_PATH` | `/usr/bin/chromium` |
-| `DARAZ_APP_KEY` | your app key |
-| `DARAZ_APP_SECRET` | your app secret |
-| `DARAZ_REDIRECT_URI` | `https://<your-service>.onrender.com/oauth/callback` |
-| `DARAZ_TOKEN_KEY` | Fernet key (do not rotate after stores are connected) |
 | `DARAZ_API_BASE` | `https://api.daraz.pk/rest` |
 | `DARAZ_OAUTH_AUTHORIZE` | `https://api.daraz.pk/oauth/authorize` |
 
-6. Deploy.
+### 4. Deploy once, then set callback URL
 
-## Free tier notes
+1. Click **Deploy** and wait until live
+2. Copy your URL, e.g. `https://daraz-multi-store-xxxx.onrender.com`
+3. Add env var:
 
-- **Free web services spin down** after inactivity (cold start ~30–60s).
-- **Persistent disk requires a paid plan** on Render. Without disk, tokens/labels are lost on redeploy — use `DARAZ_TOKEN_KEY` in env but you must re-OAuth after each deploy.
-- For production, use **Starter** plan + disk so `data/tokens.json` survives restarts.
+```
+DARAZ_REDIRECT_URI=https://daraz-multi-store-xxxx.onrender.com/oauth/callback
+```
 
-## Verify deployment
+4. In **Daraz App Console → Callback URL**, paste the **same** URL
+5. **Manual Deploy** once more (so the app loads the new redirect URI)
 
-1. Open `https://<your-service>.onrender.com/`
+### 5. Use the app
+
+1. Open your Render URL (wait if it was sleeping)
 2. **Connect store** → OAuth
-3. **Load orders**
-4. **Print labels PDF** (start with limit 3)
+3. **Load orders** → **Print labels PDF** (limit **3** first)
+
+Both users bookmark the same Render URL.
+
+---
+
+## After a deploy or restart
+
+If stores show disconnected:
+
+1. Open `/oauth/login` again (or **Connect store** in the UI)
+2. Authorize in Daraz
+3. Continue as normal
+
+Access tokens still refresh for ~30 days **while the same container is running**.
+
+---
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| OAuth redirect mismatch | `DARAZ_REDIRECT_URI` must match Daraz Console exactly |
-| Print fails / no PDF | Check logs for Chromium; confirm `CHROMIUM_PATH=/usr/bin/chromium` |
-| Stores disappear after deploy | Add persistent disk at `/var/data` or re-run OAuth |
-| 502 on cold start | Wait for free tier to wake up, or upgrade plan |
+| Slow first load | Free tier waking up — wait 30–60s |
+| OAuth redirect error | `DARAZ_REDIRECT_URI` must match Daraz Console exactly |
+| Print fails | Check **Logs**; try limit 3; Chromium needs RAM on free tier |
+| Store gone after deploy | Normal on free — OAuth again |
+
+---
+
+## Upgrade later (optional)
+
+If you want tokens to survive deploys without re-OAuth: switch to **Starter** plan + add a **1 GB disk** at `/var/data` and set `DARAZ_DATA_DIR=/var/data`. See paid notes in git history or ask for a Starter `render.yaml`.
 
 ## Custom domain (optional)
 
-Render dashboard → your service → **Settings → Custom Domains** → add domain → update `DARAZ_REDIRECT_URI` and Daraz callback to `https://labels.yourdomain.com/oauth/callback`.
+Render → **Settings → Custom Domains** → update `DARAZ_REDIRECT_URI` and Daraz callback to match.

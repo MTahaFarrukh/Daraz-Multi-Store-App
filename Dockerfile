@@ -7,8 +7,7 @@ RUN apt-get update \
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    CHROMIUM_PATH=/usr/bin/chromium \
-    DARAZ_DATA_DIR=/var/data
+    CHROMIUM_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
@@ -17,8 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /var/data \
-    && chmod +x scripts/start.sh
+RUN mkdir -p /app/data
+
+RUN chmod +x scripts/start.sh
 
 EXPOSE 8000
 
