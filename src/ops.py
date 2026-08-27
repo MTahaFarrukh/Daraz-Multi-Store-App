@@ -13,6 +13,7 @@ from src.label_processor import (
     LABELS_DIR,
     OUTPUT_DIR,
     LabelDocument,
+    get_html_converter,
     load_label_from_file,
     merge_labels,
     pdf_page_count,
@@ -21,6 +22,7 @@ from src.orders import (
     eligible_item_ids,
     extract_order_items,
     extract_orders,
+    is_label_eligible,
     order_preview,
 )
 from src.token_store import get_store, list_stores
@@ -158,6 +160,73 @@ def labels_from_disk(store_id: str | None = None) -> list[LabelDocument]:
     return labels
 
 
+def _items_by_order(
+    client: DarazClient,
+    order_ids: list[Any],
+) -> dict[str, list[str]]:
+    items_by_order: dict[str, list[str]] = {str(oid): [] for oid in order_ids}
+    for i in range(0, len(order_ids), 50):
+        chunk = order_ids[i : i + 50]
+        try:
+            multi = client.get_multiple_order_items(chunk)
+            data = multi.get("data")
+        except Exception:
+            data = None
+
+        parsed = False
+        if isinstance(data, list):
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                oid = str(entry.get("order_id") or "")
+                entries = (
+                    entry.get("order_items")
+                    or entry.get("orderItems")
+                    or entry.get("items")
+                    or []
+                )
+                if not isinstance(entries, list):
+                    continue
+                parsed = True
+                for item in entries:
+                    if not isinstance(item, dict) or not is_label_eligible(item):
+                        continue
+                    iid = item.get("order_item_id")
+                    if not iid:
+                        continue
+                    items_by_order.setdefault(oid, []).append(str(iid))
+
+        if not parsed:
+            for oid in chunk:
+                items_resp = client.get_order_items(oid)
+                items_by_order[str(oid)] = eligible_item_ids(
+                    extract_order_items(items_resp)
+                )
+    return items_by_order
+
+
+def _ensure_pdf_document(
+    label: LabelDocument,
+    *,
+    converter: Any | None = None,
+) -> LabelDocument:
+    """Convert HTML labels to PDF bytes; pass through real PDFs unchanged."""
+    if label.is_pdf():
+        return label
+    conv = converter or get_html_converter()
+    pdf_bytes = label.as_pdf_bytes(html_converter=conv)
+    base = label.source_filename.rsplit(".", 1)[0]
+    return LabelDocument(
+        store_id=label.store_id,
+        store_name=label.store_name,
+        order_id=label.order_id,
+        order_item_id=label.order_item_id,
+        source_filename=f"{base}.pdf",
+        mime_type="application/pdf",
+        document_bytes=pdf_bytes,
+    )
+
+
 def print_labels(
     *,
     store_id: str | None = None,
@@ -168,17 +237,18 @@ def print_labels(
     output: Path | None = None,
 ) -> dict[str, Any]:
     """
-    Fetch shipping labels in a batched Daraz call and merge to one PDF.
+    Fetch shipping labels, convert each HTML label to PDF, then merge into one PDF.
 
-    Limit = max orders (and thus labels) to include. Uses GetDocument once with
-    all eligible order_item_ids so HTML→PDF runs a single browser pass.
+    One GetDocument per order keeps HTML small so browser conversion is reliable.
+    Limit = max orders to include.
     """
     created = created_after or default_created_after()
-    labels: list[LabelDocument] = []
+    raw_labels: list[LabelDocument] = []
+    collected_item_ids: list[str] = []
     limit = max(1, min(int(limit), 20))
 
     if reuse_saved:
-        labels = labels_from_disk(store_id)[:limit]
+        raw_labels = labels_from_disk(store_id)[:limit]
     else:
         for store in resolve_stores(store_id):
             sid = str(store.get("store_id", "store"))
@@ -191,77 +261,57 @@ def print_labels(
                 offset=0,
             )
             orders = cap_orders(extract_orders(resp), limit)
-            if not orders:
-                continue
-
             order_ids = [o.get("order_id") for o in orders if o.get("order_id")]
-            item_ids: list[str] = []
-            order_for_item: dict[str, str] = {}
+            items_by_order = _items_by_order(client, order_ids)
 
-            # Batch item lookup (up to 50 orders per Daraz call).
-            for i in range(0, len(order_ids), 50):
-                chunk = order_ids[i : i + 50]
-                multi = client.get_multiple_order_items(chunk)
-                # Response shapes vary: data may be a list of {order_id, order_items}
-                data = multi.get("data")
-                if isinstance(data, list):
-                    for entry in data:
-                        if not isinstance(entry, dict):
-                            continue
-                        oid = str(entry.get("order_id") or "")
-                        entries = entry.get("order_items") or entry.get("items") or []
-                        if not isinstance(entries, list) and "order_item_id" in entry:
-                            entries = [entry]
-                        for item in entries if isinstance(entries, list) else []:
-                            if not isinstance(item, dict):
-                                continue
-                            if not is_label_eligible(item):
-                                continue
-                            iid = item.get("order_item_id")
-                            if not iid:
-                                continue
-                            iid_s = str(iid)
-                            item_ids.append(iid_s)
-                            order_for_item[iid_s] = oid or str(chunk[0])
-                else:
-                    # Fallback: per-order GetOrderItems
-                    for oid in chunk:
-                        items_resp = client.get_order_items(oid)
-                        for iid in eligible_item_ids(extract_order_items(items_resp)):
-                            item_ids.append(iid)
-                            order_for_item[iid] = str(oid)
-
-            item_ids = item_ids[:limit]
-            if not item_ids:
-                continue
-
-            # One GetDocument for all selected items → one HTML/PDF file.
-            doc_resp = client.get_shipping_label(item_ids)
-            document = (doc_resp.get("data") or {}).get("document") or {}
-            primary_order = order_for_item.get(item_ids[0], item_ids[0])
-            save_label_bytes(sid, str(primary_order), "batch", document)
-            labels.append(
-                document_from_daraz_response(
-                    doc_resp,
-                    store_id=sid,
-                    store_name=sname,
-                    order_id=str(primary_order),
-                    order_item_ids=item_ids,
+            for oid in order_ids:
+                item_ids = items_by_order.get(str(oid)) or []
+                if not item_ids:
+                    continue
+                collected_item_ids.extend(item_ids)
+                doc_resp = client.get_shipping_label(item_ids)
+                document = (doc_resp.get("data") or {}).get("document") or {}
+                save_label_bytes(sid, str(oid), item_ids[0], document)
+                raw_labels.append(
+                    document_from_daraz_response(
+                        doc_resp,
+                        store_id=sid,
+                        store_name=sname,
+                        order_id=str(oid),
+                        order_item_ids=item_ids,
+                    )
                 )
-            )
 
-    if not labels:
-        labels = labels_from_disk(store_id)[:limit]
-    if not labels:
+    if not raw_labels:
+        raw_labels = labels_from_disk(store_id)[:limit]
+    if not raw_labels:
         raise ValueError("No labels to merge.")
 
-    out = output or (OUTPUT_DIR / "combined-labels.pdf")
-    merge_labels(labels, out)
-    rel = str(out.relative_to(PROJECT_ROOT)) if out.is_relative_to(PROJECT_ROOT) else str(out)
+    converter = get_html_converter()
+    pdf_labels: list[LabelDocument] = []
+    for label in raw_labels:
+        pdf_label = _ensure_pdf_document(label, converter=converter)
+        pdf_labels.append(pdf_label)
+        out_dir = LABELS_DIR / pdf_label.store_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = out_dir / f"{pdf_label.order_id}__{pdf_label.order_item_id}.pdf"
+        pdf_path.write_bytes(pdf_label.document_bytes)
+
+    out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    merge_labels(pdf_labels, out_pdf)
+    rel = (
+        str(out_pdf.relative_to(PROJECT_ROOT))
+        if out_pdf.is_relative_to(PROJECT_ROOT)
+        else str(out_pdf)
+    )
     return {
-        "output": str(out),
+        "output": str(out_pdf),
         "output_relative": rel.replace("\\", "/"),
-        "labels": len(labels),
-        "pages": pdf_page_count(out),
-        "order_item_ids": item_ids if not reuse_saved else [],
+        "download_url": "/api/download/combined-labels",
+        "html_url": None,
+        "format": "pdf",
+        "labels": len(pdf_labels),
+        "pages": pdf_page_count(out_pdf),
+        "order_item_count": len(collected_item_ids) or len(pdf_labels),
     }

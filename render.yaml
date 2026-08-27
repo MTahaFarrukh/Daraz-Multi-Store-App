@@ -1,0 +1,29 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: daraz-multi-store
+    runtime: docker
+    plan: starter
+    region: singapore
+    healthCheckPath: /
+    disk:
+      name: daraz-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DARAZ_DATA_DIR
+        value: /var/data
+      - key: CHROMIUM_PATH
+        value: /usr/bin/chromium
+      - key: DARAZ_APP_KEY
+        sync: false
+      - key: DARAZ_APP_SECRET
+        sync: false
+      - key: DARAZ_REDIRECT_URI
+        sync: false
+      - key: DARAZ_TOKEN_KEY
+        sync: false
+      - key: DARAZ_API_BASE
+        value: https://api.daraz.pk/rest
+      - key: DARAZ_OAUTH_AUTHORIZE
+        value: https://api.daraz.pk/oauth/authorize

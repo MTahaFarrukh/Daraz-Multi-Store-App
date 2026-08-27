@@ -1,0 +1,15 @@
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.git
+.env
+data/tokens.json
+data/.token_key
+data/labels
+data/output
+*.pdf
+*.html
+.cursor
+terminals

@@ -165,11 +165,16 @@
     const limit = limitSelect.value;
     const qs = new URLSearchParams({ limit, status: "ready_to_ship" });
     if (store) qs.set("store", store);
-    setBusy(true, "Fetching labels & building PDF…");
+    setBusy(true, `Building merged PDF (up to ${limit} orders)…`);
+    const started = Date.now();
     try {
       const data = await api(`/api/print-labels?${qs}`, { method: "POST" });
+      const secs = Math.round((Date.now() - started) / 1000);
       btnDownload.classList.remove("hidden");
-      showToast(`PDF ready · ${data.pages} page(s) from ${data.labels} label(s)`);
+      btnDownload.href = data.download_url || "/api/download/combined-labels";
+      btnDownload.textContent = "Download PDF";
+      showToast(`PDF ready · ${data.pages} page(s) · ${data.labels} label(s) · ${secs}s`);
+      window.open(btnDownload.href, "_blank", "noopener");
     } catch (err) {
       showToast(err.message || "Print failed", true);
     } finally {
@@ -190,8 +195,7 @@
   loadStores()
     .then(() => {
       if ((storeSelect.options.length || 0) > 1) {
-        // auto-load a small batch for connected accounts
-        limitSelect.value = "5";
+        limitSelect.value = "3";
         return loadOrders();
       }
     })

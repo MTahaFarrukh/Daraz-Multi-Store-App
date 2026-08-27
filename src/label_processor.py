@@ -19,10 +19,7 @@ from typing import Callable, Protocol
 
 from pypdf import PdfReader, PdfWriter
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-TEST_LABELS_DIR = PROJECT_ROOT / "data" / "test_labels"
-LABELS_DIR = PROJECT_ROOT / "data" / "labels"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
+from src.config import LABELS_DIR, OUTPUT_DIR, PROJECT_ROOT, TEST_LABELS_DIR
 
 SUPPORTED_MIME_TYPES = frozenset(
     {
@@ -140,19 +137,28 @@ class ChromiumHtmlConverter:
     def convert(self, html_bytes: bytes) -> bytes:
         import subprocess
         import tempfile
+        import uuid
 
         with tempfile.TemporaryDirectory(prefix="daraz_label_") as tmp:
             tmp_path = Path(tmp)
             html_path = tmp_path / "label.html"
             pdf_path = tmp_path / "label.pdf"
+            profile = tmp_path / f"profile_{uuid.uuid4().hex}"
+            profile.mkdir(parents=True, exist_ok=True)
             html_path.write_bytes(html_bytes)
-            # file:/// URL for local HTML
             file_url = html_path.resolve().as_uri()
+            # Unique user-data-dir avoids Edge lock hangs across conversions.
             cmd = [
                 str(self.browser_path),
-                "--headless=new",
+                "--headless",
                 "--disable-gpu",
                 "--no-pdf-header-footer",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-extensions",
+                "--disable-javascript",
+                "--disable-background-networking",
+                f"--user-data-dir={profile}",
                 f"--print-to-pdf={pdf_path}",
                 file_url,
             ]
@@ -161,12 +167,12 @@ class ChromiumHtmlConverter:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=30,
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise HtmlConversionError(
-                    f"Browser HTML→PDF failed ({self.browser_path.name}): {exc}"
+                    f"Browser HTML->PDF failed ({self.browser_path.name}): {exc}"
                 ) from exc
 
             if not pdf_path.exists() or pdf_path.stat().st_size == 0:
@@ -181,8 +187,12 @@ def _candidate_browser_paths() -> list[Path]:
     import os
     import shutil
 
-    names = ("msedge", "chrome", "google-chrome", "chromium", "chromium-browser")
     found: list[Path] = []
+    chromium_env = os.environ.get("CHROMIUM_PATH", "").strip()
+    if chromium_env and Path(chromium_env).is_file():
+        found.append(Path(chromium_env))
+
+    names = ("chromium", "chromium-browser", "google-chrome", "chrome", "msedge")
     for name in names:
         which = shutil.which(name)
         if which:
@@ -192,6 +202,9 @@ def _candidate_browser_paths() -> list[Path]:
     program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
     program_files_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
     candidates = [
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/usr/bin/google-chrome"),
         Path(program_files) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
         Path(program_files_x86) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
         Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe",

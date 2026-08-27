@@ -171,7 +171,7 @@ def api_orders(
 def api_print_labels(
     store: str | None = Query(None),
     status: str = Query("ready_to_ship"),
-    limit: int = Query(10, ge=1, le=50),
+    limit: int = Query(5, ge=1, le=20),
     created_after: str | None = Query(None),
     reuse_saved: bool = Query(False),
 ) -> dict:
@@ -199,6 +199,18 @@ def download_combined_labels() -> FileResponse:
         path,
         media_type="application/pdf",
         filename="combined-labels.pdf",
+    )
+
+
+@app.get("/api/download/combined-labels-html")
+def download_combined_labels_html() -> FileResponse:
+    path = OUTPUT_DIR / "combined-labels.html"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No combined HTML yet. Print labels first.")
+    return FileResponse(
+        path,
+        media_type="text/html",
+        filename="combined-labels.html",
     )
 
 

@@ -192,11 +192,9 @@ body {
   color: var(--text);
 }
 
-.control-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.55rem;
-  justify-content: flex-end;
+.control-note {
+  grid-column: 1 / -1;
+  margin: 0.15rem 0 0;
 }
 
 .btn {

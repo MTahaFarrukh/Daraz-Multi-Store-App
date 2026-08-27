@@ -10,14 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-TOKENS_PATH = DATA_DIR / "tokens.json"
-TEST_LABEL_PATH = DATA_DIR / "test-label"
-PHASE2_REPORT_PATH = PROJECT_ROOT / "docs" / "PHASE2_LIVE_TEST.md"
-
-DEFAULT_API_BASE = "https://api.daraz.pk/rest"
-DEFAULT_OAUTH_AUTHORIZE = "https://api.daraz.pk/oauth/authorize"
-DEFAULT_REDIRECT_URI = "http://127.0.0.1:8000/oauth/callback"
 
 
 def get_env(name: str, default: str = "") -> str:
@@ -29,3 +21,23 @@ def require_env(name: str) -> str:
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
     return value
+
+
+def _resolve_data_dir() -> Path:
+    custom = get_env("DARAZ_DATA_DIR")
+    if custom:
+        return Path(custom)
+    return PROJECT_ROOT / "data"
+
+
+DATA_DIR = _resolve_data_dir()
+LABELS_DIR = DATA_DIR / "labels"
+OUTPUT_DIR = DATA_DIR / "output"
+TEST_LABELS_DIR = DATA_DIR / "test_labels"
+TOKENS_PATH = DATA_DIR / "tokens.json"
+TEST_LABEL_PATH = DATA_DIR / "test-label"
+PHASE2_REPORT_PATH = PROJECT_ROOT / "docs" / "PHASE2_LIVE_TEST.md"
+
+DEFAULT_API_BASE = "https://api.daraz.pk/rest"
+DEFAULT_OAUTH_AUTHORIZE = "https://api.daraz.pk/oauth/authorize"
+DEFAULT_REDIRECT_URI = "http://127.0.0.1:8000/oauth/callback"
