@@ -9,7 +9,10 @@ data/tokens.json
 data/.token_key
 data/labels
 data/output
+data/test-label.*
+# Do not ship local label artifacts; keep UI static files
 *.pdf
 *.html
+!src/static/**
 .cursor
 terminals

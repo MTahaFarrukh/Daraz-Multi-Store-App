@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MultiStore — Daraz Label Desk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="brand-block">
+      <p class="brand">MultiStore</p>
+      <p class="tagline">Daraz Pakistan · multi-store label desk</p>
+    </div>
+    <div class="top-actions">
+      <a class="btn btn-ghost" href="/oauth/login">Connect store</a>
+      <button type="button" class="btn btn-primary" id="btn-refresh" disabled>Refresh tokens</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="panel stores-panel" aria-labelledby="stores-heading">
+      <div class="panel-head">
+        <h2 id="stores-heading">Stores</h2>
+        <span class="meta" id="store-count">Loading…</span>
+      </div>
+      <div class="store-list" id="store-list"></div>
+    </section>
+
+    <section class="panel controls-panel" aria-labelledby="controls-heading">
+      <div class="panel-head">
+        <h2 id="controls-heading">Ready to ship</h2>
+        <p class="hint">Read-only · does not pack or RTS orders</p>
+      </div>
+      <form class="controls" id="controls-form">
+        <label>
+          <span>Store</span>
+          <select id="store-select">
+            <option value="">All stores</option>
+          </select>
+        </label>
+        <label>
+          <span>Limit</span>
+          <select id="limit-select">
+            <option value="3" selected>3 (fast)</option>
+            <option value="5">5</option>
+            <option value="10">10</option>
+            <option value="15">15</option>
+          </select>
+        </label>
+        <div class="control-actions">
+          <button type="submit" class="btn btn-primary" id="btn-load">Load orders</button>
+          <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>
+          <a class="btn btn-ghost hidden" id="btn-download" href="/api/download/combined-labels" target="_blank" rel="noopener">Download PDF</a>
+        </div>
+        <p class="hint control-note">Print converts each label to PDF then merges into one file. Start with 3-5.</p>
+      </form>
+    </section>
+
+    <section class="panel orders-panel" aria-labelledby="orders-heading">
+      <div class="panel-head">
+        <h2 id="orders-heading">Orders</h2>
+        <span class="meta" id="orders-meta">No orders loaded yet</span>
+      </div>
+      <div class="table-wrap">
+        <table class="orders-table" id="orders-table">
+          <thead>
+            <tr>
+              <th>Store</th>
+              <th>Order ID</th>
+              <th>Items</th>
+              <th>Status</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="orders-body">
+            <tr class="empty-row">
+              <td colspan="5">Connect a store, then load ready-to-ship orders.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+  <div class="busy hidden" id="busy" aria-hidden="true">
+    <div class="busy-card">
+      <div class="spinner"></div>
+      <p id="busy-text">Working…</p>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

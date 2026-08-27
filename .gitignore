@@ -22,7 +22,8 @@ data/output/**/*.pdf
 data/output/**/*.html
 data/test-label.*
 
-# Legacy / ad-hoc label output
+# Legacy / ad-hoc label output (keep src/static/*.html for dashboard UI)
 *.pdf
 *.html
+!src/static/**
 !docs/**/*.md
