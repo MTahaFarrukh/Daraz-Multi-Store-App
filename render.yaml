@@ -9,6 +9,10 @@ services:
     envVars:
       - key: CHROMIUM_PATH
         value: /usr/bin/chromium
+      - key: CHROMIUM_NO_SANDBOX
+        value: "1"
+      - key: CHROMIUM_PRINT_TIMEOUT
+        value: "60"
       - key: DARAZ_APP_KEY
         sync: false
       - key: DARAZ_APP_SECRET

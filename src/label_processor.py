@@ -128,6 +128,24 @@ class UnavailableHtmlConverter:
         )
 
 
+def _chromium_container_flags() -> list[str]:
+    """Extra flags for Chromium in Docker/Linux (e.g. Render free tier)."""
+    import os
+    import sys
+
+    if os.environ.get("CHROMIUM_NO_SANDBOX", "").lower() in {"1", "true", "yes"}:
+        return ["--no-sandbox", "--disable-dev-shm-usage"]
+    if Path("/.dockerenv").is_file():
+        return ["--no-sandbox", "--disable-dev-shm-usage"]
+    if sys.platform.startswith("linux"):
+        try:
+            if os.geteuid() == 0:
+                return ["--no-sandbox", "--disable-dev-shm-usage"]
+        except AttributeError:
+            pass
+    return []
+
+
 class ChromiumHtmlConverter:
     """HTML→PDF via Edge/Chrome headless --print-to-pdf (Windows-friendly)."""
 
@@ -135,9 +153,12 @@ class ChromiumHtmlConverter:
         self.browser_path = Path(browser_path)
 
     def convert(self, html_bytes: bytes) -> bytes:
+        import os
         import subprocess
         import tempfile
         import uuid
+
+        timeout_s = int(os.environ.get("CHROMIUM_PRINT_TIMEOUT", "60"))
 
         with tempfile.TemporaryDirectory(prefix="daraz_label_") as tmp:
             tmp_path = Path(tmp)
@@ -158,6 +179,7 @@ class ChromiumHtmlConverter:
                 "--disable-extensions",
                 "--disable-javascript",
                 "--disable-background-networking",
+                *_chromium_container_flags(),
                 f"--user-data-dir={profile}",
                 f"--print-to-pdf={pdf_path}",
                 file_url,
@@ -167,7 +189,7 @@ class ChromiumHtmlConverter:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=timeout_s,
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:

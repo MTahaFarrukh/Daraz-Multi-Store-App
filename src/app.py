@@ -22,7 +22,7 @@ from src.config import (
     require_env,
 )
 from src.daraz_api import DarazApiError, DarazClient
-from src.label_processor import OUTPUT_DIR
+from src.label_processor import OUTPUT_DIR, LabelProcessingError
 from src.ops import fetch_orders, print_labels
 from src.smoke_test import run_live_smoke_test
 from src.token_refresh import refresh_store_tokens
@@ -186,6 +186,12 @@ def api_print_labels(
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LabelProcessingError as exc:
+        logger.exception("Label PDF merge failed")
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "label_processing_error", "message": str(exc)},
+        ) from exc
     except DarazApiError as exc:
         raise _daraz_http_error(exc) from exc
 
