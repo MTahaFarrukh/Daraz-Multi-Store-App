@@ -11,6 +11,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from src.config import DATA_DIR, TOKENS_PATH, get_env
+from src.token_backend import TOKENS_KV_KEY, db_load, db_save, use_database
 
 TOKEN_KEY_PATH = DATA_DIR / ".token_key"
 ENCRYPTED_PREFIX = "DMST1:"
@@ -146,10 +147,24 @@ def _normalize_store_file(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 def load_store_file(path: Path | None = None) -> dict[str, Any]:
     """Load multi-store token file; migrates Phase 2 single-record shape."""
     target = path or TOKENS_PATH
-    if not target.exists():
+    if use_database() and path is None:
+        raw = db_load(TOKENS_KV_KEY)
+        if raw is None:
+            # One-time import from disk if DB empty but file exists (local → cloud).
+            if target.exists():
+                raw = target.read_text(encoding="utf-8")
+                plain = _decrypt_payload(raw)
+                data = json.loads(plain)
+                if isinstance(data, dict):
+                    normalized, _ = _normalize_store_file(data)
+                    save_store_file(normalized)
+                    return normalized
+            return {"stores": []}
+    elif not target.exists():
         return {"stores": []}
+    else:
+        raw = target.read_text(encoding="utf-8")
 
-    raw = target.read_text(encoding="utf-8")
     plain = _decrypt_payload(raw)
     data = json.loads(plain)
     if not isinstance(data, dict):
@@ -167,7 +182,11 @@ def save_store_file(data: dict[str, Any], path: Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {"stores": data.get("stores", [])}
     plain = json.dumps(payload, indent=2)
-    target.write_text(_encrypt_payload(plain), encoding="utf-8")
+    encrypted = _encrypt_payload(plain)
+    if use_database() and path is None:
+        db_save(TOKENS_KV_KEY, encrypted)
+        return target
+    target.write_text(encrypted, encoding="utf-8")
     return target
 
 

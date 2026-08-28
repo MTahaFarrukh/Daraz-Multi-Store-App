@@ -125,6 +125,11 @@ def oauth_callback(
 
 @app.get("/api/stores")
 def api_stores() -> dict:
+    """List connected stores; silently refresh tokens that expire soon."""
+    try:
+        refresh_store_tokens(within_minutes=60 * 24)
+    except Exception as exc:
+        logger.warning("Auto token refresh skipped: %s", exc)
     return {"stores": list_sanitized_stores()}
 
 

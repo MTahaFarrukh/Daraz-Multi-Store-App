@@ -15,11 +15,34 @@ Host the Daraz Multi-Store UI on [Render](https://render.com) **free tier** usin
 | Free tier behavior | What it means for you |
 |--------------------|------------------------|
 | Sleeps after ~15 min idle | First visit may take **30–60 seconds** to wake up |
-| No persistent disk | **Re-connect store (OAuth)** after each deploy or long restart |
-| 512 MB RAM | PDF print may be slow; use **limit 3** labels first |
+| No persistent disk by default | **Connect store once**, then set **`DATABASE_URL`** (see below) so tokens survive restarts |
+| 512 MB RAM | PDF print may be slow; use **limit 10–20** first |
 | 750 hours/month | Enough for 2 users if not running 24/7 constantly |
 
-Tokens live in the container filesystem while it is running. **`DARAZ_TOKEN_KEY` in env** keeps encryption consistent across deploys, but you still OAuth again after a fresh deploy.
+Tokens are encrypted with **`DARAZ_TOKEN_KEY`**. Without **`DATABASE_URL`** (or a paid disk), you must OAuth again after each deploy/restart.
+
+### Keep stores connected (recommended)
+
+**Do not use Render’s free Postgres** for tokens — it **expires after 30 days** (then 14 days to upgrade before data is deleted).
+
+Use **Neon** instead (free, **does not expire**, plenty for a few encrypted store tokens):
+
+1. Sign up at [Neon](https://neon.tech) → **New project**
+2. Copy the connection string (`postgresql://...`) — enable **SSL**
+3. In Render → your **web service** (not a Render DB) → **Environment**:
+   - `DATABASE_URL` = Neon connection string
+4. Redeploy, connect each store **once** — they stay connected across restarts and deploys
+
+Your token data is tiny (kilobytes). Neon’s free tier is more than enough.
+
+**If you want everything on Render (paid):**
+
+| Option | Cost | Notes |
+|--------|------|--------|
+| Render Postgres **Basic** | ~$6/mo | No 30-day expiry |
+| Web **Starter** + 1 GB disk + `DARAZ_DATA_DIR=/var/data` | ~$7/mo | File-based tokens, no Postgres |
+
+Locally you can omit `DATABASE_URL`; tokens save to `data/tokens.json` as before.
 
 ---
 
@@ -89,13 +112,13 @@ Both users bookmark the same Render URL.
 
 ## After a deploy or restart
 
-If stores show disconnected:
+If stores show disconnected and you have **not** set `DATABASE_URL`:
 
 1. Open `/oauth/login` again (or **Connect store** in the UI)
 2. Authorize in Daraz
 3. Continue as normal
 
-Access tokens still refresh for ~30 days **while the same container is running**.
+With **`DATABASE_URL`** configured, stores stay connected. The app also **auto-refreshes** tokens when you open the dashboard (no manual refresh needed unless Daraz revoked access).
 
 ---
 
@@ -106,7 +129,7 @@ Access tokens still refresh for ~30 days **while the same container is running**
 | Slow first load | Free tier waking up — wait 30–60s |
 | OAuth redirect error | `DARAZ_REDIRECT_URI` must match Daraz Console exactly |
 | Print fails | Check **Logs**; try limit 3; Chromium needs RAM on free tier |
-| Store gone after deploy | Normal on free — OAuth again |
+| Store gone after deploy | Set **`DATABASE_URL`** (Postgres) or use Starter disk + `DARAZ_DATA_DIR` |
 
 ---
 

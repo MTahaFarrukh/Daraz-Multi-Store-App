@@ -21,6 +21,8 @@ services:
         sync: false
       - key: DARAZ_TOKEN_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: DARAZ_API_BASE
         value: https://api.daraz.pk/rest
       - key: DARAZ_OAUTH_AUTHORIZE
