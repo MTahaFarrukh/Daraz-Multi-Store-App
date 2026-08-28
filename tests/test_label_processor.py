@@ -15,13 +15,15 @@ from src.label_processor import (
     LabelDocument,
     LabelMetadata,
     UnsupportedMimeTypeError,
+    UnavailableHtmlConverter,
     decode_base64_content,
     decode_label_document,
     default_label_sort_key,
-    merge_labels,
-    sort_labels,
-    UnavailableHtmlConverter,
     html_to_pdf,
+    merge_labels,
+    parse_label_page_size_mm,
+    prepare_label_html_for_print,
+    sort_labels,
 )
 
 
@@ -185,6 +187,24 @@ def test_unsupported_mime_type_raises_clear_error() -> None:
     encoded = base64.b64encode(b"hello").decode("ascii")
     with pytest.raises(UnsupportedMimeTypeError, match="Unsupported mime_type"):
         decode_label_document("application/json", encoded, _sample_metadata())
+
+
+def test_parse_daraz_label_dimensions_from_body_style() -> None:
+    html = (
+        '<div class="cn-html-body" style="height: 170mm; width: 120mm; overflow:hidden;">'
+        "<span>AWB</span></div>"
+    )
+    assert parse_label_page_size_mm(html) == (120.0, 170.0)
+
+
+def test_prepare_label_html_injects_full_page_css() -> None:
+    html = (
+        b'<div class="cn-html-body" style="height: 170mm; width: 120mm;">label</div>'
+    )
+    prepared = prepare_label_html_for_print(html).decode("utf-8")
+    assert "@page" in prepared
+    assert "120.0mm 170.0mm" in prepared
+    assert "daraz-print-fix" in prepared
 
 
 def test_html_conversion_raises_when_unavailable() -> None:

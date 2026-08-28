@@ -14,6 +14,7 @@ from src.label_processor import (
     OUTPUT_DIR,
     LabelDocument,
     get_html_converter,
+    html_converter_session,
     load_label_from_file,
     merge_labels,
     pdf_page_count,
@@ -245,7 +246,7 @@ def print_labels(
     created = created_after or default_created_after()
     raw_labels: list[LabelDocument] = []
     collected_item_ids: list[str] = []
-    limit = max(1, min(int(limit), 20))
+    limit = max(1, min(int(limit), 30))
 
     if reuse_saved:
         raw_labels = labels_from_disk(store_id)[:limit]
@@ -287,15 +288,15 @@ def print_labels(
     if not raw_labels:
         raise ValueError("No labels to merge.")
 
-    converter = get_html_converter()
-    pdf_labels: list[LabelDocument] = []
-    for label in raw_labels:
-        pdf_label = _ensure_pdf_document(label, converter=converter)
-        pdf_labels.append(pdf_label)
-        out_dir = LABELS_DIR / pdf_label.store_id
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = out_dir / f"{pdf_label.order_id}__{pdf_label.order_item_id}.pdf"
-        pdf_path.write_bytes(pdf_label.document_bytes)
+    with html_converter_session() as converter:
+        pdf_labels: list[LabelDocument] = []
+        for label in raw_labels:
+            pdf_label = _ensure_pdf_document(label, converter=converter)
+            pdf_labels.append(pdf_label)
+            out_dir = LABELS_DIR / pdf_label.store_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pdf_path = out_dir / f"{pdf_label.order_id}__{pdf_label.order_item_id}.pdf"
+            pdf_path.write_bytes(pdf_label.document_bytes)
 
     out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

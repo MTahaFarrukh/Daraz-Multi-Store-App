@@ -171,7 +171,7 @@ def api_orders(
 def api_print_labels(
     store: str | None = Query(None),
     status: str = Query("ready_to_ship"),
-    limit: int = Query(5, ge=1, le=20),
+    limit: int = Query(10, ge=1, le=30),
     created_after: str | None = Query(None),
     reuse_saved: bool = Query(False),
 ) -> dict:

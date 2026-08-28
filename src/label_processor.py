@@ -12,14 +12,31 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import json
+import logging
 import re
-from dataclasses import dataclass, field
+import socket
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 
 from pypdf import PdfReader, PdfWriter
 
 from src.config import LABELS_DIR, OUTPUT_DIR, PROJECT_ROOT, TEST_LABELS_DIR
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_LABEL_WIDTH_MM = 120.0
+DEFAULT_LABEL_HEIGHT_MM = 170.0
+DARAZ_BODY_CLASS = "cn-html-body"
+_MM_RE = re.compile(r"(?P<value>[\d.]+)\s*mm", re.IGNORECASE)
 
 SUPPORTED_MIME_TYPES = frozenset(
     {
@@ -112,6 +129,116 @@ class HtmlToPdfConverter(Protocol):
     def convert(self, html_bytes: bytes) -> bytes: ...
 
 
+def parse_label_page_size_mm(html: str) -> tuple[float, float]:
+    """Read Daraz AWB dimensions from cn-html-body inline styles (default 120x170mm)."""
+    body_match = re.search(
+        rf'class=["\']{DARAZ_BODY_CLASS}["\'][^>]*style=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    style = body_match.group(1) if body_match else html
+    width = height = None
+    for key, pattern in (
+        ("width", re.compile(r"width\s*:\s*([\d.]+)\s*mm", re.IGNORECASE)),
+        ("height", re.compile(r"height\s*:\s*([\d.]+)\s*mm", re.IGNORECASE)),
+    ):
+        match = pattern.search(style)
+        if match:
+            value = float(match.group(1))
+            if key == "width":
+                width = value
+            else:
+                height = value
+    return (
+        width or DEFAULT_LABEL_WIDTH_MM,
+        height or DEFAULT_LABEL_HEIGHT_MM,
+    )
+
+
+def prepare_label_html_for_print(html_bytes: bytes) -> bytes:
+    """
+    Inject print CSS so AWB fills the page like Seller Center.
+
+    Daraz labels are ~120x170mm and may load layoutPrintRule.js from alicdn.
+    """
+    html = html_bytes.decode("utf-8", errors="replace")
+    width_mm, height_mm = parse_label_page_size_mm(html)
+    print_css = f"""
+<style id="daraz-print-fix">
+@page {{
+  size: {width_mm}mm {height_mm}mm;
+  margin: 0;
+}}
+html, body {{
+  margin: 0 !important;
+  padding: 0 !important;
+  width: {width_mm}mm !important;
+  height: {height_mm}mm !important;
+  overflow: hidden !important;
+}}
+.{DARAZ_BODY_CLASS} {{
+  margin: 0 !important;
+}}
+</style>
+"""
+    lower = html.lower()
+    if 'id="daraz-print-fix"' in lower:
+        return html.encode("utf-8")
+    if "<head" in lower:
+        html = re.sub(r"(<head[^>]*>)", r"\1" + print_css, html, count=1, flags=re.IGNORECASE)
+    else:
+        html = print_css + html
+    return html.encode("utf-8")
+
+
+def _mm_to_inches(mm: float) -> float:
+    return mm / 25.4
+
+
+def _chromium_cdp_launch_args(browser_path: Path, port: int) -> list[str]:
+    """Minimal Chromium flags for a long-lived CDP printing session."""
+    return [
+        str(browser_path),
+        "--headless",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        f"--remote-debugging-port={port}",
+        "--remote-allow-origins=*",
+        *_chromium_container_flags(),
+    ]
+
+
+def _pick_browser_path() -> Path | None:
+    paths = _candidate_browser_paths()
+    return paths[0] if paths else None
+
+
+def _chromium_launch_args(browser_path: Path, *, remote_debugging_port: int | None = None) -> list[str]:
+    import os
+
+    args = [
+        str(browser_path),
+        "--headless",
+        "--disable-gpu",
+        "--no-pdf-header-footer",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--run-all-compositor-stages-before-draw",
+        "--remote-allow-origins=*",
+        *_chromium_container_flags(),
+    ]
+    if remote_debugging_port is not None:
+        args.append(f"--remote-debugging-port={remote_debugging_port}")
+    budget = os.environ.get("CHROMIUM_VIRTUAL_TIME_BUDGET", "15000").strip()
+    if budget:
+        args.append(f"--virtual-time-budget={budget}")
+    return args
+
+
 class UnavailableHtmlConverter:
     """
     Placeholder converter when no HTML rendering backend is installed.
@@ -147,18 +274,17 @@ def _chromium_container_flags() -> list[str]:
 
 
 class ChromiumHtmlConverter:
-    """HTML→PDF via Edge/Chrome headless --print-to-pdf (Windows-friendly)."""
+    """HTML→PDF via one-shot Edge/Chrome headless --print-to-pdf."""
 
     def __init__(self, browser_path: str | Path) -> None:
         self.browser_path = Path(browser_path)
 
     def convert(self, html_bytes: bytes) -> bytes:
         import os
-        import subprocess
-        import tempfile
-        import uuid
 
         timeout_s = int(os.environ.get("CHROMIUM_PRINT_TIMEOUT", "60"))
+        prepared = prepare_label_html_for_print(html_bytes)
+        width_mm, height_mm = parse_label_page_size_mm(prepared.decode("utf-8", errors="replace"))
 
         with tempfile.TemporaryDirectory(prefix="daraz_label_") as tmp:
             tmp_path = Path(tmp)
@@ -166,20 +292,10 @@ class ChromiumHtmlConverter:
             pdf_path = tmp_path / "label.pdf"
             profile = tmp_path / f"profile_{uuid.uuid4().hex}"
             profile.mkdir(parents=True, exist_ok=True)
-            html_path.write_bytes(html_bytes)
+            html_path.write_bytes(prepared)
             file_url = html_path.resolve().as_uri()
-            # Unique user-data-dir avoids Edge lock hangs across conversions.
             cmd = [
-                str(self.browser_path),
-                "--headless",
-                "--disable-gpu",
-                "--no-pdf-header-footer",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-extensions",
-                "--disable-javascript",
-                "--disable-background-networking",
-                *_chromium_container_flags(),
+                *_chromium_launch_args(self.browser_path),
                 f"--user-data-dir={profile}",
                 f"--print-to-pdf={pdf_path}",
                 file_url,
@@ -200,9 +316,191 @@ class ChromiumHtmlConverter:
             if not pdf_path.exists() or pdf_path.stat().st_size == 0:
                 stderr = (completed.stderr or completed.stdout or "").strip()
                 raise HtmlConversionError(
-                    f"Browser did not produce a PDF ({self.browser_path.name}). {stderr}"
+                    f"Browser did not produce a PDF ({self.browser_path.name}, "
+                    f"{width_mm}x{height_mm}mm). {stderr}"
                 )
             return pdf_path.read_bytes()
+
+
+class ChromiumCdpSession:
+    """Reuse one Chromium process for multiple label PDFs (much faster than respawning)."""
+
+    def __init__(self, browser_path: str | Path) -> None:
+        self.browser_path = Path(browser_path)
+        self._proc: subprocess.Popen[str] | None = None
+        self._ws = None
+        self._msg_id = 0
+        self._port: int | None = None
+        self._profile_dir: str | None = None
+
+    def start(self) -> None:
+        if self._proc is not None:
+            return
+        self._port = _find_free_port()
+        self._profile_dir = tempfile.mkdtemp(prefix="daraz_chromium_")
+        cmd = _chromium_cdp_launch_args(self.browser_path, self._port)
+        cmd.append(f"--user-data-dir={self._profile_dir}")
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _wait_for_devtools(self._port, self._proc)
+        page_ws = _open_page_target(self._port)
+        try:
+            from websocket import create_connection
+        except ImportError as exc:
+            raise HtmlConversionError(
+                "websocket-client is required for fast label PDF conversion. "
+                "Run: pip install websocket-client"
+            ) from exc
+        self._ws = create_connection(page_ws, timeout=30)
+
+    def close(self) -> None:
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        if self._proc is not None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+            self._proc = None
+        if self._profile_dir:
+            import shutil
+
+            shutil.rmtree(self._profile_dir, ignore_errors=True)
+            self._profile_dir = None
+
+    def __enter__(self) -> ChromiumCdpSession:
+        self.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def convert(self, html_bytes: bytes) -> bytes:
+        if self._ws is None:
+            self.start()
+        assert self._ws is not None
+
+        prepared = prepare_label_html_for_print(html_bytes)
+        html = prepared.decode("utf-8", errors="replace")
+        width_mm, height_mm = parse_label_page_size_mm(html)
+
+        with tempfile.TemporaryDirectory(prefix="daraz_label_") as tmp:
+            html_path = Path(tmp) / "label.html"
+            html_path.write_bytes(prepared)
+            file_url = html_path.resolve().as_uri()
+            self._navigate(file_url)
+            result = self._call(
+                "Page.printToPDF",
+                {
+                    "printBackground": True,
+                    "preferCSSPageSize": True,
+                    "marginTop": 0,
+                    "marginBottom": 0,
+                    "marginLeft": 0,
+                    "marginRight": 0,
+                    "paperWidth": _mm_to_inches(width_mm),
+                    "paperHeight": _mm_to_inches(height_mm),
+                    "scale": 1,
+                },
+            )
+        data = result.get("data")
+        if not data:
+            raise HtmlConversionError("Chromium CDP printToPDF returned no data")
+        return base64.b64decode(data)
+
+    def _next_id(self) -> int:
+        self._msg_id += 1
+        return self._msg_id
+
+    def _call(self, method: str, params: dict | None = None, *, timeout: float = 90) -> dict:
+        if self._ws is None:
+            raise HtmlConversionError("Chromium CDP session is not started")
+        msg_id = self._next_id()
+        self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._ws.settimeout(max(0.2, deadline - time.monotonic()))
+            try:
+                raw = self._ws.recv()
+            except Exception:
+                continue
+            data = json.loads(raw)
+            if data.get("id") != msg_id:
+                continue
+            if "error" in data:
+                raise HtmlConversionError(f"Chromium CDP {method} failed: {data['error']}")
+            return data.get("result") or {}
+        raise HtmlConversionError(f"Chromium CDP {method} timed out")
+
+    def _navigate(self, url: str) -> None:
+        import os
+
+        self._call("Page.navigate", {"url": url}, timeout=30)
+        extra_wait = float(os.environ.get("CHROMIUM_LABEL_JS_WAIT", "3.0"))
+        time.sleep(extra_wait)
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_devtools(port: int, proc: subprocess.Popen[str], *, timeout: float = 20) -> None:
+    deadline = time.monotonic() + timeout
+    version_url = f"http://127.0.0.1:{port}/json/version"
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            stderr = (proc.stderr.read() if proc.stderr else "") or "process exited"
+            raise HtmlConversionError(f"Chromium failed to start: {stderr}")
+        try:
+            with urllib.request.urlopen(version_url, timeout=2):
+                return
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(0.15)
+    raise HtmlConversionError("Timed out waiting for Chromium DevTools")
+
+
+def _open_page_target(port: int) -> str:
+    new_url = f"http://127.0.0.1:{port}/json/new"
+    req = urllib.request.Request(new_url, method="PUT", data=b"")
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    ws_url = payload.get("webSocketDebuggerUrl")
+    if not ws_url:
+        raise HtmlConversionError("Could not open Chromium page target")
+    return str(ws_url)
+
+
+@contextmanager
+def html_converter_session() -> Iterator[HtmlToPdfConverter]:
+    """
+    Prefer a reused Chromium CDP session (fast batch printing).
+    Falls back to one-shot subprocess conversion if CDP is unavailable.
+    """
+    browser = _pick_browser_path()
+    if browser is None:
+        yield get_html_converter()
+        return
+
+    session = ChromiumCdpSession(browser)
+    try:
+        session.start()
+        yield session
+    except Exception as exc:
+        logger.warning("Chromium CDP session unavailable, using slow fallback: %s", exc)
+        yield ChromiumHtmlConverter(browser)
+    finally:
+        session.close()
 
 
 def _candidate_browser_paths() -> list[Path]:

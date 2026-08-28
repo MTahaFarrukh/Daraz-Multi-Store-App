@@ -47,10 +47,11 @@
         <label>
           <span>Limit</span>
           <select id="limit-select">
-            <option value="3" selected>3 (fast)</option>
+            <option value="3">3 (fast)</option>
             <option value="5">5</option>
-            <option value="10">10</option>
-            <option value="15">15</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
           </select>
         </label>
         <div class="control-actions">
@@ -58,7 +59,7 @@
           <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>
           <a class="btn btn-ghost hidden" id="btn-download" href="/api/download/combined-labels" target="_blank" rel="noopener">Download PDF</a>
         </div>
-        <p class="hint control-note">Print converts each label to PDF then merges into one file. Start with 3-5.</p>
+        <p class="hint control-note">Print converts each label to PDF then merges into one file. Up to 30 orders; large batches take longer.</p>
       </form>
     </section>
 
