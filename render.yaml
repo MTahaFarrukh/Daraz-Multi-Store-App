@@ -12,7 +12,9 @@ services:
       - key: CHROMIUM_NO_SANDBOX
         value: "1"
       - key: CHROMIUM_PRINT_TIMEOUT
-        value: "60"
+        value: "90"
+      - key: CHROMIUM_LABEL_JS_WAIT
+        value: "1.2"
       - key: DARAZ_APP_KEY
         sync: false
       - key: DARAZ_APP_SECRET

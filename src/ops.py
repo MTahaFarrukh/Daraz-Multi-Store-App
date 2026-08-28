@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.config import DEFAULT_API_BASE, PROJECT_ROOT, get_env, require_env
 from src.daraz_api import DarazClient
@@ -236,6 +236,7 @@ def print_labels(
     created_after: str | None = None,
     reuse_saved: bool = False,
     output: Path | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """
     Fetch shipping labels, convert each HTML label to PDF, then merge into one PDF.
@@ -243,10 +244,16 @@ def print_labels(
     One GetDocument per order keeps HTML small so browser conversion is reliable.
     Limit = max orders to include.
     """
+    def progress(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
     created = created_after or default_created_after()
     raw_labels: list[LabelDocument] = []
     collected_item_ids: list[str] = []
     limit = max(1, min(int(limit), 30))
+
+    progress(f"Fetching up to {limit} orders…")
 
     if reuse_saved:
         raw_labels = labels_from_disk(store_id)[:limit]
@@ -270,6 +277,7 @@ def print_labels(
                 if not item_ids:
                     continue
                 collected_item_ids.extend(item_ids)
+                progress(f"Downloading label for order {oid}…")
                 doc_resp = client.get_shipping_label(item_ids)
                 document = (doc_resp.get("data") or {}).get("document") or {}
                 save_label_bytes(sid, str(oid), item_ids[0], document)
@@ -288,9 +296,11 @@ def print_labels(
     if not raw_labels:
         raise ValueError("No labels to merge.")
 
+    progress(f"Converting {len(raw_labels)} label(s) to PDF…")
     with html_converter_session() as converter:
         pdf_labels: list[LabelDocument] = []
-        for label in raw_labels:
+        for idx, label in enumerate(raw_labels, start=1):
+            progress(f"Rendering label {idx}/{len(raw_labels)}…")
             pdf_label = _ensure_pdf_document(label, converter=converter)
             pdf_labels.append(pdf_label)
             out_dir = LABELS_DIR / pdf_label.store_id
@@ -300,6 +310,7 @@ def print_labels(
 
     out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    progress("Merging PDF…")
     merge_labels(pdf_labels, out_pdf)
     rel = (
         str(out_pdf.relative_to(PROJECT_ROOT))

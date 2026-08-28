@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -24,6 +24,14 @@ from src.config import (
 from src.daraz_api import DarazApiError, DarazClient
 from src.label_processor import OUTPUT_DIR, LabelProcessingError
 from src.ops import fetch_orders, print_labels
+from src.print_job import (
+    begin_print_job,
+    complete_print_job,
+    fail_print_job,
+    get_print_job_state,
+    progress_callback,
+    reset_print_job_if_stale,
+)
 from src.smoke_test import run_live_smoke_test
 from src.token_refresh import refresh_store_tokens
 from src.token_store import (
@@ -174,31 +182,77 @@ def api_orders(
 
 @app.post("/api/print-labels")
 def api_print_labels(
+    background_tasks: BackgroundTasks,
     store: str | None = Query(None),
     status: str = Query("ready_to_ship"),
     limit: int = Query(10, ge=1, le=30),
     created_after: str | None = Query(None),
     reuse_saved: bool = Query(False),
+    wait: bool = Query(False, description="Block until done (local dev only)"),
 ) -> dict:
-    try:
-        result = print_labels(
-            store_id=store,
-            status=status,
-            limit=limit,
-            created_after=created_after,
-            reuse_saved=reuse_saved,
-        )
-        return result
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except LabelProcessingError as exc:
-        logger.exception("Label PDF merge failed")
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "label_processing_error", "message": str(exc)},
-        ) from exc
-    except DarazApiError as exc:
-        raise _daraz_http_error(exc) from exc
+    reset_print_job_if_stale()
+
+    def run_job() -> None:
+        try:
+            result = print_labels(
+                store_id=store,
+                status=status,
+                limit=limit,
+                created_after=created_after,
+                reuse_saved=reuse_saved,
+                on_progress=progress_callback(),
+            )
+            complete_print_job(result)
+        except ValueError as exc:
+            fail_print_job(str(exc))
+        except LabelProcessingError as exc:
+            logger.exception("Label PDF merge failed")
+            fail_print_job(str(exc))
+        except DarazApiError as exc:
+            logger.exception("Daraz API error during print")
+            fail_print_job(str(exc))
+        except Exception as exc:
+            logger.exception("Unexpected print job failure")
+            fail_print_job(f"{type(exc).__name__}: {exc}")
+
+    if wait:
+        try:
+            return print_labels(
+                store_id=store,
+                status=status,
+                limit=limit,
+                created_after=created_after,
+                reuse_saved=reuse_saved,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LabelProcessingError as exc:
+            logger.exception("Label PDF merge failed")
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "label_processing_error", "message": str(exc)},
+            ) from exc
+        except DarazApiError as exc:
+            raise _daraz_http_error(exc) from exc
+
+    if not begin_print_job():
+        raise HTTPException(status_code=409, detail="A print job is already running")
+
+    background_tasks.add_task(run_job)
+    return {
+        "status": "processing",
+        "poll_url": "/api/print-labels/status",
+        "message": "Print job started",
+    }
+
+
+@app.get("/api/print-labels/status")
+def api_print_labels_status() -> dict:
+    reset_print_job_if_stale()
+    state = get_print_job_state()
+    if state["status"] == "done" and state.get("result"):
+        return {**state, **state["result"]}
+    return state
 
 
 @app.get("/api/download/combined-labels")

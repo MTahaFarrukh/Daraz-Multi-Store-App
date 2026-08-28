@@ -160,15 +160,34 @@
     }
   }
 
+  async function pollPrintStatus(startedMs) {
+    const maxWaitMs = 25 * 60 * 1000;
+    while (Date.now() - startedMs < maxWaitMs) {
+      const data = await api("/api/print-labels/status");
+      if (data.message) {
+        busyText.textContent = data.message;
+      }
+      if (data.status === "done") {
+        return data;
+      }
+      if (data.status === "error") {
+        throw new Error(data.error || data.message || "Print failed");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    throw new Error("Print timed out — try limit 5–10 on cloud hosting");
+  }
+
   async function printLabels() {
     const store = storeSelect.value;
     const limit = limitSelect.value;
     const qs = new URLSearchParams({ limit, status: "ready_to_ship" });
     if (store) qs.set("store", store);
-    setBusy(true, `Building merged PDF (up to ${limit} orders)…`);
+    setBusy(true, `Starting print job (up to ${limit} orders)…`);
     const started = Date.now();
     try {
-      const data = await api(`/api/print-labels?${qs}`, { method: "POST" });
+      await api(`/api/print-labels?${qs}`, { method: "POST" });
+      const data = await pollPrintStatus(started);
       const secs = Math.round((Date.now() - started) / 1000);
       btnDownload.classList.remove("hidden");
       btnDownload.href = data.download_url || "/api/download/combined-labels";

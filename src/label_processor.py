@@ -204,6 +204,7 @@ def _chromium_cdp_launch_args(browser_path: Path, port: int) -> list[str]:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
+        "--disable-software-rasterizer",
         f"--remote-debugging-port={port}",
         "--remote-allow-origins=*",
         *_chromium_container_flags(),
@@ -445,7 +446,12 @@ class ChromiumCdpSession:
         import os
 
         self._call("Page.navigate", {"url": url}, timeout=30)
-        extra_wait = float(os.environ.get("CHROMIUM_LABEL_JS_WAIT", "3.0"))
+        extra_wait = float(
+            os.environ.get(
+                "CHROMIUM_LABEL_JS_WAIT",
+                "1.2" if os.environ.get("CHROMIUM_NO_SANDBOX") else "3.0",
+            )
+        )
         time.sleep(extra_wait)
 
 
