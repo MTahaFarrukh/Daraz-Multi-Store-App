@@ -45,14 +45,40 @@ def eligible_item_ids(items: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+_PACKAGE_ID_KEYS = (
+    "package_id",
+    "PackageId",
+    "packageId",
+    "fulfillment_package_id",
+    "FulfillmentPackageId",
+)
+_PACKAGE_NESTED_KEYS = ("package_info", "PackageInfo", "shipment", "fulfillment")
+
+
+def _coerce_package_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def package_id_for_items(items: list[dict[str, Any]]) -> str | None:
     """First package_id on a label-eligible line item, if any."""
     for item in items:
         if not is_label_eligible(item):
             continue
-        package_id = item.get("package_id") or item.get("PackageId")
-        if package_id:
-            return str(package_id)
+        for key in _PACKAGE_ID_KEYS:
+            package_id = _coerce_package_id(item.get(key))
+            if package_id:
+                return package_id
+        for nest_key in _PACKAGE_NESTED_KEYS:
+            nested = item.get(nest_key)
+            if not isinstance(nested, dict):
+                continue
+            for key in _PACKAGE_ID_KEYS:
+                package_id = _coerce_package_id(nested.get(key))
+                if package_id:
+                    return package_id
     return None
 
 

@@ -71,6 +71,8 @@ def _label_detail(
     fetch_source: str,
     *,
     converted: bool,
+    package_id: str | None = None,
+    fetch_notes: str | None = None,
 ) -> dict[str, Any]:
     if converted:
         display = "Daraz HTML → converted"
@@ -78,7 +80,7 @@ def _label_detail(
     else:
         display = LABEL_SOURCE_DISPLAY.get(fetch_source, "Daraz PDF")
         kind = "pdf"
-    return {
+    detail = {
         "order_id": label.order_id,
         "store_name": label.store_name,
         "mime_type": label.normalized_mime_type(),
@@ -86,7 +88,11 @@ def _label_detail(
         "converted": converted,
         "display": display,
         "kind": kind,
+        "package_id": package_id,
     }
+    if fetch_notes:
+        detail["fetch_notes"] = fetch_notes
+    return detail
 
 
 def _fetch_label_document(
@@ -97,9 +103,16 @@ def _fetch_label_document(
     order_id: str,
     item_ids: list[str],
     package_id: str | None = None,
-) -> tuple[LabelDocument, str]:
+) -> tuple[LabelDocument, str, dict[str, Any]]:
     """Prefer Daraz native PDF (PrintAWB) when package_id is known; else GetDocument."""
+    meta: dict[str, Any] = {
+        "package_id": package_id,
+        "print_awb_attempted": False,
+        "print_awb_error": None,
+    }
+
     if package_id:
+        meta["print_awb_attempted"] = True
         try:
             doc_resp = client.get_package_shipping_label(package_id, doc_type="PDF")
             label = document_from_print_awb_response(
@@ -108,14 +121,26 @@ def _fetch_label_document(
                 store_name=store_name,
                 order_id=order_id,
                 order_item_ids=item_ids,
+                download_url=client.download_binary_url,
             )
             if label.is_pdf():
                 if _save_label_artifacts():
-                    document = (doc_resp.get("data") or {})
-                    save_label_bytes(store_id, order_id, item_ids[0], document)
-                return label, "print_awb_pdf"
-        except DarazApiError:
-            pass
+                    out_dir = LABELS_DIR / store_id
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    pdf_path = out_dir / f"{order_id}__{item_ids[0]}.pdf"
+                    pdf_path.write_bytes(label.document_bytes)
+                return label, "print_awb_pdf", meta
+            meta["print_awb_error"] = "PrintAWB returned non-PDF content"
+        except DarazApiError as exc:
+            if exc.code == "InsufficientPermission":
+                meta["print_awb_error"] = (
+                    "PrintAWB not enabled for this app — enable "
+                    "/order/package/document/get in Daraz App Console"
+                )
+            else:
+                meta["print_awb_error"] = f"[{exc.code or '?'}] {exc}"
+    else:
+        meta["print_awb_error"] = "no package_id on order items"
 
     doc_resp = client.get_shipping_label(item_ids)
     document = (doc_resp.get("data") or {}).get("document") or {}
@@ -129,7 +154,7 @@ def _fetch_label_document(
         order_item_ids=item_ids,
     )
     fetch_source = "get_document_pdf" if label.is_pdf() else "get_document_html"
-    return label, fetch_source
+    return label, fetch_source, meta
 
 
 def resolve_stores(store_id: str | None = None) -> list[dict[str, Any]]:
@@ -347,6 +372,7 @@ def print_labels(
     created = created_after or default_created_after()
     raw_labels: list[LabelDocument] = []
     label_fetch_sources: list[str] = []
+    label_fetch_meta: list[dict[str, Any]] = []
     collected_item_ids: list[str] = []
     limit = max(1, min(int(limit), 30))
 
@@ -355,6 +381,7 @@ def print_labels(
     if reuse_saved:
         raw_labels = labels_from_disk(store_id)[:limit]
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
+        label_fetch_meta = [{} for _ in raw_labels]
     else:
         for store in resolve_stores(store_id):
             sid = str(store.get("store_id", "store"))
@@ -379,7 +406,7 @@ def print_labels(
 
             if work:
                 progress(f"Downloading {len(work)} label(s) in parallel…")
-                labels_by_order: dict[str, tuple[LabelDocument, str]] = {}
+                labels_by_order: dict[str, tuple[LabelDocument, str, dict[str, Any]]] = {}
                 workers = min(_print_fetch_workers(), len(work))
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {
@@ -402,14 +429,16 @@ def print_labels(
                         progress(f"Downloaded {done}/{len(work)} labels…")
 
                 for oid, item_ids, _package_id in work:
-                    label, fetch_source = labels_by_order[oid]
+                    label, fetch_source, fetch_meta = labels_by_order[oid]
                     raw_labels.append(label)
                     label_fetch_sources.append(fetch_source)
+                    label_fetch_meta.append(fetch_meta)
                     collected_item_ids.extend(item_ids)
 
     if not raw_labels:
         raw_labels = labels_from_disk(store_id)[:limit]
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
+        label_fetch_meta = [{} for _ in raw_labels]
     if not raw_labels:
         raise ValueError("No labels to merge.")
 
@@ -435,7 +464,7 @@ def print_labels(
                     pdf_labels.append(label)
                     continue
                 html_done += 1
-                progress(f"Rendering HTML label {html_done}/{html_count}…")
+                progress(f"Converting Daraz HTML to PDF ({html_done}/{html_count})…")
                 pdf_label = _ensure_pdf_document(label, converter=converter)
                 pdf_labels.append(pdf_label)
                 if _save_label_artifacts():
@@ -455,10 +484,23 @@ def print_labels(
     )
     if len(label_fetch_sources) != len(raw_labels):
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
-    label_details = [
-        _label_detail(label, fetch_source, converted=not label.is_pdf())
-        for label, fetch_source in zip(raw_labels, label_fetch_sources, strict=True)
-    ]
+        label_fetch_meta = [{} for _ in raw_labels]
+    label_details = []
+    for label, fetch_source, fetch_meta in zip(
+        raw_labels, label_fetch_sources, label_fetch_meta, strict=True
+    ):
+        notes = fetch_meta.get("print_awb_error")
+        if fetch_meta.get("print_awb_attempted") and fetch_source == "print_awb_pdf":
+            notes = None
+        label_details.append(
+            _label_detail(
+                label,
+                fetch_source,
+                converted=not label.is_pdf(),
+                package_id=fetch_meta.get("package_id"),
+                fetch_notes=notes,
+            )
+        )
     pdf_native = sum(1 for d in label_details if not d["converted"])
     html_converted = sum(1 for d in label_details if d["converted"])
     return {

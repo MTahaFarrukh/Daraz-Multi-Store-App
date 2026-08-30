@@ -326,6 +326,13 @@ body {
   animation: fade-row 0.35s ease both;
 }
 
+.notes-cell {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: normal;
+  max-width: 16rem;
+}
+
 .empty-row td {
   color: var(--muted);
   text-align: center;

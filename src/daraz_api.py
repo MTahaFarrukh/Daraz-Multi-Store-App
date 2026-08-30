@@ -285,10 +285,9 @@ class DarazClient:
         doc_type: str = "PDF",
     ) -> dict[str, Any]:
         """
-        POST /order/package/document/get — PrintAWB-style label by package_id.
+        GET/POST /order/package/document/get — PrintAWB-style label by package_id.
 
-        Lazada docs return a native PDF in data.file when doc_type=PDF. Availability
-        on api.daraz.pk is not guaranteed; callers should fall back to GetDocument.
+        Lazada docs return native PDF bytes or a signed pdf_url when doc_type=PDF.
         """
         get_document_req = json.dumps(
             {
@@ -297,11 +296,19 @@ class DarazClient:
             },
             separators=(",", ":"),
         )
-        return self._request(
-            "/order/package/document/get",
-            method="POST",
-            business_params={"getDocumentReq": get_document_req},
-        )
+        business_params = {"getDocumentReq": get_document_req}
+        try:
+            return self._request(
+                "/order/package/document/get",
+                method="GET",
+                business_params=business_params,
+            )
+        except DarazApiError:
+            return self._request(
+                "/order/package/document/get",
+                method="POST",
+                business_params=business_params,
+            )
 
     def get_package_shipping_label(
         self,
@@ -311,6 +318,17 @@ class DarazClient:
     ) -> dict[str, Any]:
         """Convenience wrapper for package AWB (PrintAWB)."""
         return self.get_package_document(package_id, doc_type=doc_type)
+
+    def download_binary_url(self, url: str) -> bytes:
+        """Download a signed OSS/pdf_url from PrintAWB (no Daraz signing required)."""
+        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+            response = client.get(url)
+        if response.status_code >= 400:
+            raise DarazApiError(
+                f"Failed to download label URL (HTTP {response.status_code})",
+                http_status=response.status_code,
+            )
+        return response.content
 
     @staticmethod
     def decode_document_file(document: dict[str, Any]) -> bytes:

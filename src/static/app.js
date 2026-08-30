@@ -141,11 +141,16 @@
       const tr = document.createElement("tr");
       const finalText = row.converted ? "PDF (converted)" : "PDF (unchanged)";
       const finalKind = row.converted ? "converted" : "pdf";
+      const noteParts = [];
+      if (row.package_id) noteParts.push(`pkg ${row.package_id}`);
+      if (row.fetch_notes) noteParts.push(row.fetch_notes);
+      const noteText = noteParts.length ? noteParts.join(" · ") : "—";
       tr.innerHTML = `
         <td>${escapeHtml(row.store_name || "—")}</td>
         <td>${escapeHtml(String(row.order_id ?? "—"))}</td>
         <td><span class="${sourcePillClass(row.kind)}">${escapeHtml(row.display || "—")}</span></td>
-        <td><span class="${sourcePillClass(finalKind)}">${escapeHtml(finalText)}</span></td>`;
+        <td><span class="${sourcePillClass(finalKind)}">${escapeHtml(finalText)}</span></td>
+        <td class="notes-cell">${escapeHtml(noteText)}</td>`;
       labelSourcesBody.appendChild(tr);
     }
   }
