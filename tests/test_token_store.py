@@ -12,7 +12,7 @@ import pytest
 from cryptography.fernet import Fernet
 from pypdf import PdfWriter
 
-from src.label_adapter import document_from_daraz_response
+from src.label_adapter import document_from_daraz_response, document_from_print_awb_response
 from src.token_refresh import refresh_store_tokens
 from src.token_store import (
     ENCRYPTED_PREFIX,
@@ -169,3 +169,21 @@ def test_label_adapter_pdf() -> None:
         order_item_ids=["444"],
     )
     assert doc.is_pdf()
+
+
+def test_label_adapter_print_awb_pdf() -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf = buf.getvalue()
+    encoded = base64.b64encode(pdf).decode("ascii")
+    doc = document_from_print_awb_response(
+        {"data": {"doc_type": "PDF", "file": encoded}},
+        store_id="store_a",
+        store_name="Store A",
+        order_id="555",
+        order_item_ids=["666"],
+    )
+    assert doc.is_pdf()
+    assert doc.order_id == "555"

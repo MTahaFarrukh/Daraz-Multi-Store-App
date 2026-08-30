@@ -278,6 +278,40 @@ class DarazClient:
         """Convenience wrapper for doc_type=shippingLabel."""
         return self.get_document(doc_type="shippingLabel", order_item_ids=order_item_ids)
 
+    def get_package_document(
+        self,
+        package_id: int | str,
+        *,
+        doc_type: str = "PDF",
+    ) -> dict[str, Any]:
+        """
+        POST /order/package/document/get — PrintAWB-style label by package_id.
+
+        Lazada docs return a native PDF in data.file when doc_type=PDF. Availability
+        on api.daraz.pk is not guaranteed; callers should fall back to GetDocument.
+        """
+        get_document_req = json.dumps(
+            {
+                "doc_type": doc_type,
+                "packages": [{"package_id": str(package_id)}],
+            },
+            separators=(",", ":"),
+        )
+        return self._request(
+            "/order/package/document/get",
+            method="POST",
+            business_params={"getDocumentReq": get_document_req},
+        )
+
+    def get_package_shipping_label(
+        self,
+        package_id: int | str,
+        *,
+        doc_type: str = "PDF",
+    ) -> dict[str, Any]:
+        """Convenience wrapper for package AWB (PrintAWB)."""
+        return self.get_package_document(package_id, doc_type=doc_type)
+
     @staticmethod
     def decode_document_file(document: dict[str, Any]) -> bytes:
         """Decode data.document.file from GetDocument response."""

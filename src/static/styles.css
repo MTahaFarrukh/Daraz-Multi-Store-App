@@ -303,6 +303,29 @@ body {
   font-weight: 700;
 }
 
+.source-pill {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.source-pill.pdf {
+  background: rgba(15, 122, 114, 0.12);
+  color: var(--teal-deep);
+}
+
+.source-pill.converted {
+  background: rgba(180, 95, 6, 0.14);
+  color: #9a4f00;
+}
+
+.label-sources-panel {
+  animation: fade-row 0.35s ease both;
+}
+
 .empty-row td {
   color: var(--muted);
   text-align: center;
