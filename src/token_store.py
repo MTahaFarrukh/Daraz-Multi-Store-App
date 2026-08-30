@@ -11,6 +11,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from src.config import DATA_DIR, TOKENS_PATH, get_env
+from src.store_display import derive_default_display_name, looks_like_email, store_display_name
 from src.token_backend import TOKENS_KV_KEY, db_load, db_save, use_database
 
 TOKEN_KEY_PATH = DATA_DIR / ".token_key"
@@ -67,9 +68,15 @@ def build_token_record(token_response: dict[str, Any]) -> dict[str, Any]:
     )
 
     store_id = make_store_id(account, seller_id)
+    display = derive_default_display_name(
+        account=account,
+        seller_id=seller_id,
+        store_id=store_id,
+    )
     return {
         "store_id": store_id,
-        "store_name": account or seller_id or store_id,
+        "display_name": display,
+        "store_name": display,
         "access_token": token_response.get("access_token", ""),
         "refresh_token": token_response.get("refresh_token", ""),
         "expires_in": expires_in,
@@ -127,8 +134,10 @@ def _ensure_store_identity(record: dict[str, Any]) -> dict[str, Any]:
         out["store_id"] = make_store_id(
             str(out.get("account", "")), str(out.get("seller_id", ""))
         )
-    if not out.get("store_name"):
-        out["store_name"] = out.get("account") or out.get("seller_id") or out["store_id"]
+    if not out.get("store_name") or looks_like_email(str(out.get("store_name", ""))):
+        out["store_name"] = store_display_name(out)
+    if not out.get("display_name"):
+        out["display_name"] = out["store_name"]
     return out
 
 
@@ -234,15 +243,36 @@ def upsert_store(record: dict[str, Any], path: Path | None = None) -> dict[str, 
     if match_idx is None:
         stores.append(store)
     else:
-        # Keep prior store_id/name if new record lacks nicer identity.
         prior = stores[match_idx]
-        if not store.get("store_name") and prior.get("store_name"):
+        if prior.get("display_name"):
+            store["display_name"] = prior["display_name"]
+            store["store_name"] = prior["display_name"]
+        elif prior.get("store_name") and not looks_like_email(str(prior["store_name"])):
+            store["display_name"] = prior["store_name"]
             store["store_name"] = prior["store_name"]
         store["store_id"] = prior.get("store_id") or store["store_id"]
-        stores[match_idx] = store
+        stores[match_idx] = _ensure_store_identity(store)
 
     save_store_file({"stores": stores}, path=path)
-    return store
+    return stores[match_idx] if match_idx is not None else store
+
+
+def update_store_display_name(
+    store_id: str,
+    display_name: str,
+    *,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Set a friendly store label shown in the dashboard (not the OAuth email)."""
+    name = display_name.strip()
+    if not name:
+        raise ValueError("Store name cannot be empty")
+    store = get_store(store_id, path=path)
+    if not store:
+        raise ValueError(f"Unknown store: {store_id}")
+    store["display_name"] = name
+    store["store_name"] = name
+    return upsert_store(store, path=path)
 
 
 def save_tokens(record: dict[str, Any], path: Path | None = None) -> Path:
@@ -273,7 +303,8 @@ def sanitize_store_view(record: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "connected": True,
         "store_id": record.get("store_id", ""),
-        "store_name": record.get("store_name", ""),
+        "display_name": store_display_name(record),
+        "store_name": store_display_name(record),
         "account": record.get("account", ""),
         "seller_id": record.get("seller_id", ""),
         "country": record.get("country", ""),

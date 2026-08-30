@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from src.config import (
     DEFAULT_API_BASE,
@@ -38,11 +39,25 @@ from src.token_store import (
     build_token_record,
     list_sanitized_stores,
     sanitize_store_view,
+    update_store_display_name,
     upsert_store,
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _parse_store_ids(
+    store: str | None,
+    stores: str | None,
+) -> tuple[str | None, list[str] | None]:
+    """Resolve ?store= vs ?stores=id1,id2 (multi-select from dashboard)."""
+    if stores is not None:
+        ids = [part.strip() for part in stores.split(",") if part.strip()]
+        if not ids:
+            raise ValueError("No stores selected. Pick at least one store.")
+        return None, ids
+    return store, None
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -141,6 +156,20 @@ def api_stores() -> dict:
     return {"stores": list_sanitized_stores()}
 
 
+class RenameStoreBody(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=80)
+
+
+@app.patch("/api/stores/{store_id}")
+def api_rename_store(store_id: str, body: RenameStoreBody) -> dict:
+    """Set a friendly store name (shown in UI instead of the OAuth email)."""
+    try:
+        record = update_store_display_name(store_id, body.display_name)
+        return {"store": sanitize_store_view(record)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/stores")
 def stores() -> dict:
     """Backward-compatible alias."""
@@ -150,10 +179,12 @@ def stores() -> dict:
 @app.post("/api/refresh-tokens")
 def api_refresh_tokens(
     store: str | None = Query(None),
+    stores: str | None = Query(None, description="Comma-separated store_id list"),
     force: bool = Query(False),
 ) -> dict:
     try:
-        results = refresh_store_tokens(store_id=store, force=force)
+        store_id, store_ids = _parse_store_ids(store, stores)
+        results = refresh_store_tokens(store_id=store_id, store_ids=store_ids, force=force)
         return {"results": results}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -162,13 +193,16 @@ def api_refresh_tokens(
 @app.get("/api/orders")
 def api_orders(
     store: str | None = Query(None),
+    stores: str | None = Query(None, description="Comma-separated store_id list"),
     status: str = Query("ready_to_ship"),
     limit: int = Query(10, ge=1, le=50),
     created_after: str | None = Query(None),
 ) -> dict:
     try:
+        store_id, store_ids = _parse_store_ids(store, stores)
         orders = fetch_orders(
-            store_id=store,
+            store_id=store_id,
+            store_ids=store_ids,
             status=status,
             limit=limit,
             created_after=created_after,
@@ -184,6 +218,7 @@ def api_orders(
 def api_print_labels(
     background_tasks: BackgroundTasks,
     store: str | None = Query(None),
+    stores: str | None = Query(None, description="Comma-separated store_id list"),
     status: str = Query("ready_to_ship"),
     limit: int = Query(10, ge=1, le=30),
     created_after: str | None = Query(None),
@@ -191,11 +226,16 @@ def api_print_labels(
     wait: bool = Query(False, description="Block until done (local dev only)"),
 ) -> dict:
     reset_print_job_if_stale()
+    try:
+        store_id, store_ids = _parse_store_ids(store, stores)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def run_job() -> None:
         try:
             result = print_labels(
-                store_id=store,
+                store_id=store_id,
+                store_ids=store_ids,
                 status=status,
                 limit=limit,
                 created_after=created_after,
@@ -218,7 +258,8 @@ def api_print_labels(
     if wait:
         try:
             return print_labels(
-                store_id=store,
+                store_id=store_id,
+                store_ids=store_ids,
                 status=status,
                 limit=limit,
                 created_after=created_after,

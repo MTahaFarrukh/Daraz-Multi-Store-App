@@ -1,7 +1,13 @@
 (() => {
   const storeList = document.getElementById("store-list");
   const storeCount = document.getElementById("store-count");
-  const storeSelect = document.getElementById("store-select");
+  const storeSelectionMeta = document.getElementById("store-selection-meta");
+  const btnSelectAll = document.getElementById("btn-select-all");
+  const btnSelectNone = document.getElementById("btn-select-none");
+  const profileSelect = document.getElementById("profile-select");
+  const profileName = document.getElementById("profile-name");
+  const btnSaveProfile = document.getElementById("btn-save-profile");
+  const btnDeleteProfile = document.getElementById("btn-delete-profile");
   const limitSelect = document.getElementById("limit-select");
   const ordersBody = document.getElementById("orders-body");
   const ordersMeta = document.getElementById("orders-meta");
@@ -16,7 +22,56 @@
   const labelSourcesMeta = document.getElementById("label-sources-meta");
   const labelSourcesBody = document.getElementById("label-sources-body");
 
+  const STORAGE_KEY = "multistore_vendor_v1";
+  let allStores = [];
   let toastTimer = null;
+
+  function loadVendorState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return { selection: [], profiles: {} };
+      const parsed = JSON.parse(raw);
+      return {
+        selection: Array.isArray(parsed.selection) ? parsed.selection : [],
+        profiles:
+          parsed.profiles && typeof parsed.profiles === "object" ? parsed.profiles : {},
+      };
+    } catch {
+      return { selection: [], profiles: {} };
+    }
+  }
+
+  function saveVendorState(state) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  function getSelection() {
+    const checked = storeList.querySelectorAll('input[type="checkbox"][data-store-id]:checked');
+    return Array.from(checked).map((el) => el.dataset.storeId || "").filter(Boolean);
+  }
+
+  function setSelection(storeIds, { persist = true } = {}) {
+    const wanted = new Set(storeIds);
+    for (const input of storeList.querySelectorAll('input[type="checkbox"][data-store-id]')) {
+      input.checked = wanted.has(input.dataset.storeId);
+      input.closest(".store-chip")?.classList.toggle("selected", input.checked);
+    }
+    updateSelectionMeta();
+    if (persist) {
+      const state = loadVendorState();
+      state.selection = getSelection();
+      saveVendorState(state);
+    }
+  }
+
+  function updateSelectionMeta() {
+    const selected = getSelection().length;
+    const total = allStores.length;
+    storeSelectionMeta.textContent =
+      total === 0 ? "0 selected" : `${selected} of ${total} selected`;
+    btnPrint.disabled = selected === 0;
+    form.querySelector("#btn-load")?.toggleAttribute("disabled", selected === 0);
+  }
 
   function showToast(message, isError = false) {
     toast.textContent = message;
@@ -56,59 +111,25 @@
     return data;
   }
 
-  function renderStores(stores) {
-    storeList.innerHTML = "";
-    storeSelect.innerHTML = '<option value="">All stores</option>';
-
-    if (!stores.length) {
-      storeCount.textContent = "0 connected";
-      storeList.innerHTML =
-        '<div class="store-chip empty">No store yet — click Connect store</div>';
-      btnRefresh.disabled = true;
-      return;
-    }
-
-    storeCount.textContent = `${stores.length} connected`;
-    btnRefresh.disabled = false;
-
-    for (const s of stores) {
-      const chip = document.createElement("div");
-      chip.className = "store-chip";
-      const days =
-        s.access_token_expires_in_seconds != null
-          ? Math.max(0, Math.round(s.access_token_expires_in_seconds / 86400))
-          : "?";
-      chip.innerHTML = `<strong>${escapeHtml(s.store_name || s.account || s.store_id)}</strong>
-        <span>${escapeHtml(s.country || "pk").toUpperCase()} · token ~${days}d left</span>`;
-      storeList.appendChild(chip);
-
-      const opt = document.createElement("option");
-      opt.value = s.store_id || "";
-      opt.textContent = s.store_name || s.account || s.store_id;
-      storeSelect.appendChild(opt);
-    }
+  function storeLabel(s) {
+    return s.display_name || s.store_name || s.account || s.store_id || "Store";
   }
 
-  function renderOrders(orders) {
-    ordersBody.innerHTML = "";
-    if (!orders.length) {
-      ordersMeta.textContent = "0 orders";
-      ordersBody.innerHTML =
-        '<tr class="empty-row"><td colspan="5">No ready-to-ship orders for this filter.</td></tr>';
+  async function renameStore(storeId, currentName) {
+    const next = window.prompt("Store display name:", currentName);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed) {
+      showToast("Name cannot be empty", true);
       return;
     }
-    ordersMeta.textContent = `${orders.length} order${orders.length === 1 ? "" : "s"}`;
-    for (const o of orders) {
-      const tr = document.createElement("tr");
-      const statuses = Array.isArray(o.statuses) ? o.statuses.join(", ") : o.statuses || "—";
-      tr.innerHTML = `
-        <td>${escapeHtml(o.store_name || o.store_id || "—")}</td>
-        <td>${escapeHtml(String(o.order_id ?? "—"))}</td>
-        <td>${escapeHtml(String(o.items_count ?? "—"))}</td>
-        <td><span class="status-pill">${escapeHtml(statuses)}</span></td>
-        <td>${escapeHtml(o.created_at || "—")}</td>`;
-      ordersBody.appendChild(tr);
-    }
+    await api(`/api/stores/${encodeURIComponent(storeId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: trimmed }),
+    });
+    await loadStores();
+    showToast(`Renamed to “${trimmed}”`);
   }
 
   function escapeHtml(value) {
@@ -117,6 +138,125 @@
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;");
+  }
+
+  function renderProfileOptions() {
+    const state = loadVendorState();
+    const current = profileSelect.value;
+    profileSelect.innerHTML = '<option value="">— Custom selection —</option>';
+    for (const name of Object.keys(state.profiles).sort()) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      profileSelect.appendChild(opt);
+    }
+    if (current && state.profiles[current]) {
+      profileSelect.value = current;
+    }
+  }
+
+  function renderStores(stores) {
+    allStores = stores;
+    storeList.innerHTML = "";
+
+    if (!stores.length) {
+      storeCount.textContent = "0 connected";
+      storeList.innerHTML =
+        '<div class="store-chip empty">No store yet — click Connect store</div>';
+      btnRefresh.disabled = true;
+      btnPrint.disabled = true;
+      updateSelectionMeta();
+      return;
+    }
+
+    storeCount.textContent = `${stores.length} connected`;
+    btnRefresh.disabled = false;
+
+    const state = loadVendorState();
+    const validIds = new Set(stores.map((s) => s.store_id));
+    let initialSelection = state.selection.filter((id) => validIds.has(id));
+    if (!initialSelection.length) {
+      initialSelection = stores.map((s) => s.store_id).filter(Boolean);
+    }
+
+    for (const s of stores) {
+      const sid = s.store_id || "";
+      const label = document.createElement("label");
+      label.className = "store-chip";
+      const days =
+        s.access_token_expires_in_seconds != null
+          ? Math.max(0, Math.round(s.access_token_expires_in_seconds / 86400))
+          : "?";
+      const checked = initialSelection.includes(sid);
+      const name = storeLabel(s);
+      const showEmail = s.account && s.account !== name;
+      if (checked) label.classList.add("selected");
+      label.innerHTML = `
+        <input type="checkbox" data-store-id="${escapeHtml(sid)}" ${checked ? "checked" : ""} />
+        <span class="store-chip-body">
+          <span class="store-chip-title">
+            <strong>${escapeHtml(name)}</strong>
+            <button type="button" class="btn-rename" title="Rename store" aria-label="Rename store">✎</button>
+          </span>
+          ${showEmail ? `<span class="store-email">${escapeHtml(s.account)}</span>` : ""}
+          <span>${escapeHtml(s.country || "pk").toUpperCase()} · token ~${days}d left</span>
+        </span>`;
+      const input = label.querySelector("input");
+      label.querySelector(".btn-rename")?.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        renameStore(sid, name).catch((err) => showToast(err.message || "Rename failed", true));
+      });
+      input.addEventListener("change", () => {
+        label.classList.toggle("selected", input.checked);
+        profileSelect.value = "";
+        updateSelectionMeta();
+        const next = loadVendorState();
+        next.selection = getSelection();
+        saveVendorState(next);
+      });
+      storeList.appendChild(label);
+    }
+
+    renderProfileOptions();
+    updateSelectionMeta();
+  }
+
+  function requireSelectedStores() {
+    const ids = getSelection();
+    if (!ids.length) {
+      throw new Error("Select at least one store above");
+    }
+    return ids;
+  }
+
+  function storeQueryParams(extra = {}) {
+    const ids = requireSelectedStores();
+    const qs = new URLSearchParams(extra);
+    qs.set("stores", ids.join(","));
+    return qs;
+  }
+
+  function renderOrders(orders) {
+    ordersBody.innerHTML = "";
+    if (!orders.length) {
+      ordersMeta.textContent = "0 orders";
+      ordersBody.innerHTML =
+        '<tr class="empty-row"><td colspan="5">No ready-to-ship orders for selected stores.</td></tr>';
+      return;
+    }
+    ordersMeta.textContent = `${orders.length} order${orders.length === 1 ? "" : "s"}`;
+    for (const o of orders) {
+      const tr = document.createElement("tr");
+      const statuses = Array.isArray(o.statuses) ? o.statuses.join(", ") : o.statuses || "—";
+      tr.innerHTML = `
+        <td>${escapeHtml(o.store_name || o.display_name || o.store_id || "—")}</td>
+        <td>${escapeHtml(String(o.order_id ?? "—"))}</td>
+        <td>${escapeHtml(String(o.items_count ?? "—"))}</td>
+        <td><span class="status-pill">${escapeHtml(statuses)}</span></td>
+        <td>${escapeHtml(o.created_at || "—")}</td>`;
+      ordersBody.appendChild(tr);
+    }
   }
 
   function sourcePillClass(kind) {
@@ -162,15 +302,16 @@
 
   async function loadOrders(event) {
     if (event) event.preventDefault();
-    const store = storeSelect.value;
-    const limit = limitSelect.value;
-    const qs = new URLSearchParams({ limit, status: "ready_to_ship" });
-    if (store) qs.set("store", store);
-    setBusy(true, "Loading orders…");
+    const qs = storeQueryParams({
+      limit: limitSelect.value,
+      status: "ready_to_ship",
+    });
+    const selected = getSelection().length;
+    setBusy(true, `Loading orders (${selected} store${selected === 1 ? "" : "s"})…`);
     try {
       const data = await api(`/api/orders?${qs}`);
       renderOrders(data.orders || []);
-      showToast(`Loaded ${data.count || 0} orders`);
+      showToast(`Loaded ${data.count || 0} orders from ${selected} store(s)`);
     } catch (err) {
       showToast(err.message || "Failed to load orders", true);
     } finally {
@@ -179,10 +320,9 @@
   }
 
   async function refreshTokens() {
-    const store = storeSelect.value;
-    const qs = new URLSearchParams({ force: "true" });
-    if (store) qs.set("store", store);
-    setBusy(true, "Refreshing tokens…");
+    const qs = storeQueryParams({ force: "true" });
+    const selected = getSelection().length;
+    setBusy(true, `Refreshing tokens (${selected} store${selected === 1 ? "" : "s"})…`);
     try {
       const data = await api(`/api/refresh-tokens?${qs}`, { method: "POST" });
       const bad = (data.results || []).filter((r) => r.status === "error");
@@ -190,7 +330,7 @@
       if (bad.length) {
         showToast(bad[0].error || "Refresh failed", true);
       } else {
-        showToast("Tokens refreshed");
+        showToast("Tokens refreshed for selected stores");
       }
     } catch (err) {
       showToast(err.message || "Refresh failed", true);
@@ -218,11 +358,12 @@
   }
 
   async function printLabels() {
-    const store = storeSelect.value;
-    const limit = limitSelect.value;
-    const qs = new URLSearchParams({ limit, status: "ready_to_ship" });
-    if (store) qs.set("store", store);
-    setBusy(true, `Starting print job (up to ${limit} orders)…`);
+    const qs = storeQueryParams({
+      limit: limitSelect.value,
+      status: "ready_to_ship",
+    });
+    const selected = getSelection().length;
+    setBusy(true, `Starting print (${selected} store${selected === 1 ? "" : "s"}, limit ${limitSelect.value} each)…`);
     const started = Date.now();
     try {
       await api(`/api/print-labels?${qs}`, { method: "POST" });
@@ -246,6 +387,72 @@
     }
   }
 
+  function saveProfile() {
+    const name = profileName.value.trim();
+    if (!name) {
+      showToast("Enter a profile name (e.g. Vendor Ali)", true);
+      return;
+    }
+    const ids = getSelection();
+    if (!ids.length) {
+      showToast("Select at least one store first", true);
+      return;
+    }
+    const state = loadVendorState();
+    state.profiles[name] = ids;
+    state.selection = ids;
+    saveVendorState(state);
+    profileSelect.value = name;
+    profileName.value = name;
+    renderProfileOptions();
+    profileSelect.value = name;
+    showToast(`Saved profile “${name}” (${ids.length} store${ids.length === 1 ? "" : "s"})`);
+  }
+
+  function loadProfile() {
+    const name = profileSelect.value;
+    if (!name) return;
+    const state = loadVendorState();
+    const ids = state.profiles[name];
+    if (!ids?.length) return;
+    setSelection(ids);
+    profileName.value = name;
+    showToast(`Loaded profile “${name}”`);
+  }
+
+  function deleteProfile() {
+    const name = profileSelect.value || profileName.value.trim();
+    if (!name) {
+      showToast("Pick a profile to delete", true);
+      return;
+    }
+    const state = loadVendorState();
+    if (!state.profiles[name]) {
+      showToast("Profile not found", true);
+      return;
+    }
+    delete state.profiles[name];
+    saveVendorState(state);
+    profileSelect.value = "";
+    profileName.value = "";
+    renderProfileOptions();
+    showToast(`Deleted profile “${name}”`);
+  }
+
+  btnSelectAll.addEventListener("click", () => {
+    profileSelect.value = "";
+    setSelection(allStores.map((s) => s.store_id).filter(Boolean));
+  });
+
+  btnSelectNone.addEventListener("click", () => {
+    profileSelect.value = "";
+    setSelection([]);
+  });
+
+  profileSelect.addEventListener("change", loadProfile);
+  btnSaveProfile.addEventListener("click", saveProfile);
+  btnDeleteProfile.addEventListener("click", deleteProfile);
+
   form.addEventListener("submit", loadOrders);
   btnRefresh.addEventListener("click", refreshTokens);
   btnPrint.addEventListener("click", printLabels);
@@ -258,7 +465,7 @@
 
   loadStores()
     .then(() => {
-      if ((storeSelect.options.length || 0) > 1) {
+      if (getSelection().length > 0) {
         limitSelect.value = "3";
         return loadOrders();
       }

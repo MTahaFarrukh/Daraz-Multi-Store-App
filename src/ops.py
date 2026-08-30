@@ -27,6 +27,7 @@ from src.orders import (
     order_label_meta,
     order_preview,
 )
+from src.store_display import store_display_name
 from src.token_store import get_store, list_stores
 
 
@@ -157,7 +158,21 @@ def _fetch_label_document(
     return label, fetch_source, meta
 
 
-def resolve_stores(store_id: str | None = None) -> list[dict[str, Any]]:
+def resolve_stores(
+    store_id: str | None = None,
+    *,
+    store_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if store_ids is not None:
+        if not store_ids:
+            raise ValueError("No stores selected. Pick at least one store.")
+        stores: list[dict[str, Any]] = []
+        for sid in store_ids:
+            store = get_store(sid)
+            if not store:
+                raise ValueError(f"Unknown store: {sid}")
+            stores.append(store)
+        return stores
     if store_id:
         store = get_store(store_id)
         if not store:
@@ -200,13 +215,14 @@ def save_label_bytes(
 def fetch_orders(
     *,
     store_id: str | None = None,
+    store_ids: list[str] | None = None,
     status: str = "ready_to_ship",
     limit: int = 10,
     created_after: str | None = None,
 ) -> list[dict[str, Any]]:
     created = created_after or default_created_after()
     rows: list[dict[str, Any]] = []
-    for store in resolve_stores(store_id):
+    for store in resolve_stores(store_id, store_ids=store_ids):
         sid = store.get("store_id", "")
         client = client_for_store(store)
         resp = client.get_orders(
@@ -218,7 +234,7 @@ def fetch_orders(
         for order in cap_orders(extract_orders(resp), limit):
             row = order_preview(order)
             row["store_id"] = sid
-            row["store_name"] = store.get("store_name", "")
+            row["store_name"] = store_display_name(store)
             rows.append(row)
     return rows
 
@@ -226,13 +242,14 @@ def fetch_orders(
 def fetch_labels(
     *,
     store_id: str | None = None,
+    store_ids: list[str] | None = None,
     status: str = "ready_to_ship",
     limit: int = 10,
     created_after: str | None = None,
 ) -> list[str]:
     created = created_after or default_created_after()
     saved: list[str] = []
-    for store in resolve_stores(store_id):
+    for store in resolve_stores(store_id, store_ids=store_ids):
         sid = str(store.get("store_id", "store"))
         client = client_for_store(store)
         resp = client.get_orders(
@@ -256,7 +273,16 @@ def fetch_labels(
     return saved
 
 
-def labels_from_disk(store_id: str | None = None) -> list[LabelDocument]:
+def labels_from_disk(
+    store_id: str | None = None,
+    *,
+    store_ids: list[str] | None = None,
+) -> list[LabelDocument]:
+    if store_ids:
+        merged: list[LabelDocument] = []
+        for sid in store_ids:
+            merged.extend(labels_from_disk(sid))
+        return merged
     if not LABELS_DIR.exists():
         return []
     labels: list[LabelDocument] = []
@@ -270,7 +296,7 @@ def labels_from_disk(store_id: str | None = None) -> list[LabelDocument]:
         if not store_dir.is_dir():
             continue
         sid = store_dir.name
-        sname = str((store_lookup.get(sid) or {}).get("store_name") or sid)
+        sname = store_display_name(store_lookup.get(sid) or {"store_id": sid})
         for path in sorted(store_dir.iterdir()):
             if path.suffix.lower() not in {".pdf", ".html"}:
                 continue
@@ -352,6 +378,7 @@ def _ensure_pdf_document(
 def print_labels(
     *,
     store_id: str | None = None,
+    store_ids: list[str] | None = None,
     status: str = "ready_to_ship",
     limit: int = 5,
     created_after: str | None = None,
@@ -379,13 +406,13 @@ def print_labels(
     progress(f"Fetching up to {limit} orders…")
 
     if reuse_saved:
-        raw_labels = labels_from_disk(store_id)[:limit]
+        raw_labels = labels_from_disk(store_id, store_ids=store_ids)[:limit]
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
         label_fetch_meta = [{} for _ in raw_labels]
     else:
-        for store in resolve_stores(store_id):
+        for store in resolve_stores(store_id, store_ids=store_ids):
             sid = str(store.get("store_id", "store"))
-            sname = str(store.get("store_name", sid))
+            sname = store_display_name(store)
             client = client_for_store(store)
             resp = client.get_orders(
                 created_after=created,
@@ -436,7 +463,7 @@ def print_labels(
                     collected_item_ids.extend(item_ids)
 
     if not raw_labels:
-        raw_labels = labels_from_disk(store_id)[:limit]
+        raw_labels = labels_from_disk(store_id, store_ids=store_ids)[:limit]
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
         label_fetch_meta = [{} for _ in raw_labels]
     if not raw_labels:

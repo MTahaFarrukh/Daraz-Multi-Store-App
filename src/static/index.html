@@ -26,10 +26,29 @@
   <main class="shell">
     <section class="panel stores-panel" aria-labelledby="stores-heading">
       <div class="panel-head">
-        <h2 id="stores-heading">Stores</h2>
+        <h2 id="stores-heading">My stores</h2>
         <span class="meta" id="store-count">Loading…</span>
       </div>
-      <div class="store-list" id="store-list"></div>
+      <p class="hint store-hint">Tick only the stores you handle. Your choice is saved in this browser.</p>
+      <div class="store-toolbar">
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-select-all">All</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-select-none">None</button>
+        <span class="meta" id="store-selection-meta">0 selected</span>
+      </div>
+      <div class="store-list" id="store-list" role="group" aria-label="Store selection"></div>
+      <div class="store-profiles">
+        <label class="profile-field">
+          <span>Saved profile</span>
+          <select id="profile-select">
+            <option value="">— Custom selection —</option>
+          </select>
+        </label>
+        <div class="profile-actions">
+          <input type="text" id="profile-name" placeholder="e.g. Vendor Ali" maxlength="40" />
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-save-profile">Save profile</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-delete-profile">Delete</button>
+        </div>
+      </div>
     </section>
 
     <section class="panel controls-panel" aria-labelledby="controls-heading">
@@ -38,12 +57,6 @@
         <p class="hint">Read-only · does not pack or RTS orders</p>
       </div>
       <form class="controls" id="controls-form">
-        <label>
-          <span>Store</span>
-          <select id="store-select">
-            <option value="">All stores</option>
-          </select>
-        </label>
         <label>
           <span>Limit</span>
           <select id="limit-select">
@@ -54,6 +67,7 @@
             <option value="30">30</option>
           </select>
         </label>
+        <p class="hint limit-hint">Limit applies <strong>per selected store</strong> (e.g. 2 stores × 10 = up to 20 orders).</p>
         <div class="control-actions">
           <button type="submit" class="btn btn-primary" id="btn-load">Load orders</button>
           <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>

@@ -51,15 +51,25 @@ def refresh_one_store(store: dict[str, Any]) -> dict[str, Any]:
 def refresh_store_tokens(
     store_id: str | None = None,
     *,
+    store_ids: list[str] | None = None,
     force: bool = False,
     within_minutes: int = 60,
 ) -> list[dict[str, Any]]:
     """
-    Refresh one store or all stores whose access token expires soon.
+    Refresh one store, selected stores, or all stores whose access token expires soon.
 
     Returns list of result dicts: {store_id, status, error?}.
     """
-    if store_id:
+    if store_ids is not None:
+        if not store_ids:
+            raise ValueError("No stores selected. Pick at least one store.")
+        targets = []
+        for sid in store_ids:
+            store = get_store(sid)
+            if not store:
+                raise ValueError(f"Unknown store_id: {sid}")
+            targets.append(store)
+    elif store_id:
         store = get_store(store_id)
         if not store:
             raise ValueError(f"Unknown store_id: {store_id}")

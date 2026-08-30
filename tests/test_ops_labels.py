@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from pypdf import PdfWriter
 
 from src.label_processor import LabelDocument
@@ -51,3 +52,18 @@ def test_label_detail_html_converted() -> None:
 
 def test_disk_fetch_source() -> None:
     assert _disk_fetch_source(_pdf_label()) == "saved_pdf"
+
+
+def test_resolve_stores_by_ids(monkeypatch) -> None:
+    from src import ops
+
+    monkeypatch.setattr(
+        ops,
+        "get_store",
+        lambda sid: {"store_id": sid, "access_token": "t"} if sid == "a" else None,
+    )
+    with pytest.raises(ValueError, match="Unknown store"):
+        ops.resolve_stores(store_ids=["a", "missing"])
+    stores = ops.resolve_stores(store_ids=["a"])
+    assert len(stores) == 1
+    assert stores[0]["store_id"] == "a"
