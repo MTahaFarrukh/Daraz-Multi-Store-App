@@ -206,17 +206,16 @@ def test_prepare_label_html_injects_page_size_in_fast_mode(monkeypatch: pytest.M
     assert "@page" in prepared
     assert "120.0mm 170.0mm" in prepared
     assert "daraz-print-fix" in prepared
+    assert prepared != html.decode("utf-8")
 
 
-def test_fidelity_mode_keeps_daraz_scripts_and_minimal_css() -> None:
+def test_fidelity_mode_keeps_html_byte_identical() -> None:
     html = (
         b'<script src="https://g.alicdn.com/foo.js"></script>'
         b'<div class="cn-html-body" style="height: 170mm; width: 120mm;">label</div>'
     )
-    prepared = prepare_label_html_for_print(html).decode("utf-8")
-    assert "alicdn.com" in prepared
-    assert "120.0mm 170.0mm" in prepared
-    assert "!important" not in prepared
+    prepared = prepare_label_html_for_print(html)
+    assert prepared == html
 
 
 def test_prepare_label_html_strips_external_scripts_in_fast_mode(

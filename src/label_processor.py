@@ -12,12 +12,14 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import http.server
 import json
 import logging
 import re
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -172,7 +174,7 @@ def _label_js_wait_seconds() -> float:
     if os.environ.get("CHROMIUM_LABEL_JS_WAIT", "").strip():
         return float(os.environ["CHROMIUM_LABEL_JS_WAIT"])
     if _is_fidelity_mode():
-        return 1.0
+        return 2.5
     if os.environ.get("CHROMIUM_NO_SANDBOX", "").lower() in {"1", "true", "yes"}:
         return 0.15
     return 0.35
@@ -205,7 +207,12 @@ def _inject_style_block(html: str, css_block: str) -> str:
 
 
 def _cdp_print_params(html: str) -> dict[str, Any]:
-    """Chromium print options — fidelity lets Daraz CSS/JS control page size."""
+    """
+    Chromium print API only — never mutates HTML.
+
+    In fidelity mode, paper size is read from Daraz cn-html-body inline styles.
+    """
+    width_mm, height_mm = parse_label_page_size_mm(html)
     params: dict[str, Any] = {
         "printBackground": True,
         "preferCSSPageSize": True,
@@ -214,11 +221,9 @@ def _cdp_print_params(html: str) -> dict[str, Any]:
         "marginLeft": 0,
         "marginRight": 0,
         "scale": 1,
+        "paperWidth": _mm_to_inches(width_mm),
+        "paperHeight": _mm_to_inches(height_mm),
     }
-    if not _is_fidelity_mode():
-        width_mm, height_mm = parse_label_page_size_mm(html)
-        params["paperWidth"] = _mm_to_inches(width_mm)
-        params["paperHeight"] = _mm_to_inches(height_mm)
     return params
 
 
@@ -226,30 +231,16 @@ def prepare_label_html_for_print(html_bytes: bytes) -> bytes:
     """
     Prepare Daraz HTML for headless print.
 
-    fidelity (default): keep Daraz HTML + layoutPrintRule.js; only zero page margins.
-    fast: strip CDN scripts and inject explicit @page size (quicker, may differ from Seller Center).
+    fidelity (default): return Daraz bytes unchanged — no CSS, scripts, or markup edits.
+    fast: optional strip/inject for speed (LABEL_PRINT_MODE=fast).
     """
+    if _is_fidelity_mode():
+        return html_bytes
+
     html = html_bytes.decode("utf-8", errors="replace")
     html = _strip_slow_external_assets(html)
-
-    if _is_fidelity_mode():
-        # Page size from Daraz inline styles (cn-html-body); do not override label layout.
-        width_mm, height_mm = parse_label_page_size_mm(html)
-        print_css = f"""
-<style id="daraz-print-fix">
-@page {{
-  size: {width_mm}mm {height_mm}mm;
-  margin: 0;
-}}
-html, body {{
-  margin: 0;
-  padding: 0;
-}}
-</style>
-"""
-    else:
-        width_mm, height_mm = parse_label_page_size_mm(html)
-        print_css = f"""
+    width_mm, height_mm = parse_label_page_size_mm(html)
+    print_css = f"""
 <style id="daraz-print-fix">
 @page {{
   size: {width_mm}mm {height_mm}mm;
@@ -267,7 +258,6 @@ html, body {{
 }}
 </style>
 """
-
     return _inject_style_block(html, print_css).encode("utf-8")
 
 
@@ -277,18 +267,19 @@ def _mm_to_inches(mm: float) -> float:
 
 def _chromium_cdp_launch_args(browser_path: Path, port: int) -> list[str]:
     """Minimal Chromium flags for a long-lived CDP printing session."""
-    return [
+    args = [
         str(browser_path),
         "--headless",
         "--disable-gpu",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-extensions",
-        "--disable-software-rasterizer",
         f"--remote-debugging-port={port}",
         "--remote-allow-origins=*",
         *_chromium_container_flags(),
     ]
+    if not _is_fidelity_mode():
+        args.extend(["--disable-extensions", "--disable-software-rasterizer"])
+    return args
 
 
 def _pick_browser_path() -> Path | None:
@@ -413,15 +404,15 @@ class ChromiumCdpSession:
         self._msg_id = 0
         self._port: int | None = None
         self._profile_dir: str | None = None
-        self._work_dir: Path | None = None
-        self._label_seq = 0
+        self._http: _LabelHttpServer | None = None
 
     def start(self) -> None:
         if self._proc is not None:
             return
         self._port = _find_free_port()
         self._profile_dir = tempfile.mkdtemp(prefix="daraz_chromium_")
-        self._work_dir = Path(tempfile.mkdtemp(prefix="daraz_label_batch_"))
+        self._http = _LabelHttpServer()
+        self._http.start()
         cmd = _chromium_cdp_launch_args(self.browser_path, self._port)
         cmd.append(f"--user-data-dir={self._profile_dir}")
         self._proc = subprocess.Popen(
@@ -460,11 +451,9 @@ class ChromiumCdpSession:
 
             shutil.rmtree(self._profile_dir, ignore_errors=True)
             self._profile_dir = None
-        if self._work_dir:
-            import shutil
-
-            shutil.rmtree(self._work_dir, ignore_errors=True)
-            self._work_dir = None
+        if self._http is not None:
+            self._http.stop()
+            self._http = None
 
     def __enter__(self) -> ChromiumCdpSession:
         self.start()
@@ -481,13 +470,11 @@ class ChromiumCdpSession:
         prepared = prepare_label_html_for_print(html_bytes)
         html = prepared.decode("utf-8", errors="replace")
 
-        if self._work_dir is None:
-            self._work_dir = Path(tempfile.mkdtemp(prefix="daraz_label_batch_"))
-        self._label_seq += 1
-        html_path = self._work_dir / f"label_{self._label_seq}.html"
-        html_path.write_bytes(prepared)
-        file_url = html_path.resolve().as_uri()
-        self._navigate(file_url)
+        if self._http is None:
+            self._http = _LabelHttpServer()
+            self._http.start()
+        self._http.set_payload(prepared)
+        self._navigate(self._http.url())
         result = self._call("Page.printToPDF", _cdp_print_params(html))
         data = result.get("data")
         if not data:
@@ -531,6 +518,51 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+class _LabelHttpServer:
+    """Serve unmodified Daraz HTML over HTTP so CDN layout scripts can run (file:// blocks them)."""
+
+    def __init__(self) -> None:
+        self._html = b""
+        self._port = _find_free_port()
+        self._server: http.server.HTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def set_payload(self, html_bytes: bytes) -> None:
+        self._html = html_bytes
+
+    def start(self) -> None:
+        if self._server is not None:
+            return
+        parent = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(parent._html)))
+                self.end_headers()
+                self.wfile.write(parent._html)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        self._server = http.server.HTTPServer(("127.0.0.1", self._port), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._port}/"
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
 
 
 def _wait_for_devtools(port: int, proc: subprocess.Popen[str], *, timeout: float = 20) -> None:
