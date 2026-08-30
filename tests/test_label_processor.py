@@ -207,6 +207,16 @@ def test_prepare_label_html_injects_full_page_css() -> None:
     assert "daraz-print-fix" in prepared
 
 
+def test_prepare_label_html_strips_external_scripts() -> None:
+    html = (
+        b'<script src="https://g.alicdn.com/foo.js"></script>'
+        b'<div class="cn-html-body" style="height: 170mm; width: 120mm;">label</div>'
+    )
+    prepared = prepare_label_html_for_print(html).decode("utf-8")
+    assert "alicdn.com" not in prepared
+    assert "cn-html-body" in prepared
+
+
 def test_html_conversion_raises_when_unavailable() -> None:
     html = b"<html><body><h1>Test</h1></body></html>"
     with pytest.raises(HtmlConversionError):

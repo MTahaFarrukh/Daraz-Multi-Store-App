@@ -155,13 +155,35 @@ def parse_label_page_size_mm(html: str) -> tuple[float, float]:
     )
 
 
+def _label_js_wait_seconds() -> float:
+    import os
+
+    if os.environ.get("CHROMIUM_LABEL_JS_WAIT", "").strip():
+        return float(os.environ["CHROMIUM_LABEL_JS_WAIT"])
+    if os.environ.get("CHROMIUM_NO_SANDBOX", "").lower() in {"1", "true", "yes"}:
+        return 0.15
+    return 0.35
+
+
+def _strip_slow_external_assets(html: str) -> str:
+    """Remove Daraz CDN scripts — layout is inline; avoids slow network waits in headless print."""
+    import os
+
+    if os.environ.get("LABEL_KEEP_EXTERNAL_SCRIPTS", "").lower() in {"1", "true", "yes"}:
+        return html
+    html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r"<script\b[^>]*/>", "", html, flags=re.IGNORECASE)
+    return html
+
+
 def prepare_label_html_for_print(html_bytes: bytes) -> bytes:
     """
     Inject print CSS so AWB fills the page like Seller Center.
 
-    Daraz labels are ~120x170mm and may load layoutPrintRule.js from alicdn.
+    Strips external scripts (slow on cloud) — inline mm styles are sufficient.
     """
     html = html_bytes.decode("utf-8", errors="replace")
+    html = _strip_slow_external_assets(html)
     width_mm, height_mm = parse_label_page_size_mm(html)
     print_css = f"""
 <style id="daraz-print-fix">
@@ -333,12 +355,15 @@ class ChromiumCdpSession:
         self._msg_id = 0
         self._port: int | None = None
         self._profile_dir: str | None = None
+        self._work_dir: Path | None = None
+        self._label_seq = 0
 
     def start(self) -> None:
         if self._proc is not None:
             return
         self._port = _find_free_port()
         self._profile_dir = tempfile.mkdtemp(prefix="daraz_chromium_")
+        self._work_dir = Path(tempfile.mkdtemp(prefix="daraz_label_batch_"))
         cmd = _chromium_cdp_launch_args(self.browser_path, self._port)
         cmd.append(f"--user-data-dir={self._profile_dir}")
         self._proc = subprocess.Popen(
@@ -377,6 +402,11 @@ class ChromiumCdpSession:
 
             shutil.rmtree(self._profile_dir, ignore_errors=True)
             self._profile_dir = None
+        if self._work_dir:
+            import shutil
+
+            shutil.rmtree(self._work_dir, ignore_errors=True)
+            self._work_dir = None
 
     def __enter__(self) -> ChromiumCdpSession:
         self.start()
@@ -394,25 +424,27 @@ class ChromiumCdpSession:
         html = prepared.decode("utf-8", errors="replace")
         width_mm, height_mm = parse_label_page_size_mm(html)
 
-        with tempfile.TemporaryDirectory(prefix="daraz_label_") as tmp:
-            html_path = Path(tmp) / "label.html"
-            html_path.write_bytes(prepared)
-            file_url = html_path.resolve().as_uri()
-            self._navigate(file_url)
-            result = self._call(
-                "Page.printToPDF",
-                {
-                    "printBackground": True,
-                    "preferCSSPageSize": True,
-                    "marginTop": 0,
-                    "marginBottom": 0,
-                    "marginLeft": 0,
-                    "marginRight": 0,
-                    "paperWidth": _mm_to_inches(width_mm),
-                    "paperHeight": _mm_to_inches(height_mm),
-                    "scale": 1,
-                },
-            )
+        if self._work_dir is None:
+            self._work_dir = Path(tempfile.mkdtemp(prefix="daraz_label_batch_"))
+        self._label_seq += 1
+        html_path = self._work_dir / f"label_{self._label_seq}.html"
+        html_path.write_bytes(prepared)
+        file_url = html_path.resolve().as_uri()
+        self._navigate(file_url)
+        result = self._call(
+            "Page.printToPDF",
+            {
+                "printBackground": True,
+                "preferCSSPageSize": True,
+                "marginTop": 0,
+                "marginBottom": 0,
+                "marginLeft": 0,
+                "marginRight": 0,
+                "paperWidth": _mm_to_inches(width_mm),
+                "paperHeight": _mm_to_inches(height_mm),
+                "scale": 1,
+            },
+        )
         data = result.get("data")
         if not data:
             raise HtmlConversionError("Chromium CDP printToPDF returned no data")
@@ -443,16 +475,12 @@ class ChromiumCdpSession:
         raise HtmlConversionError(f"Chromium CDP {method} timed out")
 
     def _navigate(self, url: str) -> None:
-        import os
-
-        self._call("Page.navigate", {"url": url}, timeout=30)
-        extra_wait = float(
-            os.environ.get(
-                "CHROMIUM_LABEL_JS_WAIT",
-                "1.2" if os.environ.get("CHROMIUM_NO_SANDBOX") else "3.0",
-            )
+        self._call(
+            "Page.navigate",
+            {"url": url, "waitUntil": "domContentLoaded"},
+            timeout=20,
         )
-        time.sleep(extra_wait)
+        time.sleep(_label_js_wait_seconds())
 
 
 def _find_free_port() -> int:

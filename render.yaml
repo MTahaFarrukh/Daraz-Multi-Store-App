@@ -14,7 +14,9 @@ services:
       - key: CHROMIUM_PRINT_TIMEOUT
         value: "90"
       - key: CHROMIUM_LABEL_JS_WAIT
-        value: "1.2"
+        value: "0.15"
+      - key: PRINT_FETCH_WORKERS
+        value: "8"
       - key: DARAZ_APP_KEY
         sync: false
       - key: DARAZ_APP_SECRET

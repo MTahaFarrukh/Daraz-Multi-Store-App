@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -38,6 +39,39 @@ def cap_orders(orders: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]
     if limit <= 0:
         return orders
     return orders[:limit]
+
+
+def _print_fetch_workers() -> int:
+    raw = get_env("PRINT_FETCH_WORKERS", "8")
+    try:
+        return max(1, min(int(raw), 16))
+    except ValueError:
+        return 8
+
+
+def _save_label_artifacts() -> bool:
+    return get_env("SAVE_LABEL_ARTIFACTS", "").lower() in {"1", "true", "yes"}
+
+
+def _fetch_label_document(
+    client: DarazClient,
+    *,
+    store_id: str,
+    store_name: str,
+    order_id: str,
+    item_ids: list[str],
+) -> LabelDocument:
+    doc_resp = client.get_shipping_label(item_ids)
+    document = (doc_resp.get("data") or {}).get("document") or {}
+    if _save_label_artifacts():
+        save_label_bytes(store_id, order_id, item_ids[0], document)
+    return document_from_daraz_response(
+        doc_resp,
+        store_id=store_id,
+        store_name=store_name,
+        order_id=order_id,
+        order_item_ids=item_ids,
+    )
 
 
 def resolve_stores(store_id: str | None = None) -> list[dict[str, Any]]:
@@ -271,25 +305,38 @@ def print_labels(
             orders = cap_orders(extract_orders(resp), limit)
             order_ids = [o.get("order_id") for o in orders if o.get("order_id")]
             items_by_order = _items_by_order(client, order_ids)
-
+            work: list[tuple[str, list[str]]] = []
             for oid in order_ids:
                 item_ids = items_by_order.get(str(oid)) or []
-                if not item_ids:
-                    continue
-                collected_item_ids.extend(item_ids)
-                progress(f"Downloading label for order {oid}…")
-                doc_resp = client.get_shipping_label(item_ids)
-                document = (doc_resp.get("data") or {}).get("document") or {}
-                save_label_bytes(sid, str(oid), item_ids[0], document)
-                raw_labels.append(
-                    document_from_daraz_response(
-                        doc_resp,
-                        store_id=sid,
-                        store_name=sname,
-                        order_id=str(oid),
-                        order_item_ids=item_ids,
-                    )
-                )
+                if item_ids:
+                    work.append((str(oid), item_ids))
+
+            if work:
+                progress(f"Downloading {len(work)} label(s) in parallel…")
+                labels_by_order: dict[str, LabelDocument] = {}
+                workers = min(_print_fetch_workers(), len(work))
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {
+                        pool.submit(
+                            _fetch_label_document,
+                            client,
+                            store_id=sid,
+                            store_name=sname,
+                            order_id=oid,
+                            item_ids=item_ids,
+                        ): oid
+                        for oid, item_ids in work
+                    }
+                    done = 0
+                    for future in as_completed(futures):
+                        oid = futures[future]
+                        labels_by_order[oid] = future.result()
+                        done += 1
+                        progress(f"Downloaded {done}/{len(work)} labels…")
+
+                for oid, item_ids in work:
+                    raw_labels.append(labels_by_order[oid])
+                    collected_item_ids.extend(item_ids)
 
     if not raw_labels:
         raw_labels = labels_from_disk(store_id)[:limit]
@@ -303,10 +350,11 @@ def print_labels(
             progress(f"Rendering label {idx}/{len(raw_labels)}…")
             pdf_label = _ensure_pdf_document(label, converter=converter)
             pdf_labels.append(pdf_label)
-            out_dir = LABELS_DIR / pdf_label.store_id
-            out_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = out_dir / f"{pdf_label.order_id}__{pdf_label.order_item_id}.pdf"
-            pdf_path.write_bytes(pdf_label.document_bytes)
+            if _save_label_artifacts():
+                out_dir = LABELS_DIR / pdf_label.store_id
+                out_dir.mkdir(parents=True, exist_ok=True)
+                pdf_path = out_dir / f"{pdf_label.order_id}__{pdf_label.order_item_id}.pdf"
+                pdf_path.write_bytes(pdf_label.document_bytes)
 
     out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
