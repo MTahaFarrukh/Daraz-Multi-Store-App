@@ -88,7 +88,10 @@ def _daraz_http_error(exc: DarazApiError) -> HTTPException:
 def root():
     index = STATIC_DIR / "index.html"
     if index.is_file():
-        return FileResponse(index)
+        return FileResponse(
+            index,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
     return HTMLResponse("<p>UI missing. Open /docs for API.</p>")
 
 

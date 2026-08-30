@@ -241,6 +241,7 @@ def upsert_store(record: dict[str, Any], path: Path | None = None) -> dict[str, 
             break
 
     if match_idx is None:
+        store = _ensure_store_identity(store)
         stores.append(store)
     else:
         prior = stores[match_idx]

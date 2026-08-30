@@ -1,26 +1,48 @@
 (() => {
-  const storeList = document.getElementById("store-list");
-  const storeCount = document.getElementById("store-count");
-  const storeSelectionMeta = document.getElementById("store-selection-meta");
-  const btnSelectAll = document.getElementById("btn-select-all");
-  const btnSelectNone = document.getElementById("btn-select-none");
-  const profileSelect = document.getElementById("profile-select");
-  const profileName = document.getElementById("profile-name");
-  const btnSaveProfile = document.getElementById("btn-save-profile");
-  const btnDeleteProfile = document.getElementById("btn-delete-profile");
-  const limitSelect = document.getElementById("limit-select");
-  const ordersBody = document.getElementById("orders-body");
-  const ordersMeta = document.getElementById("orders-meta");
-  const btnRefresh = document.getElementById("btn-refresh");
-  const btnPrint = document.getElementById("btn-print");
-  const btnDownload = document.getElementById("btn-download");
-  const form = document.getElementById("controls-form");
-  const toast = document.getElementById("toast");
-  const busy = document.getElementById("busy");
-  const busyText = document.getElementById("busy-text");
-  const labelSourcesPanel = document.getElementById("label-sources-panel");
-  const labelSourcesMeta = document.getElementById("label-sources-meta");
-  const labelSourcesBody = document.getElementById("label-sources-body");
+  const $ = (id) => document.getElementById(id);
+
+  const storeList = $("store-list");
+  const storeCount = $("store-count");
+  const storeSelectionMeta = $("store-selection-meta");
+  const btnSelectAll = $("btn-select-all");
+  const btnSelectNone = $("btn-select-none");
+  const profileSelect = $("profile-select");
+  const profileName = $("profile-name");
+  const btnSaveProfile = $("btn-save-profile");
+  const btnDeleteProfile = $("btn-delete-profile");
+  const limitSelect = $("limit-select");
+  const ordersBody = $("orders-body");
+  const ordersMeta = $("orders-meta");
+  const btnRefresh = $("btn-refresh");
+  const btnPrint = $("btn-print");
+  const btnDownload = $("btn-download");
+  const form = $("controls-form");
+  const toast = $("toast");
+  const busy = $("busy");
+  const busyText = $("busy-text");
+  const labelSourcesPanel = $("label-sources-panel");
+  const labelSourcesMeta = $("label-sources-meta");
+  const labelSourcesBody = $("label-sources-body");
+
+  const required = {
+    "store-list": storeList,
+    "store-count": storeCount,
+    "btn-refresh": btnRefresh,
+    "btn-print": btnPrint,
+    "controls-form": form,
+    "orders-body": ordersBody,
+    "toast": toast,
+  };
+  const missing = Object.entries(required).filter(([, el]) => !el).map(([id]) => id);
+  if (missing.length) {
+    document.body.insertAdjacentHTML(
+      "afterbegin",
+      `<div style="margin:1rem;padding:1rem;background:#fee;border:1px solid #c00;border-radius:8px">
+        Dashboard UI is out of date. Hard refresh (Ctrl+F5) or redeploy. Missing: ${missing.join(", ")}
+      </div>`
+    );
+    return;
+  }
 
   const STORAGE_KEY = "multistore_vendor_v1";
   let allStores = [];
@@ -67,10 +89,13 @@
   function updateSelectionMeta() {
     const selected = getSelection().length;
     const total = allStores.length;
-    storeSelectionMeta.textContent =
-      total === 0 ? "0 selected" : `${selected} of ${total} selected`;
-    btnPrint.disabled = selected === 0;
-    form.querySelector("#btn-load")?.toggleAttribute("disabled", selected === 0);
+    if (storeSelectionMeta) {
+      storeSelectionMeta.textContent =
+        total === 0 ? "0 selected" : `${selected} of ${total} selected`;
+    }
+    if (btnPrint) btnPrint.disabled = selected === 0;
+    const loadBtn = form?.querySelector("#btn-load");
+    if (loadBtn) loadBtn.disabled = selected === 0;
   }
 
   function showToast(message, isError = false) {
@@ -86,9 +111,11 @@
   }
 
   function setBusy(on, text = "Working…") {
-    busyText.textContent = text;
-    busy.classList.toggle("hidden", !on);
-    busy.setAttribute("aria-hidden", on ? "false" : "true");
+    if (busyText) busyText.textContent = text;
+    if (busy) {
+      busy.classList.toggle("hidden", !on);
+      busy.setAttribute("aria-hidden", on ? "false" : "true");
+    }
   }
 
   async function api(url, options = {}) {
@@ -141,6 +168,7 @@
   }
 
   function renderProfileOptions() {
+    if (!profileSelect) return;
     const state = loadVendorState();
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">— Custom selection —</option>';
@@ -207,9 +235,9 @@
         event.stopPropagation();
         renameStore(sid, name).catch((err) => showToast(err.message || "Rename failed", true));
       });
-      input.addEventListener("change", () => {
+      input?.addEventListener("change", () => {
         label.classList.toggle("selected", input.checked);
-        profileSelect.value = "";
+        if (profileSelect) profileSelect.value = "";
         updateSelectionMeta();
         const next = loadVendorState();
         next.selection = getSelection();
@@ -264,6 +292,7 @@
   }
 
   function renderLabelSources(data) {
+    if (!labelSourcesPanel || !labelSourcesBody) return;
     const details = data.label_details || [];
     const summary = data.label_summary || {};
     if (!details.length) {
@@ -388,6 +417,10 @@
   }
 
   function saveProfile() {
+    if (!profileName || !profileSelect) {
+      showToast("Profiles UI not available — hard refresh the page", true);
+      return;
+    }
     const name = profileName.value.trim();
     if (!name) {
       showToast("Enter a profile name (e.g. Vendor Ali)", true);
@@ -410,6 +443,7 @@
   }
 
   function loadProfile() {
+    if (!profileSelect) return;
     const name = profileSelect.value;
     if (!name) return;
     const state = loadVendorState();
@@ -421,6 +455,7 @@
   }
 
   function deleteProfile() {
+    if (!profileSelect || !profileName) return;
     const name = profileSelect.value || profileName.value.trim();
     if (!name) {
       showToast("Pick a profile to delete", true);
@@ -439,19 +474,19 @@
     showToast(`Deleted profile “${name}”`);
   }
 
-  btnSelectAll.addEventListener("click", () => {
-    profileSelect.value = "";
+  btnSelectAll?.addEventListener("click", () => {
+    if (profileSelect) profileSelect.value = "";
     setSelection(allStores.map((s) => s.store_id).filter(Boolean));
   });
 
-  btnSelectNone.addEventListener("click", () => {
-    profileSelect.value = "";
+  btnSelectNone?.addEventListener("click", () => {
+    if (profileSelect) profileSelect.value = "";
     setSelection([]);
   });
 
-  profileSelect.addEventListener("change", loadProfile);
-  btnSaveProfile.addEventListener("click", saveProfile);
-  btnDeleteProfile.addEventListener("click", deleteProfile);
+  profileSelect?.addEventListener("change", loadProfile);
+  btnSaveProfile?.addEventListener("click", saveProfile);
+  btnDeleteProfile?.addEventListener("click", deleteProfile);
 
   form.addEventListener("submit", loadOrders);
   btnRefresh.addEventListener("click", refreshTokens);
