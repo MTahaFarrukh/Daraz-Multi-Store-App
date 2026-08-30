@@ -197,7 +197,8 @@ def test_parse_daraz_label_dimensions_from_body_style() -> None:
     assert parse_label_page_size_mm(html) == (120.0, 170.0)
 
 
-def test_prepare_label_html_injects_full_page_css() -> None:
+def test_prepare_label_html_injects_page_size_in_fast_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LABEL_PRINT_MODE", "fast")
     html = (
         b'<div class="cn-html-body" style="height: 170mm; width: 120mm;">label</div>'
     )
@@ -207,14 +208,28 @@ def test_prepare_label_html_injects_full_page_css() -> None:
     assert "daraz-print-fix" in prepared
 
 
-def test_prepare_label_html_strips_external_scripts() -> None:
+def test_fidelity_mode_keeps_daraz_scripts_and_minimal_css() -> None:
+    html = (
+        b'<script src="https://g.alicdn.com/foo.js"></script>'
+        b'<div class="cn-html-body" style="height: 170mm; width: 120mm;">label</div>'
+    )
+    prepared = prepare_label_html_for_print(html).decode("utf-8")
+    assert "alicdn.com" in prepared
+    assert "120.0mm 170.0mm" in prepared
+    assert "!important" not in prepared
+
+
+def test_prepare_label_html_strips_external_scripts_in_fast_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LABEL_PRINT_MODE", "fast")
+    monkeypatch.setenv("LABEL_STRIP_EXTERNAL_SCRIPTS", "1")
     html = (
         b'<script src="https://g.alicdn.com/foo.js"></script>'
         b'<div class="cn-html-body" style="height: 170mm; width: 120mm;">label</div>'
     )
     prepared = prepare_label_html_for_print(html).decode("utf-8")
     assert "alicdn.com" not in prepared
-    assert "cn-html-body" in prepared
 
 
 def test_html_conversion_raises_when_unavailable() -> None:

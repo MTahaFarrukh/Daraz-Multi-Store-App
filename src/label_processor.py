@@ -25,7 +25,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 from pypdf import PdfReader, PdfWriter
 
@@ -155,37 +155,101 @@ def parse_label_page_size_mm(html: str) -> tuple[float, float]:
     )
 
 
+def _label_print_mode() -> str:
+    import os
+
+    mode = os.environ.get("LABEL_PRINT_MODE", "fidelity").strip().lower()
+    return mode if mode in {"fast", "fidelity"} else "fidelity"
+
+
+def _is_fidelity_mode() -> bool:
+    return _label_print_mode() == "fidelity"
+
+
 def _label_js_wait_seconds() -> float:
     import os
 
     if os.environ.get("CHROMIUM_LABEL_JS_WAIT", "").strip():
         return float(os.environ["CHROMIUM_LABEL_JS_WAIT"])
+    if _is_fidelity_mode():
+        return 1.0
     if os.environ.get("CHROMIUM_NO_SANDBOX", "").lower() in {"1", "true", "yes"}:
         return 0.15
     return 0.35
 
 
+def _navigate_wait_until() -> str:
+    return "networkidle0" if _is_fidelity_mode() else "domContentLoaded"
+
+
 def _strip_slow_external_assets(html: str) -> str:
-    """Remove Daraz CDN scripts — layout is inline; avoids slow network waits in headless print."""
+    """Remove Daraz CDN scripts — only in fast mode (can change layout)."""
     import os
 
-    if os.environ.get("LABEL_KEEP_EXTERNAL_SCRIPTS", "").lower() in {"1", "true", "yes"}:
+    if _is_fidelity_mode():
+        return html
+    if os.environ.get("LABEL_STRIP_EXTERNAL_SCRIPTS", "").lower() not in {"1", "true", "yes"}:
         return html
     html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
     html = re.sub(r"<script\b[^>]*/>", "", html, flags=re.IGNORECASE)
     return html
 
 
+def _inject_style_block(html: str, css_block: str) -> str:
+    lower = html.lower()
+    if 'id="daraz-print-fix"' in lower:
+        return html
+    if "<head" in lower:
+        return re.sub(r"(<head[^>]*>)", r"\1" + css_block, html, count=1, flags=re.IGNORECASE)
+    return css_block + html
+
+
+def _cdp_print_params(html: str) -> dict[str, Any]:
+    """Chromium print options — fidelity lets Daraz CSS/JS control page size."""
+    params: dict[str, Any] = {
+        "printBackground": True,
+        "preferCSSPageSize": True,
+        "marginTop": 0,
+        "marginBottom": 0,
+        "marginLeft": 0,
+        "marginRight": 0,
+        "scale": 1,
+    }
+    if not _is_fidelity_mode():
+        width_mm, height_mm = parse_label_page_size_mm(html)
+        params["paperWidth"] = _mm_to_inches(width_mm)
+        params["paperHeight"] = _mm_to_inches(height_mm)
+    return params
+
+
 def prepare_label_html_for_print(html_bytes: bytes) -> bytes:
     """
-    Inject print CSS so AWB fills the page like Seller Center.
+    Prepare Daraz HTML for headless print.
 
-    Strips external scripts (slow on cloud) — inline mm styles are sufficient.
+    fidelity (default): keep Daraz HTML + layoutPrintRule.js; only zero page margins.
+    fast: strip CDN scripts and inject explicit @page size (quicker, may differ from Seller Center).
     """
     html = html_bytes.decode("utf-8", errors="replace")
     html = _strip_slow_external_assets(html)
-    width_mm, height_mm = parse_label_page_size_mm(html)
-    print_css = f"""
+
+    if _is_fidelity_mode():
+        # Page size from Daraz inline styles (cn-html-body); do not override label layout.
+        width_mm, height_mm = parse_label_page_size_mm(html)
+        print_css = f"""
+<style id="daraz-print-fix">
+@page {{
+  size: {width_mm}mm {height_mm}mm;
+  margin: 0;
+}}
+html, body {{
+  margin: 0;
+  padding: 0;
+}}
+</style>
+"""
+    else:
+        width_mm, height_mm = parse_label_page_size_mm(html)
+        print_css = f"""
 <style id="daraz-print-fix">
 @page {{
   size: {width_mm}mm {height_mm}mm;
@@ -203,14 +267,8 @@ html, body {{
 }}
 </style>
 """
-    lower = html.lower()
-    if 'id="daraz-print-fix"' in lower:
-        return html.encode("utf-8")
-    if "<head" in lower:
-        html = re.sub(r"(<head[^>]*>)", r"\1" + print_css, html, count=1, flags=re.IGNORECASE)
-    else:
-        html = print_css + html
-    return html.encode("utf-8")
+
+    return _inject_style_block(html, print_css).encode("utf-8")
 
 
 def _mm_to_inches(mm: float) -> float:
@@ -422,7 +480,6 @@ class ChromiumCdpSession:
 
         prepared = prepare_label_html_for_print(html_bytes)
         html = prepared.decode("utf-8", errors="replace")
-        width_mm, height_mm = parse_label_page_size_mm(html)
 
         if self._work_dir is None:
             self._work_dir = Path(tempfile.mkdtemp(prefix="daraz_label_batch_"))
@@ -431,20 +488,7 @@ class ChromiumCdpSession:
         html_path.write_bytes(prepared)
         file_url = html_path.resolve().as_uri()
         self._navigate(file_url)
-        result = self._call(
-            "Page.printToPDF",
-            {
-                "printBackground": True,
-                "preferCSSPageSize": True,
-                "marginTop": 0,
-                "marginBottom": 0,
-                "marginLeft": 0,
-                "marginRight": 0,
-                "paperWidth": _mm_to_inches(width_mm),
-                "paperHeight": _mm_to_inches(height_mm),
-                "scale": 1,
-            },
-        )
+        result = self._call("Page.printToPDF", _cdp_print_params(html))
         data = result.get("data")
         if not data:
             raise HtmlConversionError("Chromium CDP printToPDF returned no data")
@@ -477,8 +521,8 @@ class ChromiumCdpSession:
     def _navigate(self, url: str) -> None:
         self._call(
             "Page.navigate",
-            {"url": url, "waitUntil": "domContentLoaded"},
-            timeout=20,
+            {"url": url, "waitUntil": _navigate_wait_until()},
+            timeout=45 if _is_fidelity_mode() else 20,
         )
         time.sleep(_label_js_wait_seconds())
 
