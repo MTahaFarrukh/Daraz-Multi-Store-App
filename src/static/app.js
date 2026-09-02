@@ -209,8 +209,8 @@
 
     for (const s of stores) {
       const sid = s.store_id || "";
-      const label = document.createElement("label");
-      label.className = "store-chip";
+      const chip = document.createElement("div");
+      chip.className = "store-chip";
       const days =
         s.access_token_expires_in_seconds != null
           ? Math.max(0, Math.round(s.access_token_expires_in_seconds / 86400))
@@ -218,32 +218,38 @@
       const checked = initialSelection.includes(sid);
       const name = storeLabel(s);
       const showEmail = s.account && s.account !== name;
-      if (checked) label.classList.add("selected");
-      label.innerHTML = `
-        <input type="checkbox" data-store-id="${escapeHtml(sid)}" ${checked ? "checked" : ""} />
-        <span class="store-chip-body">
-          <span class="store-chip-title">
-            <strong>${escapeHtml(name)}</strong>
-            <button type="button" class="btn-rename" title="Rename store" aria-label="Rename store">✎</button>
-          </span>
+      if (checked) chip.classList.add("selected");
+      chip.innerHTML = `
+        <input type="checkbox" data-store-id="${escapeHtml(sid)}" ${checked ? "checked" : ""} aria-label="Select ${escapeHtml(name)}" />
+        <div class="store-chip-body">
+          <div class="store-chip-title">
+            <strong class="store-chip-name">${escapeHtml(name)}</strong>
+            <button type="button" class="btn-rename" title="Rename store" aria-label="Rename store">Rename</button>
+          </div>
           ${showEmail ? `<span class="store-email">${escapeHtml(s.account)}</span>` : ""}
-          <span>${escapeHtml(s.country || "pk").toUpperCase()} · token ~${days}d left</span>
-        </span>`;
-      const input = label.querySelector("input");
-      label.querySelector(".btn-rename")?.addEventListener("click", (event) => {
+          <span class="store-chip-meta">${escapeHtml(s.country || "pk").toUpperCase()} · token ~${days}d left</span>
+        </div>`;
+      const input = chip.querySelector("input");
+      chip.querySelector(".btn-rename")?.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
         renameStore(sid, name).catch((err) => showToast(err.message || "Rename failed", true));
       });
+      chip.addEventListener("click", (event) => {
+        if (event.target.closest(".btn-rename")) return;
+        if (event.target === input) return;
+        input.checked = !input.checked;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
       input?.addEventListener("change", () => {
-        label.classList.toggle("selected", input.checked);
+        chip.classList.toggle("selected", input.checked);
         if (profileSelect) profileSelect.value = "";
         updateSelectionMeta();
         const next = loadVendorState();
         next.selection = getSelection();
         saveVendorState(next);
       });
-      storeList.appendChild(label);
+      storeList.appendChild(chip);
     }
 
     renderProfileOptions();

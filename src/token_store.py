@@ -245,12 +245,13 @@ def upsert_store(record: dict[str, Any], path: Path | None = None) -> dict[str, 
         stores.append(store)
     else:
         prior = stores[match_idx]
-        if prior.get("display_name"):
-            store["display_name"] = prior["display_name"]
-            store["store_name"] = prior["display_name"]
-        elif prior.get("store_name") and not looks_like_email(str(prior["store_name"])):
-            store["display_name"] = prior["store_name"]
-            store["store_name"] = prior["store_name"]
+        prior_display = str(
+            prior.get("display_name") or prior.get("store_name") or ""
+        ).strip()
+        # Keep a custom renamed label across OAuth token refresh.
+        if prior_display and not looks_like_email(prior_display):
+            store["display_name"] = prior_display
+            store["store_name"] = prior_display
         store["store_id"] = prior.get("store_id") or store["store_id"]
         stores[match_idx] = _ensure_store_identity(store)
 
@@ -268,12 +269,19 @@ def update_store_display_name(
     name = display_name.strip()
     if not name:
         raise ValueError("Store name cannot be empty")
-    store = get_store(store_id, path=path)
-    if not store:
-        raise ValueError(f"Unknown store: {store_id}")
-    store["display_name"] = name
-    store["store_name"] = name
-    return upsert_store(store, path=path)
+    needle = store_id.strip().lower()
+    data = load_store_file(path)
+    stores = list(data.get("stores") or [])
+    for idx, existing in enumerate(stores):
+        if str(existing.get("store_id", "")).lower() != needle:
+            continue
+        updated = dict(existing)
+        updated["display_name"] = name
+        updated["store_name"] = name
+        stores[idx] = updated
+        save_store_file({"stores": stores}, path=path)
+        return stores[idx]
+    raise ValueError(f"Unknown store: {store_id}")
 
 
 def save_tokens(record: dict[str, Any], path: Path | None = None) -> Path:

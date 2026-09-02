@@ -189,10 +189,12 @@ body {
   min-width: 0;
 }
 
-.limit-hint {
+.limit-hint,
+.control-note {
+  flex: 1 1 100%;
   font-size: 0.82rem;
   color: var(--muted);
-  grid-column: 1 / -1;
+  margin: 0;
 }
 
 .btn-sm {
@@ -261,20 +263,27 @@ body {
 }
 
 .btn-rename {
-  border: none;
-  background: transparent;
-  color: var(--muted);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--teal-deep);
   cursor: pointer;
-  padding: 0.1rem 0.25rem;
-  font-size: 0.85rem;
-  line-height: 1;
-  border-radius: 6px;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.2;
+  border-radius: 999px;
   flex-shrink: 0;
 }
 
 .btn-rename:hover {
-  color: var(--teal-deep);
-  background: rgba(15, 122, 114, 0.12);
+  color: #fff;
+  background: var(--teal-deep);
+  border-color: var(--teal-deep);
+}
+
+.store-chip-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .store-chip strong {
@@ -292,10 +301,10 @@ body {
 }
 
 .controls {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 180px)) 1fr;
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.85rem;
-  align-items: end;
+  align-items: flex-end;
 }
 
 .controls label {
@@ -306,6 +315,15 @@ body {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  min-width: min(100%, 180px);
+}
+
+.control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  flex: 1 1 220px;
 }
 
 .controls select {
@@ -319,7 +337,6 @@ body {
 }
 
 .control-note {
-  grid-column: 1 / -1;
   margin: 0.15rem 0 0;
 }
 
@@ -563,13 +580,8 @@ body {
     align-items: flex-start;
   }
 
-  .controls {
-    grid-template-columns: 1fr 1fr;
-  }
-
   .control-actions {
-    grid-column: 1 / -1;
-    justify-content: stretch;
+    width: 100%;
   }
 
   .control-actions .btn {
@@ -579,6 +591,11 @@ body {
 
 @media (max-width: 520px) {
   .controls {
-    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .control-actions .btn {
+    width: 100%;
   }
 }

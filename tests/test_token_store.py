@@ -22,6 +22,7 @@ from src.token_store import (
     list_stores,
     load_store_file,
     make_store_id,
+    update_store_display_name,
     upsert_store,
 )
 
@@ -187,3 +188,37 @@ def test_label_adapter_print_awb_pdf() -> None:
     )
     assert doc.is_pdf()
     assert doc.order_id == "555"
+
+
+def test_update_store_display_name_persists(token_paths: Path) -> None:
+    record = build_token_record(
+        {
+            "account": "vendor@shop.com",
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expires_in": 3600,
+        }
+    )
+    upsert_store(record, path=token_paths)
+    store_id = record["store_id"]
+
+    updated = update_store_display_name(store_id, "MTF Main Store", path=token_paths)
+    assert updated["display_name"] == "MTF Main Store"
+    assert updated["store_name"] == "MTF Main Store"
+
+    # upsert from OAuth refresh must not wipe a custom name
+    refreshed = build_token_record(
+        {
+            "account": "vendor@shop.com",
+            "access_token": "at2",
+            "refresh_token": "rt2",
+            "expires_in": 3600,
+        }
+    )
+    upsert_store(refreshed, path=token_paths)
+    saved = get_store(store_id, path=token_paths)
+    assert saved is not None
+    assert saved["display_name"] == "MTF Main Store"
+
+    view = list_sanitized_stores(path=token_paths)[0]
+    assert view["display_name"] == "MTF Main Store"
