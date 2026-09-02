@@ -227,7 +227,10 @@
             <button type="button" class="btn-rename" title="Rename store" aria-label="Rename store">Rename</button>
           </div>
           ${showEmail ? `<span class="store-email">${escapeHtml(s.account)}</span>` : ""}
-          <span class="store-chip-meta">${escapeHtml(s.country || "pk").toUpperCase()} · token ~${days}d left</span>
+          <span class="store-chip-meta">
+            <span class="store-country">${escapeHtml(s.country || "pk").toUpperCase()}</span>
+            <span class="token-status ${days === "?" ? "token-unknown" : days <= 3 ? "token-critical" : days <= 10 ? "token-warn" : "token-ok"}">Token · ${days}d left</span>
+          </span>
         </div>`;
       const input = chip.querySelector("input");
       chip.querySelector(".btn-rename")?.addEventListener("click", (event) => {

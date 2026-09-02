@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -30,22 +30,33 @@
         <span class="meta" id="store-count">Loading…</span>
       </div>
       <div class="store-toolbar">
-        <button type="button" class="btn btn-ghost btn-sm" id="btn-select-all">All</button>
-        <button type="button" class="btn btn-ghost btn-sm" id="btn-select-none">None</button>
-        <span class="meta" id="store-selection-meta">0 selected</span>
+        <div class="store-toolbar-group">
+          <span class="toolbar-label">Selection</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-select-all">All</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-select-none">None</button>
+        </div>
+        <span class="meta store-selection-count" id="store-selection-meta">0 selected</span>
       </div>
       <div class="store-list" id="store-list" role="group" aria-label="Store selection"></div>
       <div class="store-profiles">
-        <label class="profile-field">
-          <span>Saved profile</span>
-          <select id="profile-select">
-            <option value="">— Custom selection —</option>
-          </select>
-        </label>
-        <div class="profile-actions">
-          <input type="text" id="profile-name" placeholder="e.g. Vendor Ali" maxlength="40" />
-          <button type="button" class="btn btn-ghost btn-sm" id="btn-save-profile">Save profile</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="btn-delete-profile">Delete</button>
+        <p class="profile-section-title">Vendor profiles</p>
+        <div class="profile-grid">
+          <label class="profile-field profile-load">
+            <span>Load saved profile</span>
+            <select id="profile-select">
+              <option value="">— Custom selection —</option>
+            </select>
+          </label>
+          <div class="profile-save-block">
+            <label class="profile-field profile-name-field">
+              <span>Name for saving</span>
+              <input type="text" id="profile-name" placeholder="e.g. Vendor Ali" maxlength="40" />
+            </label>
+            <div class="profile-actions">
+              <button type="button" class="btn btn-primary btn-sm" id="btn-save-profile">Save profile</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-danger-ghost" id="btn-delete-profile">Delete</button>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -55,20 +66,25 @@
         <h2 id="controls-heading">Ready to ship</h2>
       </div>
       <form class="controls" id="controls-form">
-        <label>
-          <span>Limit</span>
-          <select id="limit-select">
+        <div class="limit-field">
+          <label for="limit-select">
+            <span>Orders per store</span>
+          </label>
+          <select id="limit-select" aria-describedby="limit-hint">
             <option value="3">3 (fast)</option>
             <option value="5">5</option>
             <option value="10" selected>10</option>
             <option value="20">20</option>
             <option value="30">30</option>
           </select>
-        </label>
+          <p class="limit-hint" id="limit-hint">Max orders fetched from each selected store</p>
+        </div>
         <div class="control-actions">
-          <button type="submit" class="btn btn-primary" id="btn-load">Load orders</button>
-          <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>
-          <a class="btn btn-ghost hidden" id="btn-download" href="/api/download/combined-labels" target="_blank" rel="noopener">Download PDF</a>
+          <div class="action-group action-group-primary">
+            <button type="submit" class="btn btn-primary" id="btn-load">Load orders</button>
+            <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>
+          </div>
+          <a class="btn btn-ghost btn-secondary-action hidden" id="btn-download" href="/api/download/combined-labels" target="_blank" rel="noopener">Download PDF</a>
         </div>
       </form>
     </section>
@@ -125,6 +141,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>
