@@ -293,39 +293,23 @@
     }
   }
 
-  function sourcePillClass(kind) {
-    return kind === "converted" ? "source-pill converted" : "source-pill pdf";
-  }
-
   function renderLabelSources(data) {
     if (!labelSourcesPanel || !labelSourcesBody) return;
     const details = data.label_details || [];
-    const summary = data.label_summary || {};
     if (!details.length) {
       labelSourcesPanel.classList.add("hidden");
       return;
     }
 
     labelSourcesPanel.classList.remove("hidden");
-    const pdfNative = summary.pdf_native ?? details.filter((d) => !d.converted).length;
-    const htmlConverted = summary.html_converted ?? details.filter((d) => d.converted).length;
-    labelSourcesMeta.textContent = `${pdfNative} native PDF · ${htmlConverted} HTML converted`;
+    labelSourcesMeta.textContent = `${details.length} label${details.length === 1 ? "" : "s"}`;
 
     labelSourcesBody.innerHTML = "";
     for (const row of details) {
       const tr = document.createElement("tr");
-      const finalText = row.converted ? "PDF (converted)" : "PDF (unchanged)";
-      const finalKind = row.converted ? "converted" : "pdf";
-      const noteParts = [];
-      if (row.package_id) noteParts.push(`pkg ${row.package_id}`);
-      if (row.fetch_notes) noteParts.push(row.fetch_notes);
-      const noteText = noteParts.length ? noteParts.join(" · ") : "—";
       tr.innerHTML = `
         <td>${escapeHtml(row.store_name || "—")}</td>
-        <td>${escapeHtml(String(row.order_id ?? "—"))}</td>
-        <td><span class="${sourcePillClass(row.kind)}">${escapeHtml(row.display || "—")}</span></td>
-        <td><span class="${sourcePillClass(finalKind)}">${escapeHtml(finalText)}</span></td>
-        <td class="notes-cell">${escapeHtml(noteText)}</td>`;
+        <td>${escapeHtml(String(row.order_id ?? "—"))}</td>`;
       labelSourcesBody.appendChild(tr);
     }
   }
@@ -408,12 +392,7 @@
       btnDownload.href = data.download_url || "/api/download/combined-labels";
       btnDownload.textContent = "Download PDF";
       renderLabelSources(data);
-      const summary = data.label_summary || {};
-      const native = summary.pdf_native ?? 0;
-      const converted = summary.html_converted ?? 0;
-      showToast(
-        `PDF ready · ${data.pages} page(s) · ${native} Daraz PDF · ${converted} converted · ${secs}s`
-      );
+      showToast(`PDF ready · ${data.pages} page(s) · ${secs}s`);
       window.open(btnDownload.href, "_blank", "noopener");
     } catch (err) {
       showToast(err.message || "Print failed", true);
@@ -424,7 +403,7 @@
 
   function saveProfile() {
     if (!profileName || !profileSelect) {
-      showToast("Profiles UI not available — hard refresh the page", true);
+      showToast("Could not save profile. Refresh the page and try again.", true);
       return;
     }
     const name = profileName.value.trim();

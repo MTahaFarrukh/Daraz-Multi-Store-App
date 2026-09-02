@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -29,7 +29,6 @@
         <h2 id="stores-heading">My stores</h2>
         <span class="meta" id="store-count">Loading…</span>
       </div>
-      <p class="hint store-hint">Tick only the stores you handle. Your choice is saved in this browser.</p>
       <div class="store-toolbar">
         <button type="button" class="btn btn-ghost btn-sm" id="btn-select-all">All</button>
         <button type="button" class="btn btn-ghost btn-sm" id="btn-select-none">None</button>
@@ -54,7 +53,6 @@
     <section class="panel controls-panel" aria-labelledby="controls-heading">
       <div class="panel-head">
         <h2 id="controls-heading">Ready to ship</h2>
-        <p class="hint">Read-only · does not pack or RTS orders</p>
       </div>
       <form class="controls" id="controls-form">
         <label>
@@ -67,19 +65,17 @@
             <option value="30">30</option>
           </select>
         </label>
-        <p class="hint limit-hint">Limit applies <strong>per selected store</strong> (e.g. 2 stores × 10 = up to 20 orders).</p>
         <div class="control-actions">
           <button type="submit" class="btn btn-primary" id="btn-load">Load orders</button>
           <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>
           <a class="btn btn-ghost hidden" id="btn-download" href="/api/download/combined-labels" target="_blank" rel="noopener">Download PDF</a>
         </div>
-        <p class="hint control-note">Labels are printed exactly as Daraz sends them (no HTML/CSS edits). Use limit 10–20 per batch.</p>
       </form>
     </section>
 
     <section class="panel label-sources-panel hidden" id="label-sources-panel" aria-labelledby="label-sources-heading">
       <div class="panel-head">
-        <h2 id="label-sources-heading">Last print — label sources</h2>
+        <h2 id="label-sources-heading">Last print</h2>
         <span class="meta" id="label-sources-meta"></span>
       </div>
       <div class="table-wrap">
@@ -88,9 +84,6 @@
             <tr>
               <th>Store</th>
               <th>Order ID</th>
-              <th>Daraz sent</th>
-              <th>Final</th>
-              <th>Notes</th>
             </tr>
           </thead>
           <tbody id="label-sources-body"></tbody>
@@ -132,6 +125,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
