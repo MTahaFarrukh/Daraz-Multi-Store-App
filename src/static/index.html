@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=6" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -16,10 +16,12 @@
     <div class="brand-block">
       <p class="brand">MultiStore</p>
       <p class="tagline">Daraz Pakistan · multi-store label desk</p>
+      <p class="meta user-meta" id="user-meta"></p>
     </div>
     <div class="top-actions">
-      <a class="btn btn-ghost" href="/oauth/login">Connect store</a>
+      <button type="button" class="btn btn-ghost" id="btn-connect">Connect store</button>
       <button type="button" class="btn btn-primary" id="btn-refresh" disabled>Refresh tokens</button>
+      <button type="button" class="btn btn-ghost" id="btn-logout">Log out</button>
     </div>
   </header>
 
@@ -84,7 +86,7 @@
             <button type="submit" class="btn btn-primary" id="btn-load">Load orders</button>
             <button type="button" class="btn btn-accent" id="btn-print">Print labels PDF</button>
           </div>
-          <a class="btn btn-ghost btn-secondary-action hidden" id="btn-download" href="/api/download/combined-labels" target="_blank" rel="noopener">Download PDF</a>
+          <a class="btn btn-ghost btn-secondary-action hidden" id="btn-download" href="#" rel="noopener">Download PDF</a>
         </div>
       </form>
     </section>
@@ -141,6 +143,8 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/static/auth.js?v=7"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

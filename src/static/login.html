@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — MultiStore</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <style>
+    .auth-shell {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 2rem 1rem;
+    }
+    .auth-card {
+      width: min(100%, 420px);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.75rem 1.5rem 1.5rem;
+    }
+    .auth-card h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 1.75rem;
+      letter-spacing: -0.03em;
+    }
+    .auth-card .sub {
+      margin: 0.4rem 0 1.25rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .auth-card label {
+      display: grid;
+      gap: 0.35rem;
+      margin-bottom: 0.85rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    .auth-card input {
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      padding: 0.7rem 0.8rem;
+      font: inherit;
+      font-size: 0.95rem;
+      color: var(--text);
+      background: #fff;
+    }
+    .auth-card input:focus {
+      outline: none;
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(15, 122, 114, 0.15);
+    }
+    .auth-actions {
+      display: grid;
+      gap: 0.55rem;
+      margin-top: 0.5rem;
+    }
+    .auth-toggle {
+      margin-top: 1rem;
+      text-align: center;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    .auth-toggle button {
+      background: none;
+      border: none;
+      color: var(--teal-deep);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .auth-error {
+      display: none;
+      margin: 0 0 0.85rem;
+      padding: 0.65rem 0.75rem;
+      border-radius: 10px;
+      background: rgba(180, 35, 24, 0.1);
+      color: var(--danger);
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+    .auth-error.show { display: block; }
+    .auth-brand {
+      font-family: var(--font-display);
+      font-weight: 800;
+      color: var(--surface-strong);
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 1.25rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+  <div class="auth-shell">
+    <div>
+      <p class="auth-brand">MultiStore</p>
+      <div class="auth-card">
+        <h1 id="auth-title">Sign in</h1>
+        <p class="sub" id="auth-sub">Access your vendor workspace</p>
+        <p class="auth-error" id="auth-error" role="alert"></p>
+        <form id="auth-form">
+          <label>
+            Email
+            <input type="email" id="email" required autocomplete="email" />
+          </label>
+          <label>
+            Password
+            <input type="password" id="password" required minlength="6" autocomplete="current-password" />
+          </label>
+          <div class="auth-actions">
+            <button type="submit" class="btn btn-primary" id="auth-submit">Sign in</button>
+          </div>
+        </form>
+        <p class="auth-toggle">
+          <span id="toggle-text">Need an account?</span>
+          <button type="button" id="auth-toggle">Create one</button>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/static/auth.js?v=7"></script>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      let mode = params.get("mode") === "signup" ? "signup" : "login";
+      const title = document.getElementById("auth-title");
+      const sub = document.getElementById("auth-sub");
+      const submit = document.getElementById("auth-submit");
+      const toggleText = document.getElementById("toggle-text");
+      const toggleBtn = document.getElementById("auth-toggle");
+      const err = document.getElementById("auth-error");
+      const form = document.getElementById("auth-form");
+
+      function showError(msg) {
+        err.textContent = msg || "Something went wrong";
+        err.classList.add("show");
+      }
+
+      function clearError() {
+        err.textContent = "";
+        err.classList.remove("show");
+      }
+
+      function renderMode() {
+        clearError();
+        if (mode === "signup") {
+          title.textContent = "Create account";
+          sub.textContent = "We'll create your vendor workspace automatically";
+          submit.textContent = "Sign up";
+          toggleText.textContent = "Already have an account?";
+          toggleBtn.textContent = "Sign in";
+        } else {
+          title.textContent = "Sign in";
+          sub.textContent = "Access your vendor workspace";
+          submit.textContent = "Sign in";
+          toggleText.textContent = "Need an account?";
+          toggleBtn.textContent = "Create one";
+        }
+      }
+
+      toggleBtn.addEventListener("click", () => {
+        mode = mode === "signup" ? "login" : "signup";
+        renderMode();
+      });
+
+      MultiStoreAuth.ready().then(async (ok) => {
+        if (!ok) {
+          showError("Supabase is not configured. Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY.");
+          return;
+        }
+        const session = await MultiStoreAuth.getSession();
+        if (session) {
+          location.replace("/");
+          return;
+        }
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearError();
+        submit.disabled = true;
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
+        try {
+          if (mode === "signup") {
+            await MultiStoreAuth.signUp(email, password);
+          } else {
+            await MultiStoreAuth.signIn(email, password);
+          }
+          await MultiStoreAuth.bootstrapWorkspace();
+          location.replace("/");
+        } catch (e) {
+          showError(e.message || String(e));
+        } finally {
+          submit.disabled = false;
+        }
+      });
+
+      if (params.get("need_auth") === "1") {
+        showError("Sign in first, then connect a Daraz store.");
+      }
+      renderMode();
+    })();
+  </script>
+</body>
+</html>

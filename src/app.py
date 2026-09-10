@@ -1,5 +1,5 @@
 """
-Daraz Multi-Store — FastAPI app (OAuth + dashboard API + UI).
+Daraz Multi-Store — FastAPI app (OAuth + multi-tenant dashboard API + UI).
 
 Run:
   uvicorn src.app:app --reload --host 127.0.0.1 --port 8000
@@ -9,12 +9,23 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from src.auth import (
+    AuthUser,
+    WorkspaceContext,
+    allow_legacy_data_import,
+    auth_configured,
+    get_current_user,
+    get_workspace_context,
+    is_production,
+)
+from src.auth.oauth_state import build_oauth_state, parse_oauth_state
 from src.config import (
     DEFAULT_API_BASE,
     DEFAULT_OAUTH_AUTHORIZE,
@@ -23,25 +34,21 @@ from src.config import (
     require_env,
 )
 from src.daraz_api import DarazApiError, DarazClient
-from src.label_processor import OUTPUT_DIR, LabelProcessingError
+from src.db import get_repo
+from src.label_processor import LabelProcessingError
 from src.ops import fetch_orders, print_labels
 from src.print_job import (
     begin_print_job,
     complete_print_job,
     fail_print_job,
-    get_print_job_state,
+    get_print_job,
+    job_pdf_path,
     progress_callback,
+    require_workspace_job,
     reset_print_job_if_stale,
 )
-from src.smoke_test import run_live_smoke_test
 from src.token_refresh import refresh_store_tokens
-from src.token_store import (
-    build_token_record,
-    list_sanitized_stores,
-    sanitize_store_view,
-    update_store_display_name,
-    upsert_store,
-)
+from src.token_store import build_token_record, sanitize_store_view
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,12 +66,31 @@ def _parse_store_ids(
         return None, ids
     return store, None
 
+
+def _workspace_store_fns(workspace_id: str):
+    repo = get_repo()
+
+    def get_one(sid: str):
+        return repo.get_store(workspace_id, sid)
+
+    def list_all():
+        return repo.list_stores(workspace_id)
+
+    return get_one, list_all
+
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+_docs_url = None if is_production() else "/docs"
+_openapi_url = None if is_production() else "/openapi.json"
 
 app = FastAPI(
     title="Daraz Multi-Store Manager",
-    description="Multi-store orders and shipping label printing for Daraz Pakistan",
-    version="0.3.0",
+    description="Multi-tenant multi-store orders and shipping label printing for Daraz Pakistan",
+    version="0.4.0",
+    docs_url=_docs_url,
+    redoc_url=None if is_production() else "/redoc",
+    openapi_url=_openapi_url,
 )
 
 if STATIC_DIR.is_dir():
@@ -84,6 +110,22 @@ def _daraz_http_error(exc: DarazApiError) -> HTTPException:
     )
 
 
+@app.on_event("startup")
+def _startup() -> None:
+    if not auth_configured():
+        logger.warning(
+            "SUPABASE_URL is not set — authenticated APIs will return 503 until configured "
+            "(JWKS verification requires SUPABASE_URL)"
+        )
+    if get_env("DATABASE_URL"):
+        try:
+            from src.db.connection import ensure_saas_schema
+
+            ensure_saas_schema()
+        except Exception as exc:
+            logger.error("Failed to ensure SaaS schema: %s", exc)
+
+
 @app.get("/", response_model=None)
 def root():
     index = STATIC_DIR / "index.html"
@@ -92,24 +134,115 @@ def root():
             index,
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
-    return HTMLResponse("<p>UI missing. Open /docs for API.</p>")
+    return HTMLResponse("<p>UI missing. Open /login.</p>")
 
 
-@app.get("/oauth/login")
-def oauth_login() -> RedirectResponse:
-    """Redirect browser to Daraz PK OAuth authorize URL."""
+@app.get("/login", response_model=None)
+def login_page():
+    path = STATIC_DIR / "login.html"
+    if path.is_file():
+        return FileResponse(
+            path,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
+    return HTMLResponse("<p>Login page missing.</p>")
+
+
+# ---------------------------------------------------------------------------
+# Auth / workspace bootstrap
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/public-config")
+def api_public_config() -> dict:
+    """Browser-safe config (publishable key only — never secret key)."""
+    return {
+        "supabase_url": get_env("SUPABASE_URL"),
+        "supabase_publishable_key": get_env("SUPABASE_PUBLISHABLE_KEY"),
+        "auth_required": True,
+    }
+
+
+@app.get("/api/me")
+def api_me(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
+    repo = get_repo()
+    memberships = repo.list_memberships(ctx.user.id)
+    return {
+        "user": {"id": ctx.user.id, "email": ctx.user.email},
+        "workspace": {
+            "id": ctx.workspace_id,
+            "role": ctx.role,
+        },
+        "memberships": memberships,
+    }
+
+
+@app.post("/api/bootstrap")
+def api_bootstrap(user: AuthUser = Depends(get_current_user)) -> dict:
+    """Ensure the user has a workspace (owner). Idempotent."""
+    repo = get_repo()
+    name = (user.email or "My workspace").split("@")[0] or "My workspace"
+    result = repo.create_workspace_with_owner(user.id, f"{name}'s workspace")
+    return result
+
+
+class LegacyImportBody(BaseModel):
+    confirm: bool = False
+
+
+@app.post("/api/admin/import-legacy-stores")
+def api_import_legacy_stores(
+    body: LegacyImportBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """
+    Controlled import of the legacy global token vault into the current workspace.
+
+    Requires ALLOW_LEGACY_DATA_IMPORT=true. Defaults to disabled.
+    """
+    if not allow_legacy_data_import():
+        raise HTTPException(
+            status_code=403,
+            detail="Legacy import disabled. Set ALLOW_LEGACY_DATA_IMPORT=true to enable.",
+        )
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Pass confirm=true to run import")
+    if ctx.role != "owner":
+        raise HTTPException(status_code=403, detail="Only workspace owners can import")
+
+    from src.legacy_import import import_legacy_into_workspace
+
+    result = import_legacy_into_workspace(ctx.workspace_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Daraz OAuth (workspace-bound via signed state)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/oauth/start")
+def api_oauth_start(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
+    """Return a Daraz authorize URL bound to the current workspace."""
     app_key = require_env("DARAZ_APP_KEY")
     redirect_uri = get_env("DARAZ_REDIRECT_URI", DEFAULT_REDIRECT_URI)
     authorize_base = get_env("DARAZ_OAUTH_AUTHORIZE", DEFAULT_OAUTH_AUTHORIZE)
-
+    state = build_oauth_state(workspace_id=ctx.workspace_id, user_id=ctx.user.id)
     url = DarazClient.build_authorize_url(
         app_key,
         redirect_uri,
         authorize_base=authorize_base,
         force_auth=True,
+        state=state,
     )
-    logger.info("Redirecting to Daraz OAuth (client_id=%s...)", app_key[:4])
-    return RedirectResponse(url, status_code=302)
+    logger.info("OAuth start workspace=%s…", ctx.workspace_id[:8])
+    return {"authorize_url": url}
+
+
+@app.get("/oauth/login")
+def oauth_login() -> RedirectResponse:
+    """Legacy entry — require using authenticated /api/oauth/start."""
+    return RedirectResponse("/login?need_auth=1", status_code=302)
 
 
 @app.get("/oauth/callback", response_model=None)
@@ -118,8 +251,18 @@ def oauth_callback(
     code: str = Query(..., description="Authorization code from Daraz"),
     state: str | None = Query(None),
 ):
-    """Exchange authorization code for tokens and redirect to the dashboard."""
-    _ = state
+    """Exchange authorization code and bind the store to the workspace in state."""
+    try:
+        bound = parse_oauth_state(state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    workspace_id = bound["workspace_id"]
+    user_id = bound["user_id"]
+    repo = get_repo()
+    if not repo.get_membership(workspace_id, user_id):
+        raise HTTPException(status_code=403, detail="OAuth user is not a workspace member")
+
     try:
         client = DarazClient(
             app_key=require_env("DARAZ_APP_KEY"),
@@ -127,9 +270,10 @@ def oauth_callback(
             api_base=get_env("DARAZ_API_BASE", DEFAULT_API_BASE),
         )
         token_response = client.create_token_from_code(code)
-        record = upsert_store(build_token_record(token_response))
+        record = repo.upsert_store(workspace_id, build_token_record(token_response))
         logger.info(
-            "OAuth success store_id=%s account=%s",
+            "OAuth success workspace=%s store_id=%s account=%s",
+            workspace_id[:8],
             record.get("store_id", ""),
             record.get("account", ""),
         )
@@ -137,8 +281,9 @@ def oauth_callback(
         if "application/json" in accept and "text/html" not in accept:
             return {
                 "status": "authorized",
-                "message": "Store connected. Tokens saved locally (not shown).",
+                "message": "Store connected. Tokens saved (not shown).",
                 "store": sanitize_store_view(record),
+                "workspace_id": workspace_id,
             }
         store_id = record.get("store_id", "")
         return RedirectResponse(f"/?connected=1&store={store_id}", status_code=302)
@@ -149,14 +294,20 @@ def oauth_callback(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ---------------------------------------------------------------------------
+# Stores
+# ---------------------------------------------------------------------------
+
+
 @app.get("/api/stores")
-def api_stores() -> dict:
-    """List connected stores; silently refresh tokens that expire soon."""
+def api_stores(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
+    """List connected stores for the workspace; auto-refresh tokens expiring within 24h."""
     try:
-        refresh_store_tokens(within_minutes=60 * 24)
+        refresh_store_tokens(workspace_id=ctx.workspace_id, within_minutes=60 * 24)
     except Exception as exc:
         logger.warning("Auto token refresh skipped: %s", exc)
-    return {"stores": list_sanitized_stores()}
+    stores = get_repo().list_stores(ctx.workspace_id)
+    return {"stores": [sanitize_store_view(s) for s in stores], "workspace_id": ctx.workspace_id}
 
 
 class RenameStoreBody(BaseModel):
@@ -164,19 +315,23 @@ class RenameStoreBody(BaseModel):
 
 
 @app.patch("/api/stores/{store_id}")
-def api_rename_store(store_id: str, body: RenameStoreBody) -> dict:
-    """Set a friendly store name (shown in UI instead of the OAuth email)."""
+def api_rename_store(
+    store_id: str,
+    body: RenameStoreBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
     try:
-        record = update_store_display_name(store_id, body.display_name)
+        record = get_repo().update_store_display_name(
+            ctx.workspace_id, store_id, body.display_name
+        )
         return {"store": sanitize_store_view(record)}
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/stores")
-def stores() -> dict:
-    """Backward-compatible alias."""
-    return api_stores()
+def stores(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
+    return api_stores(ctx)
 
 
 @app.post("/api/refresh-tokens")
@@ -184,13 +339,119 @@ def api_refresh_tokens(
     store: str | None = Query(None),
     stores: str | None = Query(None, description="Comma-separated store_id list"),
     force: bool = Query(False),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
-        results = refresh_store_tokens(store_id=store_id, store_ids=store_ids, force=force)
+        results = refresh_store_tokens(
+            store_id=store_id,
+            store_ids=store_ids,
+            force=force,
+            workspace_id=ctx.workspace_id,
+        )
         return {"results": results}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Store groups
+# ---------------------------------------------------------------------------
+
+
+class StoreGroupBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    store_ids: list[str] = Field(default_factory=list)
+
+
+class StoreGroupUpdateBody(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=40)
+    store_ids: list[str] | None = None
+
+
+@app.get("/api/store-groups")
+def api_list_groups(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
+    return {"groups": get_repo().list_groups(ctx.workspace_id)}
+
+
+@app.post("/api/store-groups")
+def api_create_group(
+    body: StoreGroupBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    repo = get_repo()
+    # Validate store IDs belong to workspace
+    for sid in body.store_ids:
+        if not repo.get_store(ctx.workspace_id, sid):
+            raise HTTPException(status_code=400, detail=f"Unknown store: {sid}")
+    try:
+        group = repo.create_group(ctx.workspace_id, body.name, body.store_ids)
+        return {"group": group}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/api/store-groups/{group_id}")
+def api_update_group(
+    group_id: str,
+    body: StoreGroupUpdateBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    repo = get_repo()
+    if body.store_ids is not None:
+        for sid in body.store_ids:
+            if not repo.get_store(ctx.workspace_id, sid):
+                raise HTTPException(status_code=400, detail=f"Unknown store: {sid}")
+    try:
+        group = repo.update_group(
+            ctx.workspace_id,
+            group_id,
+            name=body.name,
+            store_ids=body.store_ids,
+        )
+        return {"group": group}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/store-groups/{group_id}")
+def api_delete_group(
+    group_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    try:
+        get_repo().delete_group(ctx.workspace_id, group_id)
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class ImportBrowserProfilesBody(BaseModel):
+    profiles: dict[str, list[str]] = Field(default_factory=dict)
+
+
+@app.post("/api/store-groups/import-browser")
+def api_import_browser_profiles(
+    body: ImportBrowserProfilesBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """One-time import from browser localStorage multistore_vendor_v1 profiles."""
+    repo = get_repo()
+    imported = []
+    skipped = []
+    for name, store_ids in (body.profiles or {}).items():
+        valid = [sid for sid in store_ids if repo.get_store(ctx.workspace_id, sid)]
+        if not name or not valid:
+            skipped.append(name)
+            continue
+        group = repo.create_group(ctx.workspace_id, name, valid)
+        imported.append(group)
+    return {"imported": imported, "skipped": skipped}
+
+
+# ---------------------------------------------------------------------------
+# Orders
+# ---------------------------------------------------------------------------
 
 
 @app.get("/api/orders")
@@ -200,21 +461,30 @@ def api_orders(
     status: str = Query("ready_to_ship"),
     limit: int = Query(10, ge=1, le=50),
     created_after: str | None = Query(None),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
+        get_one, list_all = _workspace_store_fns(ctx.workspace_id)
         orders = fetch_orders(
             store_id=store_id,
             store_ids=store_ids,
             status=status,
             limit=limit,
             created_after=created_after,
+            get_store_fn=get_one,
+            list_stores_fn=list_all,
         )
         return {"orders": orders, "count": len(orders)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DarazApiError as exc:
         raise _daraz_http_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# Print labels (per-workspace / per-job isolation)
+# ---------------------------------------------------------------------------
 
 
 @app.post("/api/print-labels")
@@ -227,81 +497,114 @@ def api_print_labels(
     created_after: str | None = Query(None),
     reuse_saved: bool = Query(False),
     wait: bool = Query(False, description="Block until done (local dev only)"),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    reset_print_job_if_stale()
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def run_job() -> None:
-        try:
-            result = print_labels(
-                store_id=store_id,
-                store_ids=store_ids,
-                status=status,
-                limit=limit,
-                created_after=created_after,
-                reuse_saved=reuse_saved,
-                on_progress=progress_callback(),
-            )
-            complete_print_job(result)
-        except ValueError as exc:
-            fail_print_job(str(exc))
-        except LabelProcessingError as exc:
-            logger.exception("Label PDF merge failed")
-            fail_print_job(str(exc))
-        except DarazApiError as exc:
-            logger.exception("Daraz API error during print")
-            fail_print_job(str(exc))
-        except Exception as exc:
-            logger.exception("Unexpected print job failure")
-            fail_print_job(f"{type(exc).__name__}: {exc}")
+    get_one, list_all = _workspace_store_fns(ctx.workspace_id)
+
+    def run_print(job_id: str) -> dict[str, Any]:
+        out_path = job_pdf_path(ctx.workspace_id, job_id)
+        return print_labels(
+            store_id=store_id,
+            store_ids=store_ids,
+            status=status,
+            limit=limit,
+            created_after=created_after,
+            reuse_saved=reuse_saved,
+            output=out_path,
+            on_progress=progress_callback(job_id),
+            get_store_fn=get_one,
+            list_stores_fn=list_all,
+            download_url=f"/api/print-labels/{job_id}/download",
+        )
 
     if wait:
         try:
-            return print_labels(
-                store_id=store_id,
-                store_ids=store_ids,
-                status=status,
-                limit=limit,
-                created_after=created_after,
-                reuse_saved=reuse_saved,
-            )
+            job_id = begin_print_job(workspace_id=ctx.workspace_id, user_id=ctx.user.id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            result = run_print(job_id)
+            complete_print_job(job_id, result)
+            return {"job_id": job_id, **result}
+        except Exception as exc:
+            fail_print_job(job_id, str(exc))
+            if isinstance(exc, ValueError):
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if isinstance(exc, LabelProcessingError):
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "label_processing_error", "message": str(exc)},
+                ) from exc
+            if isinstance(exc, DarazApiError):
+                raise _daraz_http_error(exc) from exc
+            raise
+
+    try:
+        job_id = begin_print_job(workspace_id=ctx.workspace_id, user_id=ctx.user.id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def run_job() -> None:
+        try:
+            result = run_print(job_id)
+            complete_print_job(job_id, result)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            fail_print_job(job_id, str(exc))
         except LabelProcessingError as exc:
             logger.exception("Label PDF merge failed")
-            raise HTTPException(
-                status_code=502,
-                detail={"error": "label_processing_error", "message": str(exc)},
-            ) from exc
+            fail_print_job(job_id, str(exc))
         except DarazApiError as exc:
-            raise _daraz_http_error(exc) from exc
-
-    if not begin_print_job():
-        raise HTTPException(status_code=409, detail="A print job is already running")
+            logger.exception("Daraz API error during print")
+            fail_print_job(job_id, str(exc))
+        except Exception as exc:
+            logger.exception("Unexpected print job failure")
+            fail_print_job(job_id, f"{type(exc).__name__}: {exc}")
 
     background_tasks.add_task(run_job)
     return {
         "status": "processing",
-        "poll_url": "/api/print-labels/status",
+        "job_id": job_id,
+        "poll_url": f"/api/print-labels/{job_id}/status",
+        "download_url": f"/api/print-labels/{job_id}/download",
         "message": "Print job started",
     }
 
 
-@app.get("/api/print-labels/status")
-def api_print_labels_status() -> dict:
-    reset_print_job_if_stale()
-    state = get_print_job_state()
+@app.get("/api/print-labels/{job_id}/status")
+def api_print_labels_status(
+    job_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    reset_print_job_if_stale(job_id)
+    try:
+        state = require_workspace_job(job_id, ctx.workspace_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if state["status"] == "done" and state.get("result"):
         return {**state, **state["result"]}
     return state
 
 
-@app.get("/api/download/combined-labels")
-def download_combined_labels() -> FileResponse:
-    path = OUTPUT_DIR / "combined-labels.pdf"
+@app.get("/api/print-labels/{job_id}/download")
+def api_print_labels_download(
+    job_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> FileResponse:
+    try:
+        job = require_workspace_job(job_id, ctx.workspace_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    path = Path(job.get("output_path") or job_pdf_path(ctx.workspace_id, job_id))
     if not path.is_file():
         raise HTTPException(status_code=404, detail="No combined PDF yet. Print labels first.")
     return FileResponse(
@@ -311,40 +614,34 @@ def download_combined_labels() -> FileResponse:
     )
 
 
+# Legacy download paths — intentionally disabled (no unauthenticated PDF access).
+@app.get("/api/download/combined-labels")
+def download_combined_labels_legacy() -> JSONResponse:
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": "Use GET /api/print-labels/{job_id}/download with authentication.",
+        },
+    )
+
+
 @app.get("/api/download/combined-labels-html")
-def download_combined_labels_html() -> FileResponse:
-    path = OUTPUT_DIR / "combined-labels.html"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="No combined HTML yet. Print labels first.")
-    return FileResponse(
-        path,
-        media_type="text/html",
-        filename="combined-labels.html",
+def download_combined_labels_html_legacy() -> JSONResponse:
+    return JSONResponse(
+        status_code=410,
+        content={"detail": "Legacy HTML download removed."},
     )
 
 
 @app.get("/test/live")
-def test_live(
-    created_after: str | None = Query(None),
-) -> dict:
-    try:
-        result = run_live_smoke_test(created_after=created_after, write_report=True)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {
-        "oauth": result.verdict_oauth(),
-        "orders": result.verdict_orders(),
-        "order_items": result.verdict_items(),
-        "shipping_label": result.verdict_label(),
-        "label_decode": result.verdict_decode(),
-        "ready_to_ship_count": result.ready_to_ship_count,
-        "orders_preview": result.orders_preview,
-        "tested_order_id": result.tested_order_id,
-        "tested_order_item_ids": result.tested_order_item_ids,
-        "mime_type": result.mime_type,
-        "output_file": result.output_file,
-        "report": "docs/PHASE2_LIVE_TEST.md",
-        "notes": result.notes,
-        "errors": result.document_errors,
-    }
+def test_live() -> JSONResponse:
+    if is_production() or get_env("ENABLE_LIVE_TEST", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    return JSONResponse(
+        status_code=410,
+        content={"detail": "Use authenticated CLI smoke tests instead."},
+    )

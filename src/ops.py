@@ -162,23 +162,27 @@ def resolve_stores(
     store_id: str | None = None,
     *,
     store_ids: list[str] | None = None,
+    get_store_fn: Callable[[str], dict[str, Any] | None] | None = None,
+    list_stores_fn: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
+    get_one = get_store_fn or get_store
+    list_all = list_stores_fn or list_stores
     if store_ids is not None:
         if not store_ids:
             raise ValueError("No stores selected. Pick at least one store.")
         stores: list[dict[str, Any]] = []
         for sid in store_ids:
-            store = get_store(sid)
+            store = get_one(sid)
             if not store:
                 raise ValueError(f"Unknown store: {sid}")
             stores.append(store)
         return stores
     if store_id:
-        store = get_store(store_id)
+        store = get_one(store_id)
         if not store:
             raise ValueError(f"Unknown store: {store_id}")
         return [store]
-    stores = list_stores()
+    stores = list_all()
     if not stores:
         raise ValueError("No stores connected. Connect a seller via OAuth first.")
     return stores
@@ -219,10 +223,17 @@ def fetch_orders(
     status: str = "ready_to_ship",
     limit: int = 10,
     created_after: str | None = None,
+    get_store_fn: Callable[[str], dict[str, Any] | None] | None = None,
+    list_stores_fn: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     created = created_after or default_created_after()
     rows: list[dict[str, Any]] = []
-    for store in resolve_stores(store_id, store_ids=store_ids):
+    for store in resolve_stores(
+        store_id,
+        store_ids=store_ids,
+        get_store_fn=get_store_fn,
+        list_stores_fn=list_stores_fn,
+    ):
         sid = store.get("store_id", "")
         client = client_for_store(store)
         resp = client.get_orders(
@@ -385,6 +396,9 @@ def print_labels(
     reuse_saved: bool = False,
     output: Path | None = None,
     on_progress: Callable[[str], None] | None = None,
+    get_store_fn: Callable[[str], dict[str, Any] | None] | None = None,
+    list_stores_fn: Callable[[], list[dict[str, Any]]] | None = None,
+    download_url: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetch shipping labels, convert each HTML label to PDF, then merge into one PDF.
@@ -410,7 +424,12 @@ def print_labels(
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
         label_fetch_meta = [{} for _ in raw_labels]
     else:
-        for store in resolve_stores(store_id, store_ids=store_ids):
+        for store in resolve_stores(
+            store_id,
+            store_ids=store_ids,
+            get_store_fn=get_store_fn,
+            list_stores_fn=list_stores_fn,
+        ):
             sid = str(store.get("store_id", "store"))
             sname = store_display_name(store)
             client = client_for_store(store)
@@ -501,7 +520,7 @@ def print_labels(
                     pdf_path.write_bytes(pdf_label.document_bytes)
 
     out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
     progress("Merging PDF…")
     merge_labels(pdf_labels, out_pdf)
     rel = (
@@ -533,7 +552,7 @@ def print_labels(
     return {
         "output": str(out_pdf),
         "output_relative": rel.replace("\\", "/"),
-        "download_url": "/api/download/combined-labels",
+        "download_url": download_url or "/api/download/combined-labels",
         "html_url": None,
         "format": "pdf",
         "labels": len(pdf_labels),

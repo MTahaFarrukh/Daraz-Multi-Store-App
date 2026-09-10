@@ -91,6 +91,12 @@ body {
   font-weight: 500;
 }
 
+.user-meta {
+  margin: 0.35rem 0 0;
+  color: rgba(247, 242, 232, 0.55);
+  font-size: 0.8rem;
+}
+
 .top-actions {
   display: flex;
   flex-wrap: wrap;

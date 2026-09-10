@@ -16,6 +16,9 @@
   const btnRefresh = $("btn-refresh");
   const btnPrint = $("btn-print");
   const btnDownload = $("btn-download");
+  const btnConnect = $("btn-connect");
+  const btnLogout = $("btn-logout");
+  const userMeta = $("user-meta");
   const form = $("controls-form");
   const toast = $("toast");
   const busy = $("busy");
@@ -46,7 +49,9 @@
 
   const STORAGE_KEY = "multistore_vendor_v1";
   let allStores = [];
+  let serverGroups = [];
   let toastTimer = null;
+  let currentJobId = null;
 
   function loadVendorState() {
     try {
@@ -119,23 +124,7 @@
   }
 
   async function api(url, options = {}) {
-    const res = await fetch(url, options);
-    let data = null;
-    const ct = res.headers.get("content-type") || "";
-    if (ct.includes("application/json")) {
-      data = await res.json();
-    } else {
-      data = { detail: await res.text() };
-    }
-    if (!res.ok) {
-      const detail = data?.detail;
-      const msg =
-        typeof detail === "string"
-          ? detail
-          : detail?.message || detail?.error || res.statusText;
-      throw new Error(msg || "Request failed");
-    }
-    return data;
+    return MultiStoreAuth.api(url, options);
   }
 
   function storeLabel(s) {
@@ -152,7 +141,6 @@
     }
     await api(`/api/stores/${encodeURIComponent(storeId)}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ display_name: trimmed }),
     });
     await loadStores();
@@ -167,20 +155,47 @@
       .replaceAll('"', "&quot;");
   }
 
+  async function loadServerGroups() {
+    const data = await api("/api/store-groups");
+    serverGroups = data.groups || [];
+    renderProfileOptions();
+  }
+
   function renderProfileOptions() {
     if (!profileSelect) return;
-    const state = loadVendorState();
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">— Custom selection —</option>';
-    for (const name of Object.keys(state.profiles).sort()) {
+    for (const g of serverGroups) {
       const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
+      opt.value = g.id;
+      opt.textContent = g.name;
       profileSelect.appendChild(opt);
     }
-    if (current && state.profiles[current]) {
+    if (current && serverGroups.some((g) => g.id === current)) {
       profileSelect.value = current;
     }
+  }
+
+  async function maybeImportBrowserProfiles() {
+    const state = loadVendorState();
+    const names = Object.keys(state.profiles || {});
+    if (!names.length) return;
+    if (localStorage.getItem("multistore_profiles_imported_v1") === "1") return;
+    if (serverGroups.length > 0) {
+      localStorage.setItem("multistore_profiles_imported_v1", "1");
+      return;
+    }
+    const ok = window.confirm(
+      `Import ${names.length} browser profile(s) to your workspace? Local copies stay until import succeeds.`
+    );
+    if (!ok) return;
+    const data = await api("/api/store-groups/import-browser", {
+      method: "POST",
+      body: JSON.stringify({ profiles: state.profiles }),
+    });
+    localStorage.setItem("multistore_profiles_imported_v1", "1");
+    await loadServerGroups();
+    showToast(`Imported ${(data.imported || []).length} profile(s)`);
   }
 
   function renderStores(stores) {
@@ -255,7 +270,6 @@
       storeList.appendChild(chip);
     }
 
-    renderProfileOptions();
     updateSelectionMeta();
   }
 
@@ -319,6 +333,7 @@
 
   async function loadStores() {
     const data = await api("/api/stores");
+    if (data.workspace_id) MultiStoreAuth.setWorkspaceId(data.workspace_id);
     renderStores(data.stores || []);
   }
 
@@ -361,10 +376,10 @@
     }
   }
 
-  async function pollPrintStatus(startedMs) {
+  async function pollPrintStatus(jobId, startedMs) {
     const maxWaitMs = 25 * 60 * 1000;
     while (Date.now() - startedMs < maxWaitMs) {
-      const data = await api("/api/print-labels/status");
+      const data = await api(`/api/print-labels/${encodeURIComponent(jobId)}/status`);
       if (data.message) {
         busyText.textContent = data.message;
       }
@@ -388,15 +403,39 @@
     setBusy(true, `Starting print (${selected} store${selected === 1 ? "" : "s"}, limit ${limitSelect.value} each)…`);
     const started = Date.now();
     try {
-      await api(`/api/print-labels?${qs}`, { method: "POST" });
-      const data = await pollPrintStatus(started);
+      const startedJob = await api(`/api/print-labels?${qs}`, { method: "POST" });
+      const jobId = startedJob.job_id;
+      if (!jobId) throw new Error("Print job did not return a job_id");
+      currentJobId = jobId;
+      const data = await pollPrintStatus(jobId, started);
       const secs = Math.round((Date.now() - started) / 1000);
+      const downloadUrl =
+        data.download_url || `/api/print-labels/${encodeURIComponent(jobId)}/download`;
       btnDownload.classList.remove("hidden");
-      btnDownload.href = data.download_url || "/api/download/combined-labels";
+      btnDownload.href = downloadUrl;
       btnDownload.textContent = "Download PDF";
+      btnDownload.onclick = async (event) => {
+        event.preventDefault();
+        try {
+          const token = await MultiStoreAuth.getAccessToken();
+          const wid = MultiStoreAuth.getWorkspaceId();
+          const res = await fetch(downloadUrl, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              ...(wid ? { "X-Workspace-Id": wid } : {}),
+            },
+          });
+          if (!res.ok) throw new Error("Download failed");
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          window.open(url, "_blank", "noopener");
+        } catch (err) {
+          showToast(err.message || "Download failed", true);
+        }
+      };
       renderLabelSources(data);
       showToast(`PDF ready · ${data.pages} page(s) · ${secs}s`);
-      window.open(btnDownload.href, "_blank", "noopener");
+      btnDownload.click();
     } catch (err) {
       showToast(err.message || "Print failed", true);
     } finally {
@@ -404,7 +443,7 @@
     }
   }
 
-  function saveProfile() {
+  async function saveProfile() {
     if (!profileName || !profileSelect) {
       showToast("Could not save profile. Refresh the page and try again.", true);
       return;
@@ -419,47 +458,55 @@
       showToast("Select at least one store first", true);
       return;
     }
+    const data = await api("/api/store-groups", {
+      method: "POST",
+      body: JSON.stringify({ name, store_ids: ids }),
+    });
+    await loadServerGroups();
+    if (data.group?.id) profileSelect.value = data.group.id;
+    profileName.value = name;
     const state = loadVendorState();
-    state.profiles[name] = ids;
     state.selection = ids;
     saveVendorState(state);
-    profileSelect.value = name;
-    profileName.value = name;
-    renderProfileOptions();
-    profileSelect.value = name;
     showToast(`Saved profile “${name}” (${ids.length} store${ids.length === 1 ? "" : "s"})`);
   }
 
-  function loadProfile() {
+  async function loadProfile() {
     if (!profileSelect) return;
-    const name = profileSelect.value;
-    if (!name) return;
-    const state = loadVendorState();
-    const ids = state.profiles[name];
-    if (!ids?.length) return;
-    setSelection(ids);
-    profileName.value = name;
-    showToast(`Loaded profile “${name}”`);
+    const groupId = profileSelect.value;
+    if (!groupId) return;
+    const group = serverGroups.find((g) => g.id === groupId);
+    if (!group?.store_ids?.length) return;
+    setSelection(group.store_ids);
+    profileName.value = group.name;
+    showToast(`Loaded profile “${group.name}”`);
   }
 
-  function deleteProfile() {
+  async function deleteProfile() {
     if (!profileSelect || !profileName) return;
-    const name = profileSelect.value || profileName.value.trim();
-    if (!name) {
+    const groupId = profileSelect.value;
+    if (!groupId) {
       showToast("Pick a profile to delete", true);
       return;
     }
-    const state = loadVendorState();
-    if (!state.profiles[name]) {
-      showToast("Profile not found", true);
-      return;
-    }
-    delete state.profiles[name];
-    saveVendorState(state);
+    const group = serverGroups.find((g) => g.id === groupId);
+    await api(`/api/store-groups/${encodeURIComponent(groupId)}`, { method: "DELETE" });
     profileSelect.value = "";
     profileName.value = "";
-    renderProfileOptions();
-    showToast(`Deleted profile “${name}”`);
+    await loadServerGroups();
+    showToast(`Deleted profile “${group?.name || groupId}”`);
+  }
+
+  async function connectStore() {
+    setBusy(true, "Opening Daraz authorization…");
+    try {
+      const data = await api("/api/oauth/start");
+      if (!data.authorize_url) throw new Error("No authorize URL returned");
+      location.href = data.authorize_url;
+    } catch (err) {
+      showToast(err.message || "Could not start OAuth", true);
+      setBusy(false);
+    }
   }
 
   btnSelectAll?.addEventListener("click", () => {
@@ -472,26 +519,61 @@
     setSelection([]);
   });
 
-  profileSelect?.addEventListener("change", loadProfile);
-  btnSaveProfile?.addEventListener("click", saveProfile);
-  btnDeleteProfile?.addEventListener("click", deleteProfile);
+  profileSelect?.addEventListener("change", () => {
+    loadProfile().catch((err) => showToast(err.message || "Load failed", true));
+  });
+  btnSaveProfile?.addEventListener("click", () => {
+    saveProfile().catch((err) => showToast(err.message || "Save failed", true));
+  });
+  btnDeleteProfile?.addEventListener("click", () => {
+    deleteProfile().catch((err) => showToast(err.message || "Delete failed", true));
+  });
 
   form.addEventListener("submit", loadOrders);
   btnRefresh.addEventListener("click", refreshTokens);
   btnPrint.addEventListener("click", printLabels);
+  btnConnect?.addEventListener("click", connectStore);
+  btnLogout?.addEventListener("click", async () => {
+    await MultiStoreAuth.signOut();
+    location.replace("/login");
+  });
 
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("connected") === "1") {
-    showToast("Store connected successfully");
-    history.replaceState({}, "", "/");
+  async function boot() {
+    const ok = await MultiStoreAuth.ready();
+    if (!ok) {
+      location.replace("/login");
+      return;
+    }
+    const session = await MultiStoreAuth.getSession();
+    if (!session) {
+      location.replace("/login");
+      return;
+    }
+
+    const me = await api("/api/me");
+    if (me.workspace?.id) MultiStoreAuth.setWorkspaceId(me.workspace.id);
+    if (userMeta) {
+      userMeta.textContent = me.user?.email || "Signed in";
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connected") === "1") {
+      showToast("Store connected successfully");
+      history.replaceState({}, "", "/");
+    }
+
+    await loadStores();
+    await loadServerGroups();
+    await maybeImportBrowserProfiles().catch(() => {});
+
+    if (getSelection().length > 0) {
+      limitSelect.value = "3";
+      await loadOrders();
+    }
   }
 
-  loadStores()
-    .then(() => {
-      if (getSelection().length > 0) {
-        limitSelect.value = "3";
-        return loadOrders();
-      }
-    })
-    .catch((err) => showToast(err.message || "Could not load stores", true));
+  boot().catch((err) => {
+    showToast(err.message || "Could not start dashboard", true);
+    setTimeout(() => location.replace("/login"), 1500);
+  });
 })();

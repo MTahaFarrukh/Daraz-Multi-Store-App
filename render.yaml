@@ -29,6 +29,16 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: ALLOW_LEGACY_DATA_IMPORT
+        value: "false"
       - key: DARAZ_API_BASE
         value: https://api.daraz.pk/rest
       - key: DARAZ_OAUTH_AUTHORIZE
