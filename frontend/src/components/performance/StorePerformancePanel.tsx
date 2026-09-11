@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Api } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import {
+  usePerformanceMonths,
+  useStorePerformance,
+  useSyncStorePerformance,
+} from "@/hooks/queries/useStorePerformance";
 import { EmptyState, ErrorBanner, StatusBadge } from "@/components/ui/Primitives";
-import type { PerformanceLeaderboardResponse, PerformanceRow } from "@/types/api";
+import type { PerformanceMetric } from "@/lib/queryKeys";
+import type { PerformanceRow } from "@/types/api";
 
 const MONTH_NAMES = [
   "January",
@@ -64,86 +70,59 @@ type Props = {
 };
 
 export function StorePerformancePanel({ compact = false }: Props) {
-  const [data, setData] = useState<PerformanceLeaderboardResponse | null>(null);
-  const [months, setMonths] = useState<Array<{ year: number; month: number }>>([]);
+  const { me } = useAuth();
+  const workspaceId = me?.workspace?.id;
   const [year, setYear] = useState<number | null>(null);
   const [month, setMonth] = useState<number | null>(null);
-  const [metric, setMetric] = useState<"orders" | "gross_sales">("orders");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [metric, setMetric] = useState<PerformanceMetric>("orders");
+  const [localError, setLocalError] = useState("");
 
-  const refreshMonths = useCallback(async () => {
-    const res = await Api.performanceMonths();
-    setMonths(res.months || []);
-    return res;
-  }, []);
+  const monthsQuery = usePerformanceMonths(workspaceId);
+  const boardQuery = useStorePerformance(workspaceId, year, month, metric);
+  const syncMutation = useSyncStorePerformance(workspaceId);
 
-  const loadBoard = useCallback(async (y: number, m: number, met: "orders" | "gross_sales") => {
-    const board = await Api.storePerformance(y, m, met);
-    setData(board);
-    if (board.gross_sales_enabled === false && met === "gross_sales") {
+  useEffect(() => {
+    const current = monthsQuery.data?.current;
+    if (!current) return;
+    if (year == null || month == null) {
+      setYear(current.year);
+      setMonth(current.month);
+    }
+  }, [monthsQuery.data, year, month]);
+
+  useEffect(() => {
+    if (boardQuery.data?.gross_sales_enabled === false && metric === "gross_sales") {
       setMetric("orders");
     }
-  }, []);
+  }, [boardQuery.data?.gross_sales_enabled, metric]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setError("");
-      try {
-        const res = await refreshMonths();
-        if (cancelled) return;
-        const y = res.current.year;
-        const m = res.current.month;
-        setYear(y);
-        setMonth(m);
-        await loadBoard(y, m, "orders");
-        if (!cancelled) setReady(true);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load performance");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshMonths, loadBoard]);
+  const data = boardQuery.data;
+  const months = monthsQuery.data?.months || [];
+  const loading = (monthsQuery.isLoading && !monthsQuery.data) || (boardQuery.isLoading && !data);
+  const fetchingPeriod = boardQuery.isFetching && !boardQuery.isLoading;
+  const syncing = syncMutation.isPending;
 
-  useEffect(() => {
-    if (!ready || year == null || month == null) return;
-    let cancelled = false;
-    (async () => {
-      setError("");
-      try {
-        await loadBoard(year, month, metric);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load performance");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [year, month, metric, ready, loadBoard]);
+  const queryError =
+    (monthsQuery.error instanceof Error && monthsQuery.error.message) ||
+    (boardQuery.error instanceof Error && boardQuery.error.message) ||
+    (syncMutation.error instanceof Error && syncMutation.error.message) ||
+    "";
+  const error = localError || queryError;
 
   const onRefresh = async () => {
     if (year == null || month == null || syncing) return;
-    setSyncing(true);
-    setError("");
+    setLocalError("");
     try {
-      const summary = await Api.syncStorePerformance(year, month, true);
-      await refreshMonths();
-      await loadBoard(year, month, metric);
+      const summary = await syncMutation.mutateAsync({
+        year,
+        month,
+        includeGrossSales: true,
+      });
       if (summary.stores_error > 0 && summary.stores_ok === 0 && summary.stores_partial === 0) {
-        setError(`Sync finished with errors for all ${summary.stores_total} stores.`);
+        setLocalError(`Sync finished with errors for all ${summary.stores_total} stores.`);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sync failed");
-    } finally {
-      setSyncing(false);
+      setLocalError(err instanceof Error ? err.message : "Sync failed");
     }
   };
 
@@ -160,8 +139,12 @@ export function StorePerformancePanel({ compact = false }: Props) {
     if (year != null && month != null) {
       map.set(`${year}-${month}`, { year, month });
     }
+    if (monthsQuery.data?.current) {
+      const c = monthsQuery.data.current;
+      map.set(`${c.year}-${c.month}`, c);
+    }
     return Array.from(map.values()).sort((a, b) => b.year - a.year || b.month - a.month);
-  }, [months, year, month]);
+  }, [months, year, month, monthsQuery.data?.current]);
 
   return (
     <section className="card perf-panel">
@@ -173,6 +156,7 @@ export function StorePerformancePanel({ compact = false }: Props) {
           <p className="muted-line">
             Scope: My Workspace · Orders exclude cancelled (Data Insights–style) · Last
             updated: {relativeTime(data?.last_synced_at)}
+            {fetchingPeriod ? " · Updating…" : ""}
           </p>
         </div>
         <div className="row perf-controls">
@@ -184,6 +168,7 @@ export function StorePerformancePanel({ compact = false }: Props) {
                 const [y, m] = e.target.value.split("-").map(Number);
                 setYear(y);
                 setMonth(m);
+                setLocalError("");
               }}
               disabled={loading || syncing}
             >
@@ -227,7 +212,7 @@ export function StorePerformancePanel({ compact = false }: Props) {
         </button>
       </div>
 
-      {loading && !data ? <p className="muted-line">Loading performance…</p> : null}
+      {loading ? <p className="muted-line">Loading performance…</p> : null}
 
       {!loading && rows.length === 0 ? (
         <EmptyState
@@ -247,7 +232,7 @@ export function StorePerformancePanel({ compact = false }: Props) {
       ) : null}
 
       {rows.length > 0 ? (
-        <>
+        <div className={fetchingPeriod ? "perf-updating" : undefined} aria-busy={fetchingPeriod}>
           <div className="perf-podium" aria-label="Top performers">
             {top3.map((row) => (
               <TopCard key={String(row.store_id)} row={row} growthKey={growthKey} metric={metric} />
@@ -313,7 +298,7 @@ export function StorePerformancePanel({ compact = false }: Props) {
               </article>
             ))}
           </div>
-        </>
+        </div>
       ) : null}
 
       {compact ? (
@@ -334,7 +319,7 @@ function TopCard({
 }: {
   row: PerformanceRow;
   growthKey: "orders_growth_pct" | "gross_sales_growth_pct";
-  metric: "orders" | "gross_sales";
+  metric: PerformanceMetric;
 }) {
   const growth = row[growthKey];
   return (

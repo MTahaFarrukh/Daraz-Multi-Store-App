@@ -7,8 +7,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Api } from "@/lib/api";
 import { ApiError } from "@/lib/api/client";
+import { clearAuthenticatedCache } from "@/lib/queryKeys";
 import {
   getSession,
   getSupabase,
@@ -40,10 +42,15 @@ async function loadWorkspace(): Promise<MeResponse> {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
   const [me, setMe] = useState<MeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const wipeServerCache = useCallback(() => {
+    clearAuthenticatedCache(queryClient);
+  }, [queryClient]);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -51,12 +58,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!session) {
       setAuthenticated(false);
       setMe(null);
+      wipeServerCache();
       return;
     }
     setAuthenticated(true);
     const profile = await loadWorkspace();
-    setMe(profile);
-  }, []);
+    setMe((prev) => {
+      const prevUser = prev?.user?.id;
+      const prevWs = prev?.workspace?.id;
+      const nextUser = profile.user?.id;
+      const nextWs = profile.workspace?.id;
+      if (prev && (prevUser !== nextUser || prevWs !== nextWs)) {
+        wipeServerCache();
+      }
+      return profile;
+    });
+  }, [wipeServerCache]);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,6 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError(err instanceof Error ? err.message : "Auth failed");
           setAuthenticated(false);
           setMe(null);
+          wipeServerCache();
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -82,6 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (event === "SIGNED_OUT") {
             setAuthenticated(false);
             setMe(null);
+            wipeServerCache();
           }
           if (event === "TOKEN_REFRESHED" || event === "SIGNED_IN") {
             try {
@@ -99,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       unsubscribe?.();
     };
-  }, [refresh]);
+  }, [refresh, wipeServerCache]);
 
   const value = useMemo<AuthState>(
     () => ({
@@ -109,6 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       error,
       refresh,
       signIn: async (email, password) => {
+        wipeServerCache();
         await sbSignIn(email, password);
         setLoading(true);
         try {
@@ -119,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       },
       signUp: async (email, password) => {
+        wipeServerCache();
         await sbSignUp(email, password);
         setLoading(true);
         try {
@@ -132,9 +153,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await sbSignOut();
         setAuthenticated(false);
         setMe(null);
+        wipeServerCache();
       },
     }),
-    [loading, authenticated, me, error, refresh]
+    [loading, authenticated, me, error, refresh, wipeServerCache]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,6 +1,19 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Api } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import { useStores } from "@/hooks/queries/useStores";
+import { useStoreGroups } from "@/hooks/queries/useStoreGroups";
+import {
+  useImportBrowserProfiles,
+  useRefreshStoreConnection,
+  useRenameStore,
+} from "@/hooks/mutations/useStoreMutations";
+import {
+  useCreateStoreGroup,
+  useDeleteStoreGroup,
+  useUpdateStoreGroup,
+} from "@/hooks/mutations/useStoreGroupMutations";
 import { Dialog } from "@/components/ui/Dialog";
 import {
   EmptyState,
@@ -30,11 +43,22 @@ type FilterMode = "all" | "healthy" | "attention" | "group";
 type SortMode = "name-asc" | "name-desc";
 
 export function StoresPage() {
-  const [stores, setStores] = useState<StoreView[]>([]);
-  const [groups, setGroups] = useState<StoreGroup[]>([]);
+  const { me } = useAuth();
+  const workspaceId = me?.workspace?.id;
+  const storesQuery = useStores(workspaceId);
+  const groupsQuery = useStoreGroups(workspaceId);
+  const renameMutation = useRenameStore(workspaceId);
+  const refreshConnMutation = useRefreshStoreConnection(workspaceId);
+  const createGroupMutation = useCreateStoreGroup(workspaceId);
+  const updateGroupMutation = useUpdateStoreGroup(workspaceId);
+  const deleteGroupMutation = useDeleteStoreGroup(workspaceId);
+  const importProfilesMutation = useImportBrowserProfiles(workspaceId);
+
+  const stores = storesQuery.data || [];
+  const groups = groupsQuery.data || [];
+  const loading = (storesQuery.isLoading || groupsQuery.isLoading) && !storesQuery.data;
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
-  const [loading, setLoading] = useState(true);
   const [busyStoreId, setBusyStoreId] = useState<string | null>(null);
   const [params, setParams] = useSearchParams();
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -55,77 +79,70 @@ export function StoresPage() {
   const [groupName, setGroupName] = useState("");
   const [groupStoreIds, setGroupStoreIds] = useState<string[]>([]);
 
-  const refresh = useCallback(async () => {
-    const [s, g] = await Promise.all([Api.listStores(), Api.listGroups()]);
-    setStores(s.stores || []);
-    setGroups(g.groups || []);
-    return s.stores || [];
-  }, []);
-
   useEffect(() => {
     localStorage.setItem(VIEW_PREF_KEY, view);
   }, [view]);
 
   useEffect(() => {
+    const qErr =
+      (storesQuery.error instanceof Error && storesQuery.error.message) ||
+      (groupsQuery.error instanceof Error && groupsQuery.error.message) ||
+      "";
+    if (qErr) setError(qErr);
+  }, [storesQuery.error, groupsQuery.error]);
+
+  useEffect(() => {
+    if (!storesQuery.isSuccess) return;
+
+    if (params.get("connected") === "1") {
+      const sid = params.get("store");
+      setOk("Store connected successfully");
+      if (sid) setHighlightId(sid);
+      const next = new URLSearchParams(params);
+      next.delete("connected");
+      next.delete("store");
+      setParams(next, { replace: true });
+      void storesQuery.refetch();
+    } else if (params.get("oauth_error") === "1") {
+      setError("Daraz connection failed. Try Connect Daraz Store again.");
+      const next = new URLSearchParams(params);
+      next.delete("oauth_error");
+      next.delete("message");
+      setParams(next, { replace: true });
+    }
+    // Intentionally omit storesQuery object identity to avoid refetch loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storesQuery.isSuccess, params, setParams]);
+
+  useEffect(() => {
+    if (!storesQuery.isSuccess || !groupsQuery.isSuccess) return;
+    if (localStorage.getItem(IMPORTED_FLAG) === "1") return;
     let cancelled = false;
     (async () => {
       try {
-        const list = await refresh();
-        if (cancelled) return;
-
-        if (params.get("connected") === "1") {
-          const sid = params.get("store");
-          setOk("Store connected successfully");
-          if (sid) setHighlightId(sid);
-          const next = new URLSearchParams(params);
-          next.delete("connected");
-          next.delete("store");
-          setParams(next, { replace: true });
+        const raw = localStorage.getItem(LEGACY_KEY);
+        const profiles = raw ? (JSON.parse(raw).profiles as Record<string, string[]>) : null;
+        if (!profiles || !Object.keys(profiles).length) return;
+        if ((groupsQuery.data || []).length > 0) {
+          localStorage.setItem(IMPORTED_FLAG, "1");
+          return;
         }
-        if (params.get("oauth_error") === "1") {
-          setError("Daraz connection failed. Try Connect Daraz Store again.");
-          const next = new URLSearchParams(params);
-          next.delete("oauth_error");
-          next.delete("message");
-          setParams(next, { replace: true });
-        }
-
-        if (localStorage.getItem(IMPORTED_FLAG) !== "1") {
-          try {
-            const raw = localStorage.getItem(LEGACY_KEY);
-            const profiles = raw ? (JSON.parse(raw).profiles as Record<string, string[]>) : null;
-            if (profiles && Object.keys(profiles).length) {
-              const existing = (await Api.listGroups()).groups || [];
-              if (existing.length === 0) {
-                const should = window.confirm(
-                  `Import ${Object.keys(profiles).length} browser profile(s) as store groups?`
-                );
-                if (should) {
-                  await Api.importBrowserProfiles(profiles);
-                  localStorage.setItem(IMPORTED_FLAG, "1");
-                  await refresh();
-                  setOk("Browser profiles imported as store groups");
-                }
-              } else {
-                localStorage.setItem(IMPORTED_FLAG, "1");
-              }
-            }
-          } catch {
-            /* ignore */
-          }
-        }
-
-        void list;
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load stores");
-      } finally {
-        if (!cancelled) setLoading(false);
+        const should = window.confirm(
+          `Import ${Object.keys(profiles).length} browser profile(s) as store groups?`
+        );
+        if (!should || cancelled) return;
+        await importProfilesMutation.mutateAsync(profiles);
+        localStorage.setItem(IMPORTED_FLAG, "1");
+        if (!cancelled) setOk("Browser profiles imported as store groups");
+      } catch {
+        /* ignore */
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [refresh, params, setParams]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot legacy import
+  }, [storesQuery.isSuccess, groupsQuery.isSuccess]);
 
   useEffect(() => {
     if (!highlightId) return;
@@ -212,9 +229,8 @@ export function StoresPage() {
     setBusyStoreId(store.store_id);
     setMenuOpen(null);
     try {
-      const data = await Api.refreshTokens([store.store_id], true);
+      const data = await refreshConnMutation.mutateAsync([store.store_id]);
       const bad = (data.results || []).find((r) => r.status === "error");
-      await refresh();
       if (bad) setError(bad.error || "Refresh failed — try Reconnect with Daraz");
       else setOk(`Connection refreshed for ${storeTitle(store)}`);
     } catch (err) {
@@ -240,9 +256,11 @@ export function StoresPage() {
     }
     setError("");
     try {
-      await Api.renameStore(renameTarget.store_id, trimmed);
+      await renameMutation.mutateAsync({
+        storeId: renameTarget.store_id,
+        displayName: trimmed,
+      });
       setRenameTarget(null);
-      await refresh();
       setOk(`Renamed to “${trimmed}”`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Rename failed");
@@ -274,17 +292,20 @@ export function StoresPage() {
       if (!groupName.trim()) throw new Error("Enter a group name");
       if (!groupStoreIds.length) throw new Error("Select at least one store");
       if (groupEditor === "new") {
-        await Api.createGroup(groupName.trim(), groupStoreIds);
+        await createGroupMutation.mutateAsync({
+          name: groupName.trim(),
+          storeIds: groupStoreIds,
+        });
         setOk("Store group created");
       } else if (groupEditor && typeof groupEditor === "object") {
-        await Api.updateGroup(groupEditor.id, {
+        await updateGroupMutation.mutateAsync({
+          groupId: groupEditor.id,
           name: groupName.trim(),
-          store_ids: groupStoreIds,
+          storeIds: groupStoreIds,
         });
         setOk("Store group updated");
       }
       setGroupEditor(null);
-      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save group");
     }
@@ -293,8 +314,7 @@ export function StoresPage() {
   async function removeGroup(group: StoreGroup) {
     if (!window.confirm(`Delete group “${group.name}”?`)) return;
     try {
-      await Api.deleteGroup(group.id);
-      await refresh();
+      await deleteGroupMutation.mutateAsync(group.id);
       setOk(`Deleted “${group.name}”`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");

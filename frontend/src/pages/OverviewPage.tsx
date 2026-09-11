@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { Api } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
+import { useStores } from "@/hooks/queries/useStores";
 import {
   EmptyState,
   ErrorBanner,
@@ -10,7 +10,6 @@ import {
   StatusBadge,
 } from "@/components/ui/Primitives";
 import { StorePerformancePanel } from "@/components/performance/StorePerformancePanel";
-import type { StoreView } from "@/types/api";
 
 function greetingName(email?: string | null): string {
   if (!email) return "there";
@@ -27,26 +26,9 @@ function greetingHour(): string {
 
 export function OverviewPage() {
   const { me } = useAuth();
-  const [stores, setStores] = useState<StoreView[]>([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await Api.listStores();
-        if (!cancelled) setStores(data.stores || []);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const workspaceId = me?.workspace?.id;
+  const { data: stores = [], isLoading: loading, error: storesError } = useStores(workspaceId);
+  const error = storesError instanceof Error ? storesError.message : "";
 
   const needsAttention = useMemo(
     () =>

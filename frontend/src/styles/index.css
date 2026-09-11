@@ -828,6 +828,11 @@ table.data tbody tr:hover {
   background: #fff;
 }
 
+.perf-updating {
+  opacity: 0.72;
+  transition: opacity 0.15s ease;
+}
+
 @media (max-width: 900px) {
   .perf-mobile-list.stores-table-mobile {
     display: grid;

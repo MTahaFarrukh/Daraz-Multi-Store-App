@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Api } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import { useStores } from "@/hooks/queries/useStores";
+import { useStoreGroups } from "@/hooks/queries/useStoreGroups";
+import {
+  useInvalidatePrintJobs,
+  usePrintJobs,
+  useRtsOrders,
+} from "@/hooks/queries/usePrintAndOrders";
 import { StoreSelector } from "@/components/stores/StoreSelector";
 import {
   EmptyState,
@@ -8,51 +16,96 @@ import {
   StatusBadge,
   SuccessBanner,
 } from "@/components/ui/Primitives";
-import type { OrderRow, PrintJobListItem, PrintJobStatus, StoreGroup, StoreView } from "@/types/api";
+import type { PrintJobStatus } from "@/types/api";
 
 const SELECTION_KEY = "multistore_shipping_selection_v1";
 
 export function ShippingPage() {
+  const { me } = useAuth();
+  const workspaceId = me?.workspace?.id;
   const [tab, setTab] = useState<"rts" | "history">("rts");
-  const [stores, setStores] = useState<StoreView[]>([]);
-  const [groups, setGroups] = useState<StoreGroup[]>([]);
+  const storesQuery = useStores(workspaceId);
+  const groupsQuery = useStoreGroups(workspaceId);
+  const stores = storesQuery.data || [];
+  const groups = groupsQuery.data || [];
+
   const [selected, setSelected] = useState<string[]>([]);
+  const [selectionReady, setSelectionReady] = useState(false);
   const [groupId, setGroupId] = useState("");
   const [limit, setLimit] = useState(10);
-  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [ordersEnabled, setOrdersEnabled] = useState(false);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState("");
   const [job, setJob] = useState<PrintJobStatus | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [history, setHistory] = useState<PrintJobListItem[]>([]);
-  const [historyNote, setHistoryNote] = useState("");
 
-  const loadMeta = useCallback(async () => {
-    const [s, g] = await Promise.all([Api.listStores(), Api.listGroups()]);
-    setStores(s.stores || []);
-    setGroups(g.groups || []);
+  const ordersQuery = useRtsOrders(workspaceId, selected, limit, ordersEnabled);
+  const printJobsQuery = usePrintJobs(workspaceId, tab === "history");
+  const invalidatePrintJobs = useInvalidatePrintJobs(workspaceId);
+
+  const orders = ordersQuery.data?.orders || [];
+  const history = printJobsQuery.data || [];
+  const historyNote =
+    printJobsQuery.isError
+      ? printJobsQuery.error instanceof Error
+        ? printJobsQuery.error.message
+        : "Print history list is not available. Job-specific download still works after a successful print."
+      : printJobsQuery.isSuccess && history.length === 0
+        ? "No print jobs recorded for this workspace yet."
+        : "";
+
+  useEffect(() => {
+    if (!storesQuery.isSuccess || selectionReady) return;
+    const valid = new Set(stores.map((x) => x.store_id));
     const saved = localStorage.getItem(SELECTION_KEY);
-    const valid = new Set((s.stores || []).map((x) => x.store_id));
     if (saved) {
       try {
         const ids = (JSON.parse(saved) as string[]).filter((id) => valid.has(id));
         setSelected(ids);
+        setSelectionReady(true);
         return;
       } catch {
         /* fall through */
       }
     }
-    setSelected((s.stores || []).map((x) => x.store_id));
-  }, []);
+    setSelected(stores.map((x) => x.store_id));
+    setSelectionReady(true);
+  }, [storesQuery.isSuccess, stores, selectionReady]);
 
   useEffect(() => {
-    loadMeta().catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
-  }, [loadMeta]);
-
-  useEffect(() => {
+    if (!selectionReady) return;
     localStorage.setItem(SELECTION_KEY, JSON.stringify(selected));
-  }, [selected]);
+  }, [selected, selectionReady]);
+
+  // Changing selection/limit must not auto-hit Daraz — require Load Orders again.
+  useEffect(() => {
+    setOrdersEnabled(false);
+  }, [selected, limit]);
+
+  useEffect(() => {
+    const metaErr =
+      (storesQuery.error instanceof Error && storesQuery.error.message) ||
+      (groupsQuery.error instanceof Error && groupsQuery.error.message) ||
+      "";
+    if (metaErr) setError(metaErr);
+  }, [storesQuery.error, groupsQuery.error]);
+
+  useEffect(() => {
+    if (!ordersEnabled) return;
+    if (ordersQuery.isFetching) {
+      setBusy(`Loading orders (${selected.length} store${selected.length === 1 ? "" : "s"})…`);
+      return;
+    }
+    setBusy("");
+    if (ordersQuery.isError) {
+      setError(ordersQuery.error instanceof Error ? ordersQuery.error.message : "Failed to load orders");
+      return;
+    }
+    if (ordersQuery.isSuccess) {
+      setOk(`Loaded ${ordersQuery.data?.count || 0} orders`);
+    }
+  }, [ordersEnabled, ordersQuery.isFetching, ordersQuery.isError, ordersQuery.isSuccess, ordersQuery.data, ordersQuery.error, selected.length]);
 
   async function loadOrders() {
     setError("");
@@ -61,15 +114,12 @@ export function ShippingPage() {
       setError("Select at least one store");
       return;
     }
-    setBusy(`Loading orders (${selected.length} store${selected.length === 1 ? "" : "s"})…`);
-    try {
-      const data = await Api.listOrders(selected, limit);
-      setOrders(data.orders || []);
-      setOk(`Loaded ${data.count || 0} orders`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load orders");
-    } finally {
-      setBusy("");
+    // Enable the workspace-scoped query, then force a fetch.
+    // Mounting Shipping never enables this — empty selection never can.
+    setOrdersEnabled(true);
+    const result = await ordersQuery.refetch();
+    if (result.error) {
+      setError(result.error instanceof Error ? result.error.message : "Failed to load orders");
     }
   }
 
@@ -98,6 +148,7 @@ export function ShippingPage() {
           const secs = Math.round((Date.now() - started) / 1000);
           setOk(`PDF ready · ${status.pages ?? "?"} page(s) · ${secs}s`);
           setBusy("");
+          await invalidatePrintJobs();
           try {
             await Api.downloadPrint(jobId);
           } catch {
@@ -116,32 +167,6 @@ export function ShippingPage() {
       setBusy("");
     }
   }
-
-  async function loadHistory() {
-    setError("");
-    setHistoryNote("");
-    try {
-      const data = await Api.listPrintJobs();
-      setHistory(data.jobs || []);
-      if (!(data.jobs || []).length) {
-        setHistoryNote("No print jobs recorded for this workspace yet.");
-      }
-    } catch (err) {
-      // Endpoint may be unavailable on older deploys
-      setHistory([]);
-      setHistoryNote(
-        err instanceof Error
-          ? err.message
-          : "Print history list is not available. Job-specific download still works after a successful print."
-      );
-    }
-  }
-
-  useEffect(() => {
-    if (tab === "history") {
-      loadHistory().catch(() => undefined);
-    }
-  }, [tab]);
 
   return (
     <div className="stack">
