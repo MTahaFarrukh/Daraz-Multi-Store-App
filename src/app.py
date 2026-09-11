@@ -80,6 +80,8 @@ def _workspace_store_fns(workspace_id: str):
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+LEGACY_UI = get_env("SERVE_LEGACY_UI", "").lower() in {"1", "true", "yes"}
 
 _docs_url = None if is_production() else "/docs"
 _openapi_url = None if is_production() else "/openapi.json"
@@ -87,7 +89,7 @@ _openapi_url = None if is_production() else "/openapi.json"
 app = FastAPI(
     title="Daraz Multi-Store Manager",
     description="Multi-tenant multi-store orders and shipping label printing for Daraz Pakistan",
-    version="0.4.0",
+    version="0.5.0",
     docs_url=_docs_url,
     redoc_url=None if is_production() else "/redoc",
     openapi_url=_openapi_url,
@@ -95,6 +97,22 @@ app = FastAPI(
 
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+_FRONTEND_ASSETS_MOUNTED = False
+
+
+def _mount_frontend_assets() -> None:
+    global _FRONTEND_ASSETS_MOUNTED
+    if _FRONTEND_ASSETS_MOUNTED:
+        return
+    assets = FRONTEND_DIST / "assets"
+    if not assets.is_dir():
+        return
+    app.mount("/assets", StaticFiles(directory=str(assets)), name="frontend_assets")
+    _FRONTEND_ASSETS_MOUNTED = True
+
+
+_mount_frontend_assets()
 
 
 def _daraz_http_error(exc: DarazApiError) -> HTTPException:
@@ -112,6 +130,7 @@ def _daraz_http_error(exc: DarazApiError) -> HTTPException:
 
 @app.on_event("startup")
 def _startup() -> None:
+    _mount_frontend_assets()
     if not auth_configured():
         logger.warning(
             "SUPABASE_URL is not set — authenticated APIs will return 503 until configured "
@@ -126,26 +145,47 @@ def _startup() -> None:
             logger.error("Failed to ensure SaaS schema: %s", exc)
 
 
-@app.get("/", response_model=None)
-def root():
-    index = STATIC_DIR / "index.html"
+def _spa_index() -> FileResponse | HTMLResponse:
+    index = FRONTEND_DIST / "index.html"
     if index.is_file():
         return FileResponse(
             index,
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
-    return HTMLResponse("<p>UI missing. Open /login.</p>")
+    # Never fall back to legacy static dashboard in production — React is primary.
+    if not is_production():
+        legacy = STATIC_DIR / "index.html"
+        if legacy.is_file():
+            return FileResponse(
+                legacy,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
+    return HTMLResponse(
+        "<p>Frontend build missing. Run <code>npm run build</code> in <code>frontend/</code>.</p>",
+        status_code=503,
+    )
+
+
+@app.get("/", response_model=None)
+def root():
+    if LEGACY_UI:
+        index = STATIC_DIR / "index.html"
+        if index.is_file():
+            return FileResponse(
+                index,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
+    return _spa_index()
 
 
 @app.get("/login", response_model=None)
-def login_page():
-    path = STATIC_DIR / "login.html"
-    if path.is_file():
-        return FileResponse(
-            path,
-            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-        )
-    return HTMLResponse("<p>Login page missing.</p>")
+@app.get("/signup", response_model=None)
+@app.get("/app", response_model=None)
+@app.get("/app/{path:path}", response_model=None)
+def spa_routes(path: str = ""):
+    """Serve the React SPA for client-side routes (deep-link refresh safe)."""
+    _ = path
+    return _spa_index()
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +326,7 @@ def oauth_callback(
                 "workspace_id": workspace_id,
             }
         store_id = record.get("store_id", "")
-        return RedirectResponse(f"/?connected=1&store={store_id}", status_code=302)
+        return RedirectResponse(f"/app/stores?connected=1&store={store_id}", status_code=302)
     except DarazApiError as exc:
         logger.error("Token exchange failed code=%s request_id=%s", exc.code, exc.request_id)
         raise _daraz_http_error(exc) from exc
@@ -485,6 +525,32 @@ def api_orders(
 # ---------------------------------------------------------------------------
 # Print labels (per-workspace / per-job isolation)
 # ---------------------------------------------------------------------------
+
+
+@app.get("/api/print-jobs")
+def api_list_print_jobs(
+    limit: int = Query(30, ge=1, le=100),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """List recent print jobs for the active workspace (no cross-tenant leakage)."""
+    jobs = get_repo().list_print_jobs(ctx.workspace_id, limit=limit)
+    safe = []
+    for job in jobs:
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        safe.append(
+            {
+                "id": job.get("id"),
+                "status": job.get("status"),
+                "message": job.get("message") or "",
+                "error": job.get("error"),
+                "started_at": job.get("started_at"),
+                "updated_at": job.get("updated_at"),
+                "pages": result.get("pages"),
+                "labels": result.get("labels"),
+                "has_download": bool(job.get("output_path")) and job.get("status") == "done",
+            }
+        )
+    return {"jobs": safe}
 
 
 @app.post("/api/print-labels")

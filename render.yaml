@@ -39,6 +39,8 @@ services:
         value: production
       - key: ALLOW_LEGACY_DATA_IMPORT
         value: "false"
+      - key: SERVE_LEGACY_UI
+        value: "false"
       - key: DARAZ_API_BASE
         value: https://api.daraz.pk/rest
       - key: DARAZ_OAUTH_AUTHORIZE

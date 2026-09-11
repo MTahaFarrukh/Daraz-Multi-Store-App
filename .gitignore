@@ -9,6 +9,8 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+frontend/dist/
+frontend/node_modules/
 *.log
 labels/
 
@@ -22,8 +24,9 @@ data/output/**/*.pdf
 data/output/**/*.html
 data/test-label.*
 
-# Legacy / ad-hoc label output (keep src/static/*.html for dashboard UI)
+# Legacy / ad-hoc label output (keep src/static/*.html and Vite index.html)
 *.pdf
 *.html
 !src/static/**
+!frontend/index.html
 !docs/**/*.md

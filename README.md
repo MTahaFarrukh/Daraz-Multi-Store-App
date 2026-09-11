@@ -25,15 +25,21 @@ copy .env.example .env
 # Edit .env — Daraz keys + SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY + SUPABASE_SECRET_KEY + DATABASE_URL (never commit .env)
 ```
 
-## Web UI
+## Web UI (Phase 1B React)
 
 ```powershell
+# Terminal 1 — API
 uvicorn src.app:app --reload --host 127.0.0.1 --port 8000
+
+# Terminal 2 — Vite (proxies /api and /oauth to :8000)
+cd frontend
+npm install
+npm run dev
 ```
 
-Open http://127.0.0.1:8000/login — sign up / sign in, then use the dashboard to connect stores, load ready-to-ship orders, and print a combined shipping-label PDF.
+Open the Vite URL (http://127.0.0.1:5173). Production builds the SPA into `frontend/dist` during Docker/Render deploy; FastAPI serves `/`, `/login`, `/signup`, and `/app/*`.
 
-OAuth callback returns to the dashboard. For ngrok callbacks, keep `DARAZ_REDIRECT_URI` pointing at your tunnel `/oauth/callback`.
+Setup details: [docs/PHASE1A_SETUP.md](docs/PHASE1A_SETUP.md) · [docs/PHASE1B_MIGRATION.md](docs/PHASE1B_MIGRATION.md)
 
 
 ## Phase 3 CLI

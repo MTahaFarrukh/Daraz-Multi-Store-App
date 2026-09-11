@@ -117,6 +117,10 @@ class TenancyRepo(Protocol):
 
     def get_print_job(self, job_id: str) -> dict[str, Any] | None: ...
 
+    def list_print_jobs(
+        self, workspace_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
+
 
 class MemoryTenancyRepo:
     """In-memory repo for tests and local AUTH_TEST_MODE without Postgres."""
@@ -385,6 +389,18 @@ class MemoryTenancyRepo:
         with self._lock:
             job = self.print_jobs.get(str(job_id))
             return deepcopy(job) if job else None
+
+    def list_print_jobs(
+        self, workspace_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [
+                deepcopy(j)
+                for j in self.print_jobs.values()
+                if str(j.get("workspace_id")) == str(workspace_id)
+            ]
+        rows.sort(key=lambda j: str(j.get("updated_at") or j.get("started_at") or ""), reverse=True)
+        return rows[: max(1, min(limit, 100))]
 
 
 class PostgresTenancyRepo:
@@ -899,6 +915,48 @@ class PostgresTenancyRepo:
             "started_at": row[8].isoformat() if row[8] else None,
             "updated_at": row[9].isoformat() if row[9] else None,
         }
+
+    def list_print_jobs(
+        self, workspace_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        limit = max(1, min(int(limit), 100))
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, user_id, status, message, error, result,
+                       output_path, started_at, updated_at
+                FROM print_jobs
+                WHERE workspace_id = %s
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (workspace_id, limit),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            result = row[6]
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    result = None
+            out.append(
+                {
+                    "id": str(row[0]),
+                    "workspace_id": str(row[1]),
+                    "user_id": str(row[2]),
+                    "status": row[3],
+                    "message": row[4] or "",
+                    "error": row[5],
+                    "result": result,
+                    "output_path": row[7],
+                    "started_at": row[8].isoformat() if row[8] else None,
+                    "updated_at": row[9].isoformat() if row[9] else None,
+                }
+            )
+        return out
 
 
 _repo: TenancyRepo | None = None

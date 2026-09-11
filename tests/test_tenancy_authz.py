@@ -292,8 +292,47 @@ def test_legacy_migration_idempotent(tenancy_env, tmp_path: Path, monkeypatch: p
     assert stores[0]["access_token"] == "legacy-access"
 
 
+def test_print_jobs_list_is_workspace_scoped(client: TestClient, tenancy_env) -> None:
+    wid_a = _bootstrap(client, "user-a", "a@example.com")
+    wid_b = _bootstrap(client, "user-b", "b@example.com")
+    job_id = begin_print_job(workspace_id=wid_a, user_id="user-a")
+    complete_print_job(job_id, {"pages": 2, "labels": 2})
+
+    headers_a = _auth("user-a", "a@example.com")
+    headers_a["X-Workspace-Id"] = wid_a
+    listed = client.get("/api/print-jobs", headers=headers_a)
+    assert listed.status_code == 200
+    ids = {j["id"] for j in listed.json()["jobs"]}
+    assert job_id in ids
+
+    headers_b = _auth("user-b", "b@example.com")
+    headers_b["X-Workspace-Id"] = wid_b
+    other = client.get("/api/print-jobs", headers=headers_b)
+    assert other.status_code == 200
+    assert other.json()["jobs"] == []
+
+
 def test_legacy_download_endpoints_gone(client: TestClient) -> None:
     assert client.get("/api/download/combined-labels").status_code == 410
+
+
+def test_empty_store_selection_rejected(client: TestClient, tenancy_env) -> None:
+    wid = _bootstrap(client, "user-a", "a@example.com")
+    headers = _auth("user-a", "a@example.com")
+    headers["X-Workspace-Id"] = wid
+    res = client.get("/api/orders?stores=", headers=headers)
+    assert res.status_code == 400
+    assert "No stores selected" in res.json()["detail"]
+    res2 = client.post("/api/print-labels?stores=", headers=headers)
+    assert res2.status_code == 400
+
+
+def test_unknown_api_path_is_not_spa_html(client: TestClient) -> None:
+    res = client.get("/api/does-not-exist-phase1b")
+    assert res.status_code == 404
+    ct = res.headers.get("content-type", "")
+    assert "application/json" in ct
+    assert "text/html" not in ct
 
 
 def test_public_config_has_no_secrets(client: TestClient) -> None:
