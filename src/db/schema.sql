@@ -81,3 +81,30 @@ CREATE TABLE IF NOT EXISTS print_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_print_jobs_workspace
     ON print_jobs (workspace_id, updated_at DESC);
+
+-- Phase 2.5B: monthly store performance aggregates (workspace-scoped; FK to daraz_stores.id)
+CREATE TABLE IF NOT EXISTS store_performance_monthly (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    year INT NOT NULL CHECK (year >= 2000 AND year <= 2100),
+    month INT NOT NULL CHECK (month >= 1 AND month <= 12),
+    orders_count INT NOT NULL DEFAULT 0,
+    gross_sales NUMERIC(18, 2),
+    currency TEXT,
+    previous_orders_count INT,
+    orders_growth_pct NUMERIC(12, 4),
+    previous_gross_sales NUMERIC(18, 2),
+    gross_sales_growth_pct NUMERIC(12, 4),
+    source TEXT NOT NULL DEFAULT 'orders_api',
+    sync_status TEXT NOT NULL DEFAULT 'ok',
+    sync_error TEXT,
+    orders_synced_at TIMESTAMPTZ,
+    gross_sales_synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (store_id, year, month)
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_perf_monthly_workspace_period
+    ON store_performance_monthly (workspace_id, year DESC, month DESC);

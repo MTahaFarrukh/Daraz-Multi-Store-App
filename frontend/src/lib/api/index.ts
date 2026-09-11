@@ -3,6 +3,9 @@ import type {
   BootstrapResponse,
   MeResponse,
   OrderRow,
+  PerformanceLeaderboardResponse,
+  PerformanceMonthsResponse,
+  PerformanceSyncResponse,
   PrintJobListItem,
   PrintJobStatus,
   StoreGroup,
@@ -80,4 +83,22 @@ export const Api = {
       `/api/print-labels/${encodeURIComponent(jobId)}/download`,
       "combined-labels.pdf"
     ),
+
+  performanceMonths: () => api<PerformanceMonthsResponse>("/api/store-performance/months"),
+  storePerformance: (year: number, month: number, metric: "orders" | "gross_sales" = "orders") => {
+    const qs = new URLSearchParams({
+      year: String(year),
+      month: String(month),
+      metric,
+    });
+    return api<PerformanceLeaderboardResponse>(`/api/store-performance?${qs}`);
+  },
+  syncStorePerformance: (year: number, month: number, includeGrossSales = true) => {
+    const qs = new URLSearchParams({
+      year: String(year),
+      month: String(month),
+      include_gross_sales: String(includeGrossSales),
+    });
+    return api<PerformanceSyncResponse>(`/api/store-performance/sync?${qs}`, { method: "POST" });
+  },
 };

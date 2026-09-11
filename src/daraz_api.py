@@ -211,7 +211,10 @@ class DarazClient:
     def get_orders(
         self,
         *,
-        created_after: str,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        update_after: str | None = None,
+        update_before: str | None = None,
         status: str = "ready_to_ship",
         limit: int = 100,
         offset: int = 0,
@@ -221,20 +224,25 @@ class DarazClient:
         """
         GET /orders/get — list orders for the token's store.
 
-        created_after example: 2026-01-01T00:00:00+05:00
-        status filter examples: ready_to_ship, pending, packed, all
+        Date params (ISO 8601 with offset, e.g. 2026-01-01T00:00:00+05:00):
+        official docs require created_after *or* update_after.
         """
-        return self._request(
-            "/orders/get",
-            business_params={
-                "created_after": created_after,
-                "status": status,
-                "limit": str(limit),
-                "offset": str(offset),
-                "sort_by": sort_by,
-                "sort_direction": sort_direction,
-            },
-        )
+        business: dict[str, str] = {
+            "status": status,
+            "limit": str(limit),
+            "offset": str(offset),
+            "sort_by": sort_by,
+            "sort_direction": sort_direction,
+        }
+        if created_after:
+            business["created_after"] = created_after
+        if created_before:
+            business["created_before"] = created_before
+        if update_after:
+            business["update_after"] = update_after
+        if update_before:
+            business["update_before"] = update_before
+        return self._request("/orders/get", business_params=business)
 
     def get_order(self, order_id: int | str) -> dict[str, Any]:
         """GET /order/get — single order header/details."""
@@ -249,6 +257,44 @@ class DarazClient:
         ids = ",".join(str(i) for i in order_ids)
         return self._request("/orders/items/get", business_params={"order_ids": f"[{ids}]"})
 
+    # ------------------------------------------------------------------
+    # Finance (Lazada-mapped paths — availability on Daraz PK must be probed)
+    # ------------------------------------------------------------------
+
+    def get_finance_transaction_details(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        offset: int = 0,
+        limit: int = 100,
+        trans_type: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        GET /finance/transaction/details/get — seller transaction ledger rows.
+
+        Date window semantics are platform-defined (typically statement/trade dates).
+        """
+        business: dict[str, str] = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "offset": str(offset),
+            "limit": str(limit),
+        }
+        if trans_type:
+            business["trans_type"] = trans_type
+        return self._request("/finance/transaction/details/get", business_params=business)
+
+    def get_payout_status(
+        self,
+        *,
+        created_after: str,
+    ) -> dict[str, Any]:
+        """GET /finance/payout/status/get — payout / statement status rows."""
+        return self._request(
+            "/finance/payout/status/get",
+            business_params={"created_after": created_after},
+        )
     # ------------------------------------------------------------------
     # Fulfillment / documents (verified legacy paths on Daraz platform)
     # ------------------------------------------------------------------

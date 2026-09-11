@@ -127,6 +127,22 @@ class TenancyRepo(Protocol):
         self, workspace_id: str, *, limit: int = 50
     ) -> list[dict[str, Any]]: ...
 
+    def get_store_by_uuid(
+        self, workspace_id: str, store_uuid: str
+    ) -> dict[str, Any] | None: ...
+
+    def upsert_store_performance(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def get_store_performance(
+        self, workspace_id: str, store_uuid: str, year: int, month: int
+    ) -> dict[str, Any] | None: ...
+
+    def list_store_performance(
+        self, workspace_id: str, year: int, month: int
+    ) -> list[dict[str, Any]]: ...
+
+    def list_performance_months(self, workspace_id: str) -> list[dict[str, int]]: ...
+
 
 class MemoryTenancyRepo:
     """In-memory repo for tests and local AUTH_TEST_MODE without Postgres."""
@@ -139,6 +155,7 @@ class MemoryTenancyRepo:
         self.groups: dict[str, dict[str, Any]] = {}
         self.group_members: dict[str, list[str]] = {}
         self.print_jobs: dict[str, dict[str, Any]] = {}
+        self.performance: dict[str, dict[str, Any]] = {}  # store_uuid|y|m
 
     def create_workspace_with_owner(self, user_id: str, name: str) -> dict[str, Any]:
         with self._lock:
@@ -408,6 +425,97 @@ class MemoryTenancyRepo:
             ]
         rows.sort(key=lambda j: str(j.get("updated_at") or j.get("started_at") or ""), reverse=True)
         return rows[: max(1, min(limit, 100))]
+
+    def get_store_by_uuid(
+        self, workspace_id: str, store_uuid: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            for s in self.stores.values():
+                if s["workspace_id"] == workspace_id and str(s.get("id")) == str(store_uuid):
+                    return store_row_to_record(s)
+            return None
+
+    def _perf_key(self, store_uuid: str, year: int, month: int) -> str:
+        return f"{store_uuid}|{year}|{month}"
+
+    def upsert_store_performance(self, **kwargs: Any) -> dict[str, Any]:
+        workspace_id = str(kwargs["workspace_id"])
+        store_uuid = str(kwargs["store_uuid"])
+        year = int(kwargs["year"])
+        month = int(kwargs["month"])
+        preserve = bool(kwargs.get("preserve_counts_on_error"))
+        key = self._perf_key(store_uuid, year, month)
+        with self._lock:
+            existing = self.performance.get(key)
+            if preserve and existing and kwargs.get("sync_status") == "error":
+                row = dict(existing)
+                row["sync_status"] = "error"
+                row["sync_error"] = kwargs.get("sync_error")
+                row["updated_at"] = _now().isoformat()
+                self.performance[key] = row
+                return deepcopy(row)
+
+            now = _now().isoformat()
+            row = {
+                "id": (existing or {}).get("id") or _uuid(),
+                "workspace_id": workspace_id,
+                "store_id": store_uuid,
+                "year": year,
+                "month": month,
+                "orders_count": int(kwargs.get("orders_count") or 0),
+                "gross_sales": kwargs.get("gross_sales"),
+                "currency": kwargs.get("currency") or "PKR",
+                "previous_orders_count": kwargs.get("previous_orders_count"),
+                "orders_growth_pct": kwargs.get("orders_growth_pct"),
+                "previous_gross_sales": kwargs.get("previous_gross_sales"),
+                "gross_sales_growth_pct": kwargs.get("gross_sales_growth_pct"),
+                "source": kwargs.get("source") or "orders_api",
+                "sync_status": kwargs.get("sync_status") or "ok",
+                "sync_error": kwargs.get("sync_error"),
+                "orders_synced_at": (
+                    now if kwargs.get("orders_synced") else (existing or {}).get("orders_synced_at")
+                ),
+                "gross_sales_synced_at": (
+                    now
+                    if kwargs.get("gross_synced")
+                    else (existing or {}).get("gross_sales_synced_at")
+                ),
+                "created_at": (existing or {}).get("created_at") or now,
+                "updated_at": now,
+            }
+            self.performance[key] = row
+            return deepcopy(row)
+
+    def get_store_performance(
+        self, workspace_id: str, store_uuid: str, year: int, month: int
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.performance.get(self._perf_key(store_uuid, year, month))
+            if not row or str(row.get("workspace_id")) != str(workspace_id):
+                return None
+            return deepcopy(row)
+
+    def list_store_performance(
+        self, workspace_id: str, year: int, month: int
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [
+                deepcopy(r)
+                for r in self.performance.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+                and int(r.get("year")) == year
+                and int(r.get("month")) == month
+            ]
+        return rows
+
+    def list_performance_months(self, workspace_id: str) -> list[dict[str, int]]:
+        with self._lock:
+            pairs = {
+                (int(r["year"]), int(r["month"]))
+                for r in self.performance.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+            }
+        return [{"year": y, "month": m} for y, m in sorted(pairs, reverse=True)]
 
 
 class PostgresTenancyRepo:
@@ -969,6 +1077,214 @@ class PostgresTenancyRepo:
                 }
             )
         return out
+
+    def get_store_by_uuid(
+        self, workspace_id: str, store_uuid: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, workspace_id, store_id, display_name, store_name, account,
+                       seller_id, daraz_user_id, country, account_platform, country_user_info,
+                       access_token_enc, refresh_token_enc, expires_in, refresh_expires_in,
+                       access_token_expires_at, refresh_token_expires_at, authorized_at, request_id,
+                       updated_at
+                FROM daraz_stores
+                WHERE workspace_id = %s AND id = %s
+                LIMIT 1
+                """,
+                (workspace_id, store_uuid),
+            ).fetchone()
+        if not row:
+            return None
+        return store_row_to_record(self._row_to_dict(row))
+
+    def upsert_store_performance(self, **kwargs: Any) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        workspace_id = str(kwargs["workspace_id"])
+        store_uuid = str(kwargs["store_uuid"])
+        year = int(kwargs["year"])
+        month = int(kwargs["month"])
+        preserve = bool(kwargs.get("preserve_counts_on_error"))
+
+        with connect() as conn:
+            if preserve and kwargs.get("sync_status") == "error":
+                existing = conn.execute(
+                    """
+                    SELECT id FROM store_performance_monthly
+                    WHERE workspace_id = %s AND store_id = %s AND year = %s AND month = %s
+                    """,
+                    (workspace_id, store_uuid, year, month),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE store_performance_monthly
+                        SET sync_status = 'error', sync_error = %s, updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (kwargs.get("sync_error"), existing[0]),
+                    )
+                    conn.commit()
+                    found = self.get_store_performance(workspace_id, store_uuid, year, month)
+                    assert found is not None
+                    return found
+
+            orders_synced = bool(kwargs.get("orders_synced"))
+            gross_synced = bool(kwargs.get("gross_synced"))
+            conn.execute(
+                """
+                INSERT INTO store_performance_monthly (
+                    workspace_id, store_id, year, month,
+                    orders_count, gross_sales, currency,
+                    previous_orders_count, orders_growth_pct,
+                    previous_gross_sales, gross_sales_growth_pct,
+                    source, sync_status, sync_error,
+                    orders_synced_at, gross_sales_synced_at
+                ) VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s, %s,
+                    CASE WHEN %s THEN NOW() ELSE NULL END,
+                    CASE WHEN %s THEN NOW() ELSE NULL END
+                )
+                ON CONFLICT (store_id, year, month) DO UPDATE SET
+                    workspace_id = EXCLUDED.workspace_id,
+                    orders_count = EXCLUDED.orders_count,
+                    gross_sales = EXCLUDED.gross_sales,
+                    currency = EXCLUDED.currency,
+                    previous_orders_count = EXCLUDED.previous_orders_count,
+                    orders_growth_pct = EXCLUDED.orders_growth_pct,
+                    previous_gross_sales = EXCLUDED.previous_gross_sales,
+                    gross_sales_growth_pct = EXCLUDED.gross_sales_growth_pct,
+                    source = EXCLUDED.source,
+                    sync_status = EXCLUDED.sync_status,
+                    sync_error = EXCLUDED.sync_error,
+                    orders_synced_at = CASE
+                        WHEN %s THEN NOW()
+                        ELSE store_performance_monthly.orders_synced_at
+                    END,
+                    gross_sales_synced_at = CASE
+                        WHEN %s THEN NOW()
+                        ELSE store_performance_monthly.gross_sales_synced_at
+                    END,
+                    updated_at = NOW()
+                """,
+                (
+                    workspace_id,
+                    store_uuid,
+                    year,
+                    month,
+                    int(kwargs.get("orders_count") or 0),
+                    kwargs.get("gross_sales"),
+                    kwargs.get("currency") or "PKR",
+                    kwargs.get("previous_orders_count"),
+                    kwargs.get("orders_growth_pct"),
+                    kwargs.get("previous_gross_sales"),
+                    kwargs.get("gross_sales_growth_pct"),
+                    kwargs.get("source") or "orders_api",
+                    kwargs.get("sync_status") or "ok",
+                    kwargs.get("sync_error"),
+                    orders_synced,
+                    gross_synced,
+                    orders_synced,
+                    gross_synced,
+                ),
+            )
+            conn.commit()
+        found = self.get_store_performance(workspace_id, store_uuid, year, month)
+        assert found is not None
+        return found
+
+    def get_store_performance(
+        self, workspace_id: str, store_uuid: str, year: int, month: int
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, workspace_id, store_id, year, month,
+                       orders_count, gross_sales, currency,
+                       previous_orders_count, orders_growth_pct,
+                       previous_gross_sales, gross_sales_growth_pct,
+                       source, sync_status, sync_error,
+                       orders_synced_at, gross_sales_synced_at,
+                       created_at, updated_at
+                FROM store_performance_monthly
+                WHERE workspace_id = %s AND store_id = %s AND year = %s AND month = %s
+                """,
+                (workspace_id, store_uuid, year, month),
+            ).fetchone()
+        if not row:
+            return None
+        return self._perf_row(row)
+
+    def list_store_performance(
+        self, workspace_id: str, year: int, month: int
+    ) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, store_id, year, month,
+                       orders_count, gross_sales, currency,
+                       previous_orders_count, orders_growth_pct,
+                       previous_gross_sales, gross_sales_growth_pct,
+                       source, sync_status, sync_error,
+                       orders_synced_at, gross_sales_synced_at,
+                       created_at, updated_at
+                FROM store_performance_monthly
+                WHERE workspace_id = %s AND year = %s AND month = %s
+                """,
+                (workspace_id, year, month),
+            ).fetchall()
+        return [self._perf_row(r) for r in rows]
+
+    def list_performance_months(self, workspace_id: str) -> list[dict[str, int]]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT year, month
+                FROM store_performance_monthly
+                WHERE workspace_id = %s
+                ORDER BY year DESC, month DESC
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [{"year": int(r[0]), "month": int(r[1])} for r in rows]
+
+    @staticmethod
+    def _perf_row(row) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "store_id": str(row[2]),
+            "year": int(row[3]),
+            "month": int(row[4]),
+            "orders_count": int(row[5] or 0),
+            "gross_sales": float(row[6]) if row[6] is not None else None,
+            "currency": row[7] or "PKR",
+            "previous_orders_count": int(row[8]) if row[8] is not None else None,
+            "orders_growth_pct": float(row[9]) if row[9] is not None else None,
+            "previous_gross_sales": float(row[10]) if row[10] is not None else None,
+            "gross_sales_growth_pct": float(row[11]) if row[11] is not None else None,
+            "source": row[12],
+            "sync_status": row[13],
+            "sync_error": row[14],
+            "orders_synced_at": row[15].isoformat() if row[15] else None,
+            "gross_sales_synced_at": row[16].isoformat() if row[16] else None,
+            "created_at": row[17].isoformat() if row[17] else None,
+            "updated_at": row[18].isoformat() if row[18] else None,
+        }
 
 
 _repo: TenancyRepo | None = None

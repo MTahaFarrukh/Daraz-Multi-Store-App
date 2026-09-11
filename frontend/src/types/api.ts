@@ -104,3 +104,50 @@ export type PrintJobListItem = {
   labels?: number | null;
   has_download: boolean;
 };
+
+/** Leaderboard-safe performance row (no tokens / workspace ops metadata). */
+export type PerformanceRow = {
+  store_id: string;
+  display_name: string;
+  rank: number;
+  orders_count: number;
+  gross_sales: number | null;
+  currency: string;
+  orders_growth_pct: number | null;
+  gross_sales_growth_pct: number | null;
+  year: number;
+  month: number;
+  sync_status?: string | null;
+  orders_synced_at?: string | null;
+  gross_sales_synced_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type PerformanceLeaderboardResponse = {
+  year: number;
+  month: number;
+  metric: "orders" | "gross_sales" | string;
+  timezone: string;
+  gross_sales_enabled: boolean;
+  last_synced_at: string | null;
+  leaderboard: PerformanceRow[];
+  workspace_id: string;
+};
+
+export type PerformanceMonthsResponse = {
+  months: Array<{ year: number; month: number }>;
+  current: { year: number; month: number };
+  timezone: string;
+};
+
+export type PerformanceSyncResponse = {
+  year: number;
+  month: number;
+  stores_total: number;
+  stores_ok: number;
+  stores_partial: number;
+  stores_error: number;
+  leaderboard: PerformanceRow[];
+  last_synced_at: string | null;
+  gross_sales_enabled?: boolean;
+};

@@ -4,6 +4,7 @@ import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { LoginPage, SignupPage } from "@/pages/AuthPages";
 import { OverviewPage } from "@/pages/OverviewPage";
+import { PerformancePage } from "@/pages/PerformancePage";
 import { ShippingPage } from "@/pages/ShippingPage";
 import { StoresPage } from "@/pages/StoresPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -26,6 +27,7 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route path="/app" element={<AppLayout />}>
             <Route index element={<OverviewPage />} />
+            <Route path="performance" element={<PerformancePage />} />
             <Route path="orders" element={<OrdersPage />} />
             <Route path="products" element={<ProductsPage />} />
             <Route path="inventory" element={<InventoryPage />} />

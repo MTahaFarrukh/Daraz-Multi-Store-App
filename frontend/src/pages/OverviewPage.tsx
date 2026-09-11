@@ -9,6 +9,7 @@ import {
   StatCard,
   StatusBadge,
 } from "@/components/ui/Primitives";
+import { StorePerformancePanel } from "@/components/performance/StorePerformancePanel";
 import type { StoreView } from "@/types/api";
 
 function greetingName(email?: string | null): string {
@@ -21,7 +22,7 @@ function greetingHour(): string {
   const h = new Date().getHours();
   if (h < 12) return "Good morning";
   if (h < 17) return "Good afternoon";
-  return "Good evening";
+  return "Assalamualaikum";
 }
 
 export function OverviewPage() {
@@ -95,6 +96,8 @@ export function OverviewPage() {
       </div>
 
       <div className="stack">
+        <StorePerformancePanel compact />
+
         <section className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h3 className="section-title" style={{ margin: 0 }}>

@@ -700,6 +700,113 @@ def api_print_labels_download(
     )
 
 
+# ---------------------------------------------------------------------------
+# Store performance (Phase 2.5B — workspace leaderboard)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/store-performance/months")
+def api_store_performance_months(
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.performance_time import current_marketplace_month, iter_recent_months
+
+    stored = get_repo().list_performance_months(ctx.workspace_id)
+    recent = [{"year": y, "month": m} for y, m in iter_recent_months(6)]
+    # Merge unique, prefer stored + recent suggestions
+    seen: set[tuple[int, int]] = set()
+    months: list[dict[str, int]] = []
+    for item in stored + recent:
+        key = (int(item["year"]), int(item["month"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        months.append({"year": key[0], "month": key[1]})
+    months.sort(key=lambda x: (x["year"], x["month"]), reverse=True)
+    cy, cm = current_marketplace_month()
+    return {
+        "months": months,
+        "current": {"year": cy, "month": cm},
+        "timezone": "UTC+08:00 (Daraz/Lazada API timestamp convention)",
+    }
+
+
+@app.get("/api/store-performance")
+def api_store_performance(
+    year: int | None = Query(None),
+    month: int | None = Query(None),
+    metric: str = Query("orders"),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.performance_sync import (
+        GROSS_SALES_ENABLED,
+        leaderboard_safe_view,
+        rank_performance_rows,
+    )
+    from src.performance_time import MARKETPLACE_TZ_LABEL, current_marketplace_month
+
+    if year is None or month is None:
+        year, month = current_marketplace_month()
+    if month < 1 or month > 12 or year < 2000:
+        raise HTTPException(status_code=400, detail="Invalid year/month")
+
+    metric_norm = (metric or "orders").lower()
+    if metric_norm == "gross_sales" and not GROSS_SALES_ENABLED:
+        raise HTTPException(status_code=400, detail="Gross Sales ranking is not enabled")
+    if metric_norm not in {"orders", "gross_sales"}:
+        metric_norm = "orders"
+
+    repo = get_repo()
+    stores = {str(s.get("id")): s for s in repo.list_stores(ctx.workspace_id) if s.get("id")}
+    rows = repo.list_store_performance(ctx.workspace_id, year, month)
+    # Only include stores still in workspace
+    rows = [r for r in rows if str(r.get("store_id")) in stores]
+    ranked = rank_performance_rows(rows, metric=metric_norm)
+    leaderboard = [
+        leaderboard_safe_view(r, stores.get(str(r.get("store_id")))) for r in ranked
+    ]
+
+    synced_ats = [r.get("orders_synced_at") for r in rows if r.get("orders_synced_at")]
+    last_synced = max(synced_ats) if synced_ats else None
+
+    return {
+        "year": year,
+        "month": month,
+        "metric": metric_norm,
+        "timezone": MARKETPLACE_TZ_LABEL,
+        "gross_sales_enabled": GROSS_SALES_ENABLED,
+        "last_synced_at": last_synced,
+        "leaderboard": leaderboard,
+        "workspace_id": ctx.workspace_id,
+    }
+
+
+@app.post("/api/store-performance/sync")
+def api_store_performance_sync(
+    year: int | None = Query(None),
+    month: int | None = Query(None),
+    include_gross_sales: bool = Query(True),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.performance_sync import GROSS_SALES_ENABLED, sync_workspace_month
+    from src.performance_time import current_marketplace_month
+
+    if year is None or month is None:
+        year, month = current_marketplace_month()
+    if month < 1 or month > 12 or year < 2000:
+        raise HTTPException(status_code=400, detail="Invalid year/month")
+
+    summary = sync_workspace_month(
+        ctx.workspace_id,
+        year=year,
+        month=month,
+        include_gross_sales=include_gross_sales and GROSS_SALES_ENABLED,
+    )
+    # Return refreshed leaderboard
+    board = api_store_performance(year=year, month=month, metric="orders", ctx=ctx)
+    return {**summary, "leaderboard": board["leaderboard"], "last_synced_at": board["last_synced_at"]}
+
+
 # Legacy download paths — intentionally disabled (no unauthenticated PDF access).
 @app.get("/api/download/combined-labels")
 def download_combined_labels_legacy() -> JSONResponse:
