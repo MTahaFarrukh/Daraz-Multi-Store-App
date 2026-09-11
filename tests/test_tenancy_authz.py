@@ -345,3 +345,139 @@ def test_public_config_has_no_secrets(client: TestClient) -> None:
     assert "secret" not in body
     assert "jwt" not in str(body).lower()
     assert body["supabase_publishable_key"] == "sb_publishable_test_key"
+
+
+def test_invalid_rename_rejected(client: TestClient, tenancy_env) -> None:
+    wid = _bootstrap(client, "user-a", "a@example.com")
+    _add_store(tenancy_env, wid, "store_a", "a@seller.com")
+    headers = _auth("user-a", "a@example.com")
+    headers["X-Workspace-Id"] = wid
+    blank = client.patch(
+        "/api/stores/store_a",
+        headers=headers,
+        json={"display_name": "   "},
+    )
+    assert blank.status_code == 422
+    ok = client.patch(
+        "/api/stores/store_a",
+        headers=headers,
+        json={"display_name": "  Main Desk  "},
+    )
+    assert ok.status_code == 200
+    store = ok.json()["store"]
+    assert store["display_name"] == "Main Desk"
+    assert "access_token" not in store
+    assert store["connection_status"] in {"connected", "needs_reconnection"}
+
+
+def test_duplicate_oauth_upsert_same_workspace(tenancy_env) -> None:
+    wid = tenancy_env.create_workspace_with_owner("user-a", "A")["workspace"]["id"]
+    first = tenancy_env.upsert_store(
+        wid,
+        {
+            "store_id": "vendor_shop_com",
+            "account": "vendor@shop.com",
+            "seller_id": "seller-99",
+            "display_name": "Custom Name",
+            "store_name": "Daraz Shop",
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "expires_in": 3600,
+            "country": "pk",
+        },
+    )
+    second = tenancy_env.upsert_store(
+        wid,
+        {
+            "store_id": "other_slug",
+            "account": "vendor@shop.com",
+            "seller_id": "seller-99",
+            "display_name": "From OAuth",
+            "store_name": "Daraz Shop",
+            "access_token": "access-2",
+            "refresh_token": "refresh-2",
+            "expires_in": 7200,
+            "country": "pk",
+        },
+    )
+    stores = tenancy_env.list_stores(wid)
+    assert len(stores) == 1
+    assert second["store_id"] == first["store_id"]
+    assert stores[0]["display_name"] == "Custom Name"
+    assert stores[0]["access_token"] == "access-2"
+
+
+def test_same_seller_allowed_in_different_workspaces(tenancy_env) -> None:
+    wid_a = tenancy_env.create_workspace_with_owner("user-a", "A")["workspace"]["id"]
+    wid_b = tenancy_env.create_workspace_with_owner("user-b", "B")["workspace"]["id"]
+    payload = {
+        "store_id": "shared_seller",
+        "account": "same@seller.com",
+        "seller_id": "seller-shared",
+        "display_name": "Shop",
+        "store_name": "Shop",
+        "access_token": "a",
+        "refresh_token": "r",
+        "expires_in": 3600,
+        "country": "pk",
+    }
+    tenancy_env.upsert_store(wid_a, dict(payload))
+    tenancy_env.upsert_store(wid_b, dict(payload, access_token="b"))
+    assert len(tenancy_env.list_stores(wid_a)) == 1
+    assert len(tenancy_env.list_stores(wid_b)) == 1
+    assert tenancy_env.list_stores(wid_a)[0]["access_token"] == "a"
+    assert tenancy_env.list_stores(wid_b)[0]["access_token"] == "b"
+
+
+def test_group_cannot_include_foreign_store(client: TestClient, tenancy_env) -> None:
+    wid_a = _bootstrap(client, "user-a", "a@example.com")
+    wid_b = _bootstrap(client, "user-b", "b@example.com")
+    _add_store(tenancy_env, wid_a, "store_a", "a@seller.com")
+    _add_store(tenancy_env, wid_b, "store_b", "b@seller.com")
+    headers_b = _auth("user-b", "b@example.com")
+    headers_b["X-Workspace-Id"] = wid_b
+    res = client.post(
+        "/api/store-groups",
+        headers=headers_b,
+        json={"name": "Steal", "store_ids": ["store_a"]},
+    )
+    assert res.status_code == 400
+
+
+def test_empty_group_members_do_not_select_all(client: TestClient, tenancy_env) -> None:
+    wid = _bootstrap(client, "user-a", "a@example.com")
+    _add_store(tenancy_env, wid, "store_a", "a@seller.com")
+    headers = _auth("user-a", "a@example.com")
+    headers["X-Workspace-Id"] = wid
+    created = client.post(
+        "/api/store-groups",
+        headers=headers,
+        json={"name": "Emptyish", "store_ids": ["store_a"]},
+    )
+    assert created.status_code == 200
+    gid = created.json()["group"]["id"]
+    updated = client.patch(
+        f"/api/store-groups/{gid}",
+        headers=headers,
+        json={"store_ids": []},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["group"]["store_ids"] == []
+    orders = client.get("/api/orders?stores=", headers=headers)
+    assert orders.status_code == 400
+
+
+def test_store_list_sanitized_and_has_health(client: TestClient, tenancy_env) -> None:
+    wid = _bootstrap(client, "user-a", "a@example.com")
+    _add_store(tenancy_env, wid, "store_a", "a@seller.com")
+    headers = _auth("user-a", "a@example.com")
+    headers["X-Workspace-Id"] = wid
+    res = client.get("/api/stores", headers=headers)
+    assert res.status_code == 200
+    store = res.json()["stores"][0]
+    assert store["store_id"] == "store_a"
+    assert "access_token" not in store
+    assert "refresh_token" not in store
+    assert store["connection_status"] in {"connected", "needs_reconnection"}
+    assert "needs_attention" in store
+    assert store.get("id")

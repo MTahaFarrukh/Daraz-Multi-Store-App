@@ -35,6 +35,7 @@ def _parse_ts(value: Any) -> datetime | None:
 def store_row_to_record(row: dict[str, Any], *, include_tokens: bool = True) -> dict[str, Any]:
     """Normalize a DB/memory store row into the dict shape used by ops/token_store."""
     record: dict[str, Any] = {
+        "id": str(row["id"]) if row.get("id") else None,
         "store_id": row.get("store_id", ""),
         "display_name": row.get("display_name") or row.get("store_name") or "",
         "store_name": row.get("store_name") or row.get("display_name") or "",
@@ -60,6 +61,11 @@ def store_row_to_record(row: dict[str, Any], *, include_tokens: bool = True) -> 
             row["authorized_at"].isoformat()
             if isinstance(row.get("authorized_at"), datetime)
             else row.get("authorized_at")
+        ),
+        "updated_at": (
+            row["updated_at"].isoformat()
+            if isinstance(row.get("updated_at"), datetime)
+            else row.get("updated_at")
         ),
         "request_id": row.get("request_id"),
         "workspace_id": str(row.get("workspace_id", "")),
@@ -248,7 +254,9 @@ class MemoryTenancyRepo:
                 ).strip()
                 if prior_display and not looks_like_email(prior_display):
                     store["display_name"] = prior_display
-                    store["store_name"] = prior_display
+                prior_shop = str(prior.get("store_name") or "").strip()
+                if prior_shop and not looks_like_email(prior_shop):
+                    store["store_name"] = prior_shop
                 store["store_id"] = prior.get("store_id") or store["store_id"]
 
             row = {
@@ -291,7 +299,6 @@ class MemoryTenancyRepo:
                 raise ValueError(f"Unknown store: {store_id}")
             row = dict(row)
             row["display_name"] = name
-            row["store_name"] = name
             row["updated_at"] = _now()
             self.stores[key] = row
             return store_row_to_record(row)
@@ -532,7 +539,8 @@ class PostgresTenancyRepo:
                 SELECT id, workspace_id, store_id, display_name, store_name, account,
                        seller_id, daraz_user_id, country, account_platform, country_user_info,
                        access_token_enc, refresh_token_enc, expires_in, refresh_expires_in,
-                       access_token_expires_at, refresh_token_expires_at, authorized_at, request_id
+                       access_token_expires_at, refresh_token_expires_at, authorized_at, request_id,
+                       updated_at
                 FROM daraz_stores
                 WHERE workspace_id = %s
                   AND (LOWER(store_id) = %s OR LOWER(account) = %s)
@@ -545,7 +553,8 @@ class PostgresTenancyRepo:
             SELECT id, workspace_id, store_id, display_name, store_name, account,
                    seller_id, daraz_user_id, country, account_platform, country_user_info,
                    access_token_enc, refresh_token_enc, expires_in, refresh_expires_in,
-                   access_token_expires_at, refresh_token_expires_at, authorized_at, request_id
+                   access_token_expires_at, refresh_token_expires_at, authorized_at, request_id,
+                   updated_at
             FROM daraz_stores
             WHERE workspace_id = %s
             ORDER BY display_name ASC, store_id ASC
@@ -580,6 +589,7 @@ class PostgresTenancyRepo:
             "refresh_token_expires_at": r[16],
             "authorized_at": r[17],
             "request_id": r[18],
+            "updated_at": r[19] if len(r) > 19 else None,
         }
 
     def list_stores(self, workspace_id: str) -> list[dict[str, Any]]:
@@ -631,7 +641,9 @@ class PostgresTenancyRepo:
                 prior_display = str(existing[1] or existing[2] or "").strip()
                 if prior_display and not looks_like_email(prior_display):
                     store["display_name"] = prior_display
-                    store["store_name"] = prior_display
+                prior_shop = str(existing[2] or "").strip()
+                if prior_shop and not looks_like_email(prior_shop):
+                    store["store_name"] = prior_shop
                 store["store_id"] = matched_store_id
 
             payload = (
@@ -702,10 +714,10 @@ class PostgresTenancyRepo:
             cur = conn.execute(
                 """
                 UPDATE daraz_stores
-                SET display_name = %s, store_name = %s, updated_at = NOW()
+                SET display_name = %s, updated_at = NOW()
                 WHERE workspace_id = %s AND LOWER(store_id) = LOWER(%s)
                 """,
-                (name, name, workspace_id, store_id),
+                (name, workspace_id, store_id),
             )
             if cur.rowcount == 0:
                 raise ValueError(f"Unknown store: {store_id}")

@@ -22,17 +22,30 @@ export type BootstrapResponse = {
   created: boolean;
 };
 
+/** Backend-authoritative connection status (see sanitize_store_view / connection_health). */
+export type ConnectionStatus = "connected" | "needs_reconnection" | "connection_error";
+
 export type StoreView = {
   connected: boolean;
+  /** Internal UUID primary key when available — prefer for future metrics joins. */
+  id?: string | null;
   store_id: string;
   display_name: string;
+  /** Resolved label (may match display_name). */
   store_name: string;
+  /** Daraz shop identity when distinct from email. */
+  shop_name?: string;
   account: string;
   seller_id: string;
   country: string;
   access_token_expires_at?: string | null;
   access_token_expires_in_seconds?: number | null;
+  refresh_token_expires_in_seconds?: number | null;
+  connection_status?: ConnectionStatus;
+  /** null = expiry unknown — do not invent Healthy counts */
+  needs_attention?: boolean | null;
   authorized_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type StoreGroup = {

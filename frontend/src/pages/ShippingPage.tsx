@@ -187,8 +187,17 @@ export function ShippingPage() {
               onGroupChange={(id) => {
                 setGroupId(id);
                 if (!id) return;
+                if (id === "__all__") {
+                  setSelected(stores.map((x) => x.store_id));
+                  return;
+                }
                 const g = groups.find((x) => x.id === id);
-                if (g) setSelected([...g.store_ids]);
+                if (!g) {
+                  setSelected([]);
+                  return;
+                }
+                const valid = new Set(stores.map((x) => x.store_id));
+                setSelected(g.store_ids.filter((sid) => valid.has(sid)));
               }}
             />
           </section>

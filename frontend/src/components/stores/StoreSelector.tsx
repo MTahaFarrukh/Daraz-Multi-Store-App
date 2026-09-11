@@ -1,17 +1,13 @@
 import type { StoreGroup, StoreView } from "@/types/api";
 import { StatusBadge } from "@/components/ui/Primitives";
+import { statusLabel, statusTone, storeTitle, tokenDaysLeft } from "@/lib/storeHealth";
 
-function tokenTone(seconds?: number | null): "ok" | "warn" | "danger" | "muted" {
-  if (seconds == null) return "muted";
-  const days = Math.max(0, Math.round(seconds / 86400));
-  if (days <= 3) return "danger";
-  if (days <= 10) return "warn";
-  return "ok";
-}
+/** Virtual Shipping selection — not a persisted DB group. */
+export const VIRTUAL_ALL_STORES = "__all__";
 
-function tokenLabel(seconds?: number | null): string {
-  if (seconds == null) return "Token unknown";
-  const days = Math.max(0, Math.round(seconds / 86400));
+function tokenLabel(store: StoreView): string {
+  const days = tokenDaysLeft(store);
+  if (days == null) return "Token unknown";
   return `Token · ${days}d left`;
 }
 
@@ -31,6 +27,7 @@ export function StoreSelector({
   onGroupChange?: (groupId: string) => void;
 }) {
   const selectedSet = new Set(selected);
+  const validIds = new Set(stores.map((s) => s.store_id));
 
   return (
     <div className="stack">
@@ -38,11 +35,21 @@ export function StoreSelector({
         <button
           type="button"
           className="btn btn-ghost btn-sm"
-          onClick={() => onChange(stores.map((s) => s.store_id))}
+          onClick={() => {
+            onChange(stores.map((s) => s.store_id));
+            onGroupChange?.(VIRTUAL_ALL_STORES);
+          }}
         >
           All
         </button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => onChange([])}>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => {
+            onChange([]);
+            onGroupChange?.("");
+          }}
+        >
           None
         </button>
         <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
@@ -53,12 +60,28 @@ export function StoreSelector({
             <span>Store group</span>
             <select
               value={activeGroupId || ""}
-              onChange={(e) => onGroupChange(e.target.value)}
+              onChange={(e) => {
+                const id = e.target.value;
+                onGroupChange(id);
+                if (!id) return;
+                if (id === VIRTUAL_ALL_STORES) {
+                  onChange(stores.map((s) => s.store_id));
+                  return;
+                }
+                const g = groups.find((x) => x.id === id);
+                if (!g) {
+                  onChange([]);
+                  return;
+                }
+                // Only currently registered members — empty group ≠ all stores
+                onChange(g.store_ids.filter((sid) => validIds.has(sid)));
+              }}
             >
               <option value="">— Custom selection —</option>
+              <option value={VIRTUAL_ALL_STORES}>All Stores</option>
               {groups.map((g) => (
                 <option key={g.id} value={g.id}>
-                  {g.name}
+                  {g.name} ({g.store_ids.filter((sid) => validIds.has(sid)).length})
                 </option>
               ))}
             </select>
@@ -81,15 +104,14 @@ export function StoreSelector({
                   type="checkbox"
                   checked={checked}
                   onChange={() => {
+                    onGroupChange?.("");
                     if (checked) onChange(selected.filter((id) => id !== store.store_id));
                     else onChange([...selected, store.store_id]);
                   }}
                 />
                 <div style={{ minWidth: 0 }}>
-                  <strong style={{ display: "block" }}>
-                    {store.display_name || store.store_name || store.store_id}
-                  </strong>
-                  {store.account && store.account !== store.display_name ? (
+                  <strong style={{ display: "block" }}>{storeTitle(store)}</strong>
+                  {store.account && store.account !== storeTitle(store) ? (
                     <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
                       {store.account}
                     </div>
@@ -98,8 +120,19 @@ export function StoreSelector({
                     <StatusBadge tone="muted">
                       {(store.country || "pk").toUpperCase()}
                     </StatusBadge>
-                    <StatusBadge tone={tokenTone(store.access_token_expires_in_seconds)}>
-                      {tokenLabel(store.access_token_expires_in_seconds)}
+                    <StatusBadge tone={statusTone(store)}>{statusLabel(store)}</StatusBadge>
+                    <StatusBadge
+                      tone={
+                        tokenDaysLeft(store) == null
+                          ? "muted"
+                          : (tokenDaysLeft(store) || 0) <= 3
+                            ? "danger"
+                            : (tokenDaysLeft(store) || 0) <= 10
+                              ? "warn"
+                              : "ok"
+                      }
+                    >
+                      {tokenLabel(store)}
                     </StatusBadge>
                   </div>
                 </div>

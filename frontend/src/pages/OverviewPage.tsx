@@ -47,12 +47,15 @@ export function OverviewPage() {
     };
   }, []);
 
-  const expiring = useMemo(
+  const needsAttention = useMemo(
     () =>
       stores.filter(
         (s) =>
-          s.access_token_expires_in_seconds != null &&
-          s.access_token_expires_in_seconds <= 10 * 86400
+          s.needs_attention === true ||
+          s.connection_status === "needs_reconnection" ||
+          (s.needs_attention == null &&
+            s.access_token_expires_in_seconds != null &&
+            s.access_token_expires_in_seconds <= 10 * 86400)
       ),
     [stores]
   );
@@ -93,10 +96,17 @@ export function OverviewPage() {
 
       <div className="stack">
         <section className="card">
-          <h3 className="section-title">Needs attention</h3>
-          {expiring.length === 0 && stores.length > 0 ? (
-            <p style={{ margin: 0, color: "var(--muted)" }}>
-              No urgent store token issues detected.
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <h3 className="section-title" style={{ margin: 0 }}>
+              Needs attention
+            </h3>
+            <Link to="/app/stores" style={{ fontWeight: 700, color: "var(--teal-deep)", fontSize: "0.9rem" }}>
+              View all stores →
+            </Link>
+          </div>
+          {needsAttention.length === 0 && stores.length > 0 ? (
+            <p style={{ margin: "0.75rem 0 0", color: "var(--muted)" }}>
+              No urgent store connection issues detected.
             </p>
           ) : null}
           {stores.length === 0 && !loading ? (
@@ -110,17 +120,22 @@ export function OverviewPage() {
               }
             />
           ) : null}
-          {expiring.length > 0 ? (
-            <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
-              {expiring.map((s) => (
+          {needsAttention.length > 0 ? (
+            <ul style={{ margin: "0.75rem 0 0", paddingLeft: "1.1rem" }}>
+              {needsAttention.map((s) => (
                 <li key={s.store_id} style={{ marginBottom: "0.35rem" }}>
                   <strong>{s.display_name || s.store_id}</strong>{" "}
                   <StatusBadge
                     tone={
-                      (s.access_token_expires_in_seconds || 0) <= 3 * 86400 ? "danger" : "warn"
+                      s.connection_status === "needs_reconnection" ||
+                      (s.access_token_expires_in_seconds || 0) <= 3 * 86400
+                        ? "danger"
+                        : "warn"
                     }
                   >
-                    token expiring
+                    {s.connection_status === "needs_reconnection"
+                      ? "needs reconnection"
+                      : "token expiring"}
                   </StatusBadge>
                 </li>
               ))}

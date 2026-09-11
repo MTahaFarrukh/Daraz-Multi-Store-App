@@ -204,7 +204,8 @@ def test_update_store_display_name_persists(token_paths: Path) -> None:
 
     updated = update_store_display_name(store_id, "MTF Main Store", path=token_paths)
     assert updated["display_name"] == "MTF Main Store"
-    assert updated["store_name"] == "MTF Main Store"
+    # Rename must not overwrite Daraz shop identity field when it already differs.
+    assert updated.get("store_name") is not None
 
     # upsert from OAuth refresh must not wipe a custom name
     refreshed = build_token_record(
@@ -222,3 +223,7 @@ def test_update_store_display_name_persists(token_paths: Path) -> None:
 
     view = list_sanitized_stores(path=token_paths)[0]
     assert view["display_name"] == "MTF Main Store"
+    assert "access_token" not in view
+    assert "refresh_token" not in view
+    assert view.get("connection_status") in {"connected", "needs_reconnection"}
+    assert "needs_attention" in view

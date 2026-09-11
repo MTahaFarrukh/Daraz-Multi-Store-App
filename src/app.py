@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.auth import (
     AuthUser,
@@ -329,9 +329,21 @@ def oauth_callback(
         return RedirectResponse(f"/app/stores?connected=1&store={store_id}", status_code=302)
     except DarazApiError as exc:
         logger.error("Token exchange failed code=%s request_id=%s", exc.code, exc.request_id)
-        raise _daraz_http_error(exc) from exc
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept and "text/html" not in accept:
+            raise _daraz_http_error(exc) from exc
+        return RedirectResponse(
+            "/app/stores?oauth_error=1&message=token_exchange_failed",
+            status_code=302,
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept and "text/html" not in accept:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return RedirectResponse(
+            "/app/stores?oauth_error=1&message=oauth_failed",
+            status_code=302,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +364,14 @@ def api_stores(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
 
 class RenameStoreBody(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=80)
+
+    @field_validator("display_name")
+    @classmethod
+    def _strip_display_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("Store name cannot be empty")
+        return name
 
 
 @app.patch("/api/stores/{store_id}")

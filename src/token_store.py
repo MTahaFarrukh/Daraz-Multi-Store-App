@@ -248,10 +248,12 @@ def upsert_store(record: dict[str, Any], path: Path | None = None) -> dict[str, 
         prior_display = str(
             prior.get("display_name") or prior.get("store_name") or ""
         ).strip()
-        # Keep a custom renamed label across OAuth token refresh.
+        # Keep MultiStore display name across OAuth refresh; preserve Daraz shop name separately.
         if prior_display and not looks_like_email(prior_display):
             store["display_name"] = prior_display
-            store["store_name"] = prior_display
+        prior_shop = str(prior.get("store_name") or "").strip()
+        if prior_shop and not looks_like_email(prior_shop):
+            store["store_name"] = prior_shop
         store["store_id"] = prior.get("store_id") or store["store_id"]
         stores[match_idx] = _ensure_store_identity(store)
 
@@ -265,7 +267,7 @@ def update_store_display_name(
     *,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    """Set a friendly store label shown in the dashboard (not the OAuth email)."""
+    """Set MultiStore display name only — does not overwrite Daraz shop identity."""
     name = display_name.strip()
     if not name:
         raise ValueError("Store name cannot be empty")
@@ -277,7 +279,6 @@ def update_store_display_name(
             continue
         updated = dict(existing)
         updated["display_name"] = name
-        updated["store_name"] = name
         stores[idx] = updated
         save_store_file({"stores": stores}, path=path)
         return stores[idx]
@@ -295,31 +296,94 @@ def load_tokens(path: Path | None = None) -> dict[str, Any] | None:
     return get_primary_store(path)
 
 
+def _seconds_until(iso_ts: Any) -> int | None:
+    if not iso_ts:
+        return None
+    try:
+        expiry = datetime.fromisoformat(str(iso_ts))
+        return max(0, int((expiry - _utc_now()).total_seconds()))
+    except ValueError:
+        return None
+
+
+def connection_health(record: dict[str, Any]) -> dict[str, Any]:
+    """Truthful connection state from known token expiry fields only.
+
+    Statuses:
+    - connected: store is registered; tokens present (access may still be refreshable)
+    - needs_reconnection: refresh token is expired (or access expired with no refresh window)
+    - connection_error: reserved; not emitted without a persisted error signal
+
+    ``needs_attention`` is True when expiry is known and access is ≤10 days (or refresh dead).
+    ``needs_attention`` is None when expiry timestamps are unknown (do not invent Healthy counts).
+    """
+    access_sec = _seconds_until(record.get("access_token_expires_at"))
+    refresh_sec = _seconds_until(record.get("refresh_token_expires_at"))
+
+    if refresh_sec == 0:
+        return {
+            "connection_status": "needs_reconnection",
+            "needs_attention": True,
+            "access_token_expires_in_seconds": access_sec,
+            "refresh_token_expires_in_seconds": refresh_sec,
+        }
+
+    if access_sec is None and refresh_sec is None:
+        return {
+            "connection_status": "connected",
+            "needs_attention": None,
+            "access_token_expires_in_seconds": None,
+            "refresh_token_expires_in_seconds": None,
+        }
+
+    attention: bool | None
+    if access_sec is not None:
+        attention = access_sec <= 10 * 86400
+    else:
+        attention = False
+
+    return {
+        "connection_status": "connected",
+        "needs_attention": attention,
+        "access_token_expires_in_seconds": access_sec,
+        "refresh_token_expires_in_seconds": refresh_sec,
+    }
+
+
 def sanitize_store_view(record: dict[str, Any] | None) -> dict[str, Any]:
     """Public-safe store metadata — never includes tokens."""
     if not record:
         return {"connected": False}
 
-    expires_at = record.get("access_token_expires_at")
-    seconds_remaining: int | None = None
-    if expires_at:
-        try:
-            expiry = datetime.fromisoformat(str(expires_at))
-            seconds_remaining = max(0, int((expiry - _utc_now()).total_seconds()))
-        except ValueError:
-            seconds_remaining = None
+    health = connection_health(record)
+    raw_shop = str(record.get("store_name") or "").strip()
+    shop_name = raw_shop if raw_shop and not looks_like_email(raw_shop) else ""
+    # Prefer distinct Daraz shop label; fall back empty rather than duplicating display_name.
+    if shop_name and shop_name == store_display_name(record):
+        # Still useful as "shop identity" when custom rename hasn't diverged.
+        pass
+
+    updated_at = record.get("updated_at")
+    if hasattr(updated_at, "isoformat"):
+        updated_at = updated_at.isoformat()
 
     return {
         "connected": True,
+        "id": str(record["id"]) if record.get("id") else None,
         "store_id": record.get("store_id", ""),
         "display_name": store_display_name(record),
-        "store_name": store_display_name(record),
+        "store_name": shop_name or store_display_name(record),
+        "shop_name": shop_name,
         "account": record.get("account", ""),
         "seller_id": record.get("seller_id", ""),
         "country": record.get("country", ""),
-        "access_token_expires_at": expires_at,
-        "access_token_expires_in_seconds": seconds_remaining,
+        "access_token_expires_at": record.get("access_token_expires_at"),
+        "access_token_expires_in_seconds": health["access_token_expires_in_seconds"],
+        "refresh_token_expires_in_seconds": health["refresh_token_expires_in_seconds"],
+        "connection_status": health["connection_status"],
+        "needs_attention": health["needs_attention"],
         "authorized_at": record.get("authorized_at"),
+        "updated_at": updated_at,
     }
 
 
