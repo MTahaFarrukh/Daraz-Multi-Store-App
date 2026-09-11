@@ -101,14 +101,35 @@ def test_growth_pct_null_when_previous_zero():
 
 def test_count_total_parsing(monkeypatch):
     client = MagicMock()
-    client.get_orders.return_value = {
-        "data": {"countTotal": 302, "count": 1, "orders": [{"order_id": "1"}]}
+    client.get_orders.side_effect = [
+        {"data": {"countTotal": 306, "count": 1, "orders": [{"order_id": "1"}]}},  # all
+        {"data": {"countTotal": 107, "count": 1, "orders": []}},  # canceled
+    ]
+    assert fetch_orders_count_total(client, year=2026, month=9) == 199
+    assert client.get_orders.call_args_list[0].kwargs["status"] == "all"
+    assert client.get_orders.call_args_list[1].kwargs["status"] == "canceled"
+    assert all(c.kwargs.get("limit") == 1 for c in client.get_orders.call_args_list)
+    assert "created_after" in client.get_orders.call_args_list[0].kwargs
+    assert "created_before" in client.get_orders.call_args_list[0].kwargs
+
+
+def test_orders_exclude_canceled_breakdown():
+    from src.performance_sync import fetch_orders_count_breakdown, is_canceled_order
+
+    assert is_canceled_order({"statuses": ["canceled"]}) is True
+    assert is_canceled_order({"statuses": ["delivered"]}) is False
+
+    client = MagicMock()
+    client.get_orders.side_effect = [
+        {"data": {"countTotal": 306}},
+        {"data": {"countTotal": 107}},
+    ]
+    breakdown = fetch_orders_count_breakdown(client, year=2026, month=9)
+    assert breakdown == {
+        "orders_all_count": 306,
+        "orders_canceled_count": 107,
+        "orders_count": 199,
     }
-    assert fetch_orders_count_total(client, year=2026, month=9) == 302
-    kwargs = client.get_orders.call_args.kwargs
-    assert kwargs["status"] == "all"
-    assert kwargs["limit"] == 1
-    assert "created_after" in kwargs and "created_before" in kwargs
 
 
 def test_unique_store_month_and_workspace_isolation(tenancy_env):
@@ -271,8 +292,10 @@ def test_sync_uses_count_total_not_body_scan(tenancy_env, monkeypatch):
     mock_client = MagicMock()
     mock_client.timeout = 30
     mock_client.get_orders.side_effect = [
-        {"data": {"countTotal": 7, "orders": []}},  # current
-        {"data": {"countTotal": 5, "orders": []}},  # previous for MoM
+        {"data": {"countTotal": 12, "orders": []}},  # current all
+        {"data": {"countTotal": 5, "orders": []}},  # current canceled → net 7
+        {"data": {"countTotal": 8, "orders": []}},  # previous all
+        {"data": {"countTotal": 3, "orders": []}},  # previous canceled → net 5
     ]
 
     monkeypatch.setattr("src.performance_sync.client_for_store", lambda s: mock_client)
@@ -291,8 +314,9 @@ def test_sync_uses_count_total_not_body_scan(tenancy_env, monkeypatch):
     assert row["orders_count"] == 7
     assert row["previous_orders_count"] == 5
     assert row["orders_growth_pct"] == growth_pct(7, 5)
-    # Only countTotal probes (limit=1), never a full page scan when GS disabled
+    # Count probes only (limit=1): 2 for current + 2 for previous when GS disabled
     assert all(c.kwargs.get("limit") == 1 for c in mock_client.get_orders.call_args_list)
+    assert len(mock_client.get_orders.call_args_list) == 4
 
 
 def test_gross_sales_flag_documented():

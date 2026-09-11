@@ -171,7 +171,8 @@ export function StorePerformancePanel({ compact = false }: Props) {
             Store Performance
           </h3>
           <p className="muted-line">
-            Scope: My Workspace · Last updated: {relativeTime(data?.last_synced_at)}
+            Scope: My Workspace · Orders exclude cancelled (Data Insights–style) · Last
+            updated: {relativeTime(data?.last_synced_at)}
           </p>
         </div>
         <div className="row perf-controls">

@@ -1,7 +1,9 @@
 """Store performance sync + ranking (Phase 2.5B).
 
-Orders metric uses /orders/get countTotal (Phase 2.5A validated).
-Gross Sales sums order.price across paginated pages (page-sized offsets).
+Orders metric matches Seller Center Data Insights style:
+  countTotal(status=all) - countTotal(status=canceled)
+
+Gross Sales sums order.price across paginated pages, skipping canceled orders.
 Finance / net payout is intentionally excluded from this layer.
 """
 
@@ -30,6 +32,7 @@ GROSS_SALES_ENABLED = True
 PAGE_SIZE = 100
 MAX_OFFSET = 5000  # Daraz documented max
 SOURCE_ORDERS_API = "orders_api"
+CANCELED_STATUS_TOKENS = frozenset({"canceled", "cancelled"})
 
 
 def parse_money(value: Any) -> Decimal:
@@ -41,27 +44,75 @@ def parse_money(value: Any) -> Decimal:
         return Decimal("0")
 
 
+def _extract_count_total(resp: dict[str, Any]) -> int:
+    data = resp.get("data") or {}
+    total = data.get("countTotal")
+    if total is None:
+        total = data.get("count") or 0
+    return int(total)
+
+
+def _count_orders(
+    client: DarazClient,
+    *,
+    year: int,
+    month: int,
+    status: str,
+) -> int:
+    created_after, created_before = month_window_iso(year, month)
+    resp = client.get_orders(
+        created_after=created_after,
+        created_before=created_before,
+        status=status,
+        limit=1,
+        offset=0,
+        sort_by="created_at",
+        sort_direction="ASC",
+    )
+    return _extract_count_total(resp)
+
+
+def is_canceled_order(order: dict[str, Any]) -> bool:
+    raw = order.get("statuses")
+    if raw is None:
+        raw = order.get("status")
+    if raw is None:
+        return False
+    if isinstance(raw, str):
+        tokens = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        tokens = list(raw)
+    else:
+        tokens = [str(raw)]
+    return any(str(t).strip().lower() in CANCELED_STATUS_TOKENS for t in tokens)
+
+
 def fetch_orders_count_total(
     client: DarazClient,
     *,
     year: int,
     month: int,
 ) -> int:
-    created_after, created_before = month_window_iso(year, month)
-    resp = client.get_orders(
-        created_after=created_after,
-        created_before=created_before,
-        status="all",
-        limit=1,
-        offset=0,
-        sort_by="created_at",
-        sort_direction="ASC",
-    )
-    data = resp.get("data") or {}
-    total = data.get("countTotal")
-    if total is None:
-        total = data.get("count") or 0
-    return int(total)
+    """Monthly orders excluding canceled (Seller Center Data Insights–aligned)."""
+    breakdown = fetch_orders_count_breakdown(client, year=year, month=month)
+    return int(breakdown["orders_count"])
+
+
+def fetch_orders_count_breakdown(
+    client: DarazClient,
+    *,
+    year: int,
+    month: int,
+) -> dict[str, int]:
+    """Return all / canceled / net orders for a marketplace month."""
+    all_count = _count_orders(client, year=year, month=month, status="all")
+    canceled_count = _count_orders(client, year=year, month=month, status="canceled")
+    net = max(0, all_count - canceled_count)
+    return {
+        "orders_all_count": all_count,
+        "orders_canceled_count": canceled_count,
+        "orders_count": net,
+    }
 
 
 def fetch_gross_sales_order_price(
@@ -71,7 +122,11 @@ def fetch_gross_sales_order_price(
     month: int,
     expected_total: int | None = None,
 ) -> tuple[Decimal, str | None]:
-    """Sum order.price across pages. Returns (sum, warning_or_None)."""
+    """Sum non-canceled order.price across pages. Returns (sum, warning_or_None).
+
+    Paginate with status=all so coverage matches countTotal(all); skip canceled
+    rows when summing so Gross Sales aligns with the Orders (ex-canceled) metric.
+    """
     if not GROSS_SALES_ENABLED:
         return Decimal("0"), "gross_sales_disabled"
 
@@ -79,7 +134,6 @@ def fetch_gross_sales_order_price(
     total = Decimal("0")
     seen: set[str] = set()
     offset = 0
-    pages = 0
     truncated = False
 
     while offset <= MAX_OFFSET:
@@ -95,7 +149,6 @@ def fetch_gross_sales_order_price(
         orders = (resp.get("data") or {}).get("orders") or []
         if not orders:
             break
-        pages += 1
         page_ids = []
         for order in orders:
             oid = str(order.get("order_id") or "")
@@ -105,7 +158,8 @@ def fetch_gross_sales_order_price(
                 return total, "pagination_overlap_detected"
             if oid:
                 seen.add(oid)
-            total += parse_money(order.get("price"))
+            if not is_canceled_order(order):
+                total += parse_money(order.get("price"))
         if len(orders) < PAGE_SIZE:
             break
         # Detect non-advancing pages
@@ -178,13 +232,16 @@ def sync_store_month(
 
         client = client_for_store(refreshed)
         client.timeout = 60.0
-        orders_count = fetch_orders_count_total(client, year=year, month=month)
+        breakdown = fetch_orders_count_breakdown(client, year=year, month=month)
+        orders_count = int(breakdown["orders_count"])
+        orders_all = int(breakdown["orders_all_count"])
 
         gross: Decimal | None = None
         gross_warn: str | None = None
         if include_gross_sales and GROSS_SALES_ENABLED:
+            # Paginate full status=all set; sum skips canceled rows.
             gross, gross_warn = fetch_gross_sales_order_price(
-                client, year=year, month=month, expected_total=orders_count
+                client, year=year, month=month, expected_total=orders_all
             )
             if gross_warn == "pagination_overlap_detected":
                 gross = None

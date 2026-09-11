@@ -11,7 +11,18 @@ Daraz Open Platform order timestamps observed in Phase 2.5A used **+0800**
 
 Timestamps stored in Postgres use `TIMESTAMPTZ` (UTC-normalized).
 
-## Gross Sales decision
+## Orders metric
+
+Aligned with Seller Center **Data Insights** (excludes cancelled):
+
+```
+orders_count = countTotal(status=all) - countTotal(status=canceled)
+```
+
+Two cheap `/orders/get` calls per store/month (`limit=1`).
+
+Gross Sales sums `order.price` while paginating `status=all`, **skipping**
+canceled order rows so it stays consistent with the Orders metric.
 
 **ENABLED**
 

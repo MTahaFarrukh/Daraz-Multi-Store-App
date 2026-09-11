@@ -774,6 +774,7 @@ def api_store_performance(
         "month": month,
         "metric": metric_norm,
         "timezone": MARKETPLACE_TZ_LABEL,
+        "orders_definition": "all_minus_canceled",
         "gross_sales_enabled": GROSS_SALES_ENABLED,
         "last_synced_at": last_synced,
         "leaderboard": leaderboard,
