@@ -2,15 +2,31 @@ import { api, downloadAuthenticated } from "@/lib/api/client";
 import type {
   BootstrapResponse,
   MeResponse,
+  OrderDetailResponse,
+  OrderListParams,
+  OrderListResponse,
   OrderRow,
+  OrderStatusCountsResponse,
+  OrderSyncResponse,
   PerformanceLeaderboardResponse,
   PerformanceMonthsResponse,
   PerformanceSyncResponse,
   PrintJobListItem,
   PrintJobStatus,
+  PrintOrdersStartResponse,
+  PrintValidateResponse,
   StoreGroup,
   StoreView,
 } from "@/types/api";
+
+function buildOrdersQs(params: OrderListParams): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value == null || value === "") continue;
+    qs.set(key, String(value));
+  }
+  return qs.toString();
+}
 
 export const Api = {
   me: () => api<MeResponse>("/api/me"),
@@ -52,20 +68,57 @@ export const Api = {
       body: JSON.stringify({ profiles }),
     }),
 
+  /** Live Daraz RTS fetch — used by Shipping. Empty stores ≠ all. */
   listOrders: (storeIds: string[], limit: number, status = "ready_to_ship") => {
     const qs = new URLSearchParams({
       stores: storeIds.join(","),
       limit: String(limit),
       status,
     });
-    return api<{ orders: OrderRow[]; count: number }>(`/api/orders?${qs}`);
+    return api<{ orders: OrderRow[]; count: number }>(`/api/orders/live?${qs}`);
   },
 
-  startPrint: (storeIds: string[], limit: number) => {
+  /** Local DB unified orders (does not call Daraz). Omit stores = all workspace stores. */
+  listUnifiedOrders: (params: OrderListParams = {}) => {
+    const qs = buildOrdersQs(params);
+    return api<OrderListResponse>(qs ? `/api/orders?${qs}` : "/api/orders");
+  },
+
+  orderStatusCounts: (params: { stores?: string; store_ids?: string } = {}) => {
+    const qs = buildOrdersQs(params);
+    return api<OrderStatusCountsResponse>(
+      qs ? `/api/orders/status-counts?${qs}` : "/api/orders/status-counts"
+    );
+  },
+
+  getOrderDetail: (orderId: string) =>
+    api<OrderDetailResponse>(`/api/orders/${encodeURIComponent(orderId)}`),
+
+  syncOrders: (body?: { store_ids?: string[]; days?: number }) =>
+    api<OrderSyncResponse>("/api/orders/sync", {
+      method: "POST",
+      body: JSON.stringify(body || {}),
+    }),
+
+  validatePrintLabels: (order_ids: string[]) =>
+    api<PrintValidateResponse>("/api/print-labels/validate", {
+      method: "POST",
+      body: JSON.stringify({ order_ids }),
+    }),
+
+  printOrdersByIds: (order_ids: string[], allow_reprint = false) =>
+    api<PrintOrdersStartResponse>("/api/print-labels/orders", {
+      method: "POST",
+      body: JSON.stringify({ order_ids, allow_reprint }),
+    }),
+
+  /** Legacy live print by store selection. Duplicate protection: allow_reprint=false by default. */
+  startPrint: (storeIds: string[], limit: number, allowReprint = false) => {
     const qs = new URLSearchParams({
       stores: storeIds.join(","),
       limit: String(limit),
       status: "ready_to_ship",
+      allow_reprint: String(allowReprint),
     });
     return api<{
       status: string;

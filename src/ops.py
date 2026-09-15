@@ -399,12 +399,17 @@ def print_labels(
     get_store_fn: Callable[[str], dict[str, Any] | None] | None = None,
     list_stores_fn: Callable[[], list[dict[str, Any]]] | None = None,
     download_url: str | None = None,
+    allow_reprint: bool = False,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetch shipping labels, convert each HTML label to PDF, then merge into one PDF.
 
     One GetDocument per order keeps HTML small so browser conversion is reliable.
     Limit = max orders to include.
+
+    When ``allow_reprint`` is False and ``workspace_id`` is set, orders that already
+    have an ``order_label_prints`` row for ``(store_uuid, daraz_order_id)`` are skipped.
     """
     def progress(msg: str) -> None:
         if on_progress:
@@ -424,6 +429,9 @@ def print_labels(
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
         label_fetch_meta = [{} for _ in raw_labels]
     else:
+        from src.db.repo import get_repo
+
+        repo = get_repo() if workspace_id else None
         for store in resolve_stores(
             store_id,
             store_ids=store_ids,
@@ -431,6 +439,7 @@ def print_labels(
             list_stores_fn=list_stores_fn,
         ):
             sid = str(store.get("store_id", "store"))
+            store_uuid = str(store.get("id") or "")
             sname = store_display_name(store)
             client = client_for_store(store)
             resp = client.get_orders(
@@ -447,8 +456,17 @@ def print_labels(
                 meta = items_by_order.get(str(oid)) or {}
                 item_ids = meta.get("item_ids") or []
                 package_id = meta.get("package_id")
-                if item_ids:
-                    work.append((str(oid), item_ids, package_id))
+                if not item_ids:
+                    continue
+                if (
+                    not allow_reprint
+                    and repo
+                    and workspace_id
+                    and store_uuid
+                    and repo.has_label_print(workspace_id, store_uuid, str(oid))
+                ):
+                    continue
+                work.append((str(oid), item_ids, package_id))
 
             if work:
                 progress(f"Downloading {len(work)} label(s) in parallel…")
@@ -562,5 +580,201 @@ def print_labels(
         "label_summary": {
             "pdf_native": pdf_native,
             "html_converted": html_converted,
+        },
+    }
+
+
+def print_labels_for_orders(
+    workspace_id: str,
+    user_id: str,
+    order_uuids: list[str],
+    *,
+    allow_reprint: bool = False,
+    job_id: str | None = None,
+    download_url: str | None = None,
+    output: Path | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Print labels for local DB order UUIDs (one document per order).
+
+    Validates print targets; skips already-printed unless ``allow_reprint``.
+    Partial failures are OK — successful orders are merged and recorded.
+    """
+    from src.db.repo import get_repo
+    from src.print_safety import record_label_prints, validate_print_targets
+
+    def progress(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    repo = get_repo()
+    validated = validate_print_targets(workspace_id, order_uuids)
+    targets = list(validated["new_printable"])
+    if allow_reprint:
+        targets.extend(validated["already_printed"])
+    if not targets:
+        raise ValueError("No printable orders selected.")
+
+    # Group by store uuid
+    by_store: dict[str, list[dict[str, Any]]] = {}
+    for t in targets:
+        by_store.setdefault(str(t["store_id"]), []).append(t)
+
+    raw_labels: list[LabelDocument] = []
+    label_fetch_sources: list[str] = []
+    label_fetch_meta: list[dict[str, Any]] = []
+    successes: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    reprint_ids = {str(t["order_id"]) for t in validated["already_printed"]}
+
+    progress(f"Printing {len(targets)} order label(s)…")
+    for store_uuid, store_targets in by_store.items():
+        store = repo.get_store_by_uuid(workspace_id, store_uuid)
+        if not store:
+            for t in store_targets:
+                failures.append({"order_id": t["order_id"], "error": "store_not_found"})
+            continue
+        sid = str(store.get("store_id", "store"))
+        sname = store_display_name(store)
+        try:
+            client = client_for_store(store)
+        except Exception as exc:  # noqa: BLE001
+            for t in store_targets:
+                failures.append({"order_id": t["order_id"], "error": str(exc)})
+            continue
+
+        work = [
+            (t, t["order_item_ids"], t.get("package_id"))
+            for t in store_targets
+            if t.get("order_item_ids")
+        ]
+        if not work:
+            continue
+
+        labels_by_order: dict[str, tuple[LabelDocument, str, dict[str, Any]]] = {}
+        workers = min(_print_fetch_workers(), len(work))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _fetch_label_document,
+                    client,
+                    store_id=sid,
+                    store_name=sname,
+                    order_id=str(t["daraz_order_id"]),
+                    item_ids=item_ids,
+                    package_id=package_id,
+                ): t
+                for t, item_ids, package_id in work
+            }
+            done = 0
+            for future in as_completed(futures):
+                t = futures[future]
+                done += 1
+                progress(f"Downloaded {done}/{len(work)} labels…")
+                try:
+                    labels_by_order[str(t["order_id"])] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    failures.append({"order_id": t["order_id"], "error": str(exc)})
+
+        for t, item_ids, package_id in work:
+            oid = str(t["order_id"])
+            if oid not in labels_by_order:
+                continue
+            label, fetch_source, fetch_meta = labels_by_order[oid]
+            raw_labels.append(label)
+            label_fetch_sources.append(fetch_source)
+            label_fetch_meta.append(fetch_meta)
+            successes.append(
+                {
+                    "order_id": oid,
+                    "store_id": store_uuid,
+                    "daraz_order_id": str(t["daraz_order_id"]),
+                    "order_item_ids": item_ids,
+                    "package_id": package_id or fetch_meta.get("package_id"),
+                    "is_reprint": oid in reprint_ids,
+                    "fetch_source": fetch_source,
+                }
+            )
+
+    if not raw_labels:
+        raise ValueError(
+            "No labels generated."
+            + (f" Failures: {len(failures)}" if failures else "")
+        )
+
+    html_count = sum(1 for label in raw_labels if not label.is_pdf())
+    pdf_labels: list[LabelDocument] = []
+    if html_count == 0:
+        progress(f"Using {len(raw_labels)} Daraz PDF label(s) — no conversion needed.")
+        pdf_labels = list(raw_labels)
+    else:
+        progress(f"Converting {html_count} HTML label(s) to PDF…")
+        with html_converter_session() as converter:
+            for label in raw_labels:
+                if label.is_pdf():
+                    pdf_labels.append(label)
+                else:
+                    pdf_labels.append(_ensure_pdf_document(label, converter=converter))
+
+    out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    progress("Merging PDF…")
+    merge_labels(pdf_labels, out_pdf)
+
+    # Only record print events after successful PDF merge
+    recorded = record_label_prints(workspace_id, user_id, job_id, successes)
+    new_count = sum(1 for s in successes if not s.get("is_reprint"))
+    reprint_count = sum(1 for s in successes if s.get("is_reprint"))
+
+    rel = (
+        str(out_pdf.relative_to(PROJECT_ROOT))
+        if out_pdf.is_relative_to(PROJECT_ROOT)
+        else str(out_pdf)
+    )
+    label_details = []
+    for label, fetch_source, fetch_meta in zip(
+        raw_labels, label_fetch_sources, label_fetch_meta, strict=True
+    ):
+        notes = fetch_meta.get("print_awb_error")
+        if fetch_meta.get("print_awb_attempted") and fetch_source == "print_awb_pdf":
+            notes = None
+        label_details.append(
+            _label_detail(
+                label,
+                fetch_source,
+                converted=not label.is_pdf(),
+                package_id=fetch_meta.get("package_id"),
+                fetch_notes=notes,
+            )
+        )
+
+    return {
+        "output": str(out_pdf),
+        "output_relative": rel.replace("\\", "/"),
+        "download_url": download_url
+        or (f"/api/print-labels/{job_id}/download" if job_id else None),
+        "html_url": None,
+        "format": "pdf",
+        "labels": len(pdf_labels),
+        "pages": pdf_page_count(out_pdf),
+        "order_item_count": sum(len(s.get("order_item_ids") or []) for s in successes),
+        "label_details": label_details,
+        "label_summary": {
+            "pdf_native": sum(1 for d in label_details if not d["converted"]),
+            "html_converted": sum(1 for d in label_details if d["converted"]),
+            "new_labels_count": new_count,
+            "reprint_count": reprint_count,
+            "failed_count": len(failures),
+        },
+        "new_labels_count": new_count,
+        "reprint_count": reprint_count,
+        "failed_count": len(failures),
+        "failures": failures,
+        "prints_recorded": len(recorded),
+        "validation": {
+            "new_printable": len(validated["new_printable"]),
+            "already_printed": len(validated["already_printed"]),
+            "not_eligible": len(validated["not_eligible"]),
+            "errors": validated["errors"],
         },
     }

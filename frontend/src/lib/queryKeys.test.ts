@@ -1,7 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api/client";
 import { shouldRetry } from "@/lib/queryClient";
-import { clearAuthenticatedCache, queryKeys } from "@/lib/queryKeys";
+import {
+  clearAuthenticatedCache,
+  normalizeOrdersFilterKey,
+  queryKeys,
+} from "@/lib/queryKeys";
+
+describe("normalizeOrdersFilterKey", () => {
+  it("sorts keys and joins stably", () => {
+    expect(
+      normalizeOrdersFilterKey({ page: 2, status_group: "pending", search: "ab" })
+    ).toBe("page=2&search=ab&status_group=pending");
+    expect(
+      normalizeOrdersFilterKey({ search: "ab", status_group: "pending", page: 2 })
+    ).toBe(normalizeOrdersFilterKey({ page: 2, status_group: "pending", search: "ab" }));
+  });
+
+  it("omits null, undefined, and empty string", () => {
+    expect(
+      normalizeOrdersFilterKey({
+        search: "",
+        status_group: null,
+        stores: undefined,
+        page: 1,
+      })
+    ).toBe("page=1");
+  });
+});
 
 describe("queryKeys workspace isolation", () => {
   it("includes workspace id in store keys", () => {
@@ -27,6 +53,30 @@ describe("queryKeys workspace isolation", () => {
     expect(queryKeys.orders("ws", ["b", "a"], 10)).toEqual(
       queryKeys.orders("ws", ["a", "b"], 10)
     );
+  });
+
+  it("unifiedOrders is workspace-aware and filter-keyed", () => {
+    const keyA = queryKeys.unifiedOrders("ws-a", "page=1&status_group=pending");
+    const keyB = queryKeys.unifiedOrders("ws-b", "page=1&status_group=pending");
+    expect(keyA).toEqual([
+      "workspace",
+      "ws-a",
+      "unified-orders",
+      "page=1&status_group=pending",
+    ]);
+    expect(keyA).not.toEqual(keyB);
+    expect(queryKeys.orderStatusCounts("ws-a", "stores=s1")).toEqual([
+      "workspace",
+      "ws-a",
+      "order-status-counts",
+      "stores=s1",
+    ]);
+    expect(queryKeys.orderDetail("ws-a", "ord-1")).toEqual([
+      "workspace",
+      "ws-a",
+      "order-detail",
+      "ord-1",
+    ]);
   });
 
   it("documents community key convention separately from workspace", () => {

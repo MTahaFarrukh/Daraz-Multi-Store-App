@@ -36,7 +36,7 @@ from src.config import (
 from src.daraz_api import DarazApiError, DarazClient
 from src.db import get_repo
 from src.label_processor import LabelProcessingError
-from src.ops import fetch_orders, print_labels
+from src.ops import fetch_orders, print_labels, print_labels_for_orders
 from src.print_job import (
     begin_print_job,
     complete_print_job,
@@ -47,6 +47,7 @@ from src.print_job import (
     require_workspace_job,
     reset_print_job_if_stale,
 )
+from src.print_safety import validate_print_targets
 from src.token_refresh import refresh_store_tokens
 from src.token_store import build_token_record, sanitize_store_view
 
@@ -510,12 +511,202 @@ def api_import_browser_profiles(
 
 
 # ---------------------------------------------------------------------------
-# Orders
+# Orders (Phase 3 — local DB list; live Daraz at /api/orders/live)
 # ---------------------------------------------------------------------------
+
+
+class OrderSyncBody(BaseModel):
+    store_ids: list[str] | None = None
+    days: int | None = Field(None, ge=1, le=90)
+    update_after: str | None = None
+    created_after: str | None = None
+    status: str = "all"
+    include_items: bool = True
+
+
+class PrintOrdersBody(BaseModel):
+    order_ids: list[str] = Field(..., min_length=1)
+    allow_reprint: bool = False
+
+
+class ValidatePrintBody(BaseModel):
+    order_ids: list[str] = Field(..., min_length=1)
+
+
+def _resolve_list_store_filters(
+    workspace_id: str,
+    *,
+    store: str | None,
+    stores: str | None,
+    store_ids: str | None,
+    group_id: str | None,
+) -> dict[str, Any]:
+    """Build list_orders store filters.
+
+    Omitting stores/store_ids → all workspace stores (Unified Orders "All Stores").
+    Explicit empty ``stores=`` or ``store_ids=`` → 400 (empty ≠ all).
+    """
+    repo = get_repo()
+    filters: dict[str, Any] = {}
+
+    if stores is not None:
+        ids = [part.strip() for part in stores.split(",") if part.strip()]
+        if not ids:
+            raise ValueError("No stores selected. Pick at least one store.")
+        for sid in ids:
+            if not repo.get_store(workspace_id, sid) and not repo.get_store_by_uuid(
+                workspace_id, sid
+            ):
+                raise ValueError(f"Unknown store: {sid}")
+        filters["store_slugs"] = ids
+
+    if store_ids is not None:
+        ids = [part.strip() for part in store_ids.split(",") if part.strip()]
+        if not ids:
+            raise ValueError("No stores selected. Pick at least one store.")
+        uuids: list[str] = []
+        slugs: list[str] = []
+        for sid in ids:
+            by_uuid = repo.get_store_by_uuid(workspace_id, sid)
+            by_slug = repo.get_store(workspace_id, sid)
+            if by_uuid:
+                uuids.append(str(by_uuid["id"]))
+            elif by_slug:
+                uuids.append(str(by_slug["id"]))
+                slugs.append(str(by_slug["store_id"]))
+            else:
+                raise ValueError(f"Unknown store: {sid}")
+        filters["store_uuids"] = uuids
+
+    if store:
+        found = repo.get_store(workspace_id, store) or repo.get_store_by_uuid(
+            workspace_id, store
+        )
+        if not found:
+            raise ValueError(f"Unknown store: {store}")
+        filters["store_uuids"] = [str(found["id"])]
+
+    if group_id:
+        groups = repo.list_groups(workspace_id)
+        group = next((g for g in groups if str(g.get("id")) == str(group_id)), None)
+        if not group:
+            raise ValueError("Group not found")
+        member_slugs = list(group.get("store_ids") or [])
+        if not member_slugs:
+            # Empty group members ≠ all stores
+            filters["store_uuids"] = []
+        else:
+            filters["store_slugs"] = member_slugs
+
+    return filters
+
+
+def _order_public_view(order: dict[str, Any], *, store_slug: str | None = None) -> dict[str, Any]:
+    return {
+        "id": order.get("id"),
+        "store_id": order.get("store_id"),
+        "store_slug": store_slug,
+        "store_display_name": order.get("store_display_name"),
+        "daraz_order_id": order.get("daraz_order_id"),
+        "order_number": order.get("order_number"),
+        "status_raw": order.get("status_raw"),
+        "status_group": order.get("status_group"),
+        "statuses": order.get("statuses"),
+        "created_at_daraz": order.get("created_at_daraz"),
+        "updated_at_daraz": order.get("updated_at_daraz"),
+        "price": order.get("price"),
+        "currency": order.get("currency"),
+        "items_count": order.get("items_count"),
+        "customer_first_name": order.get("customer_first_name"),
+        "customer_last_name": order.get("customer_last_name"),
+        "payment_method": order.get("payment_method"),
+        "shipping_fee": order.get("shipping_fee"),
+        "warehouse_code": order.get("warehouse_code"),
+        "synced_at": order.get("synced_at"),
+        "has_print": order.get("has_print"),
+        "print_count": order.get("print_count"),
+        "last_printed_at": order.get("last_printed_at"),
+    }
 
 
 @app.get("/api/orders")
 def api_orders(
+    store: str | None = Query(None),
+    stores: str | None = Query(
+        None,
+        description="Comma-separated store slugs. Omit for all stores; empty string → 400.",
+    ),
+    store_ids: str | None = Query(
+        None, description="Comma-separated store UUIDs or slugs"
+    ),
+    group_id: str | None = Query(None),
+    status_group: str | None = Query(None),
+    status: str | None = Query(None, description="Alias filter on status_raw"),
+    search: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    print_state: str = Query("any", description="unprinted|printed|any"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    sort: str = Query("created_at_daraz_desc"),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """List orders from the local DB (does not call Daraz).
+
+    Omitting ``stores`` / ``store_ids`` returns all workspace stores.
+    An explicit empty selection (``stores=``) is rejected — empty ≠ all.
+    """
+    try:
+        store_filters = _resolve_list_store_filters(
+            ctx.workspace_id,
+            store=store,
+            stores=stores,
+            store_ids=store_ids,
+            group_id=group_id,
+        )
+        filters = {
+            **store_filters,
+            "status_group": status_group,
+            "status_raw": status,
+            "search": search,
+            "date_from": date_from,
+            "date_to": date_to,
+            "print_state": print_state,
+            "page": page,
+            "page_size": page_size,
+            "sort": sort,
+        }
+        result = get_repo().list_orders(ctx.workspace_id, filters)
+        # Attach store slugs / display names for UI
+        stores_list = get_repo().list_stores(ctx.workspace_id)
+        uuid_to_store = {str(s["id"]): s for s in stores_list}
+        items = []
+        for o in result["items"]:
+            st = uuid_to_store.get(str(o.get("store_id"))) or {}
+            view = _order_public_view(
+                {
+                    **o,
+                    "store_display_name": st.get("display_name")
+                    or st.get("store_name")
+                    or st.get("store_id"),
+                },
+                store_slug=st.get("store_id"),
+            )
+            items.append(view)
+        return {
+            "orders": items,
+            "items": items,
+            "count": result["total"],
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/orders/live")
+def api_orders_live(
     store: str | None = Query(None),
     stores: str | None = Query(None, description="Comma-separated store_id list"),
     status: str = Query("ready_to_ship"),
@@ -523,6 +714,7 @@ def api_orders(
     created_after: str | None = Query(None),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    """Live Daraz order fetch (Shipping / legacy compatibility). Empty stores ≠ all."""
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
         get_one, list_all = _workspace_store_fns(ctx.workspace_id)
@@ -540,6 +732,122 @@ def api_orders(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DarazApiError as exc:
         raise _daraz_http_error(exc) from exc
+
+
+@app.get("/api/orders/status-counts")
+def api_orders_status_counts(
+    store_ids: str | None = Query(None),
+    stores: str | None = Query(None),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    try:
+        store_filters = _resolve_list_store_filters(
+            ctx.workspace_id,
+            store=None,
+            stores=stores,
+            store_ids=store_ids,
+            group_id=None,
+        )
+        uuids = store_filters.get("store_uuids")
+        if uuids is None and store_filters.get("store_slugs"):
+            repo = get_repo()
+            uuids = []
+            for slug in store_filters["store_slugs"]:
+                s = repo.get_store(ctx.workspace_id, slug)
+                if s:
+                    uuids.append(str(s["id"]))
+        counts = get_repo().count_orders_by_status_group(ctx.workspace_id, uuids)
+        return {"counts": counts}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/orders/{order_id}")
+def api_order_detail(
+    order_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    repo = get_repo()
+    order = repo.get_order_by_id(ctx.workspace_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    items = repo.list_order_items(ctx.workspace_id, order_id)
+    prints = repo.list_label_prints_for_orders(ctx.workspace_id, [order_id]).get(
+        order_id, []
+    )
+    summary = repo.get_print_summary_for_order(ctx.workspace_id, order_id)
+    store = repo.get_store_by_uuid(ctx.workspace_id, str(order["store_id"]))
+    return {
+        "order": _order_public_view(
+            {**order, **summary},
+            store_slug=(store or {}).get("store_id"),
+        ),
+        "items": [
+            {
+                "id": i.get("id"),
+                "daraz_order_item_id": i.get("daraz_order_item_id"),
+                "daraz_order_id": i.get("daraz_order_id"),
+                "status_raw": i.get("status_raw"),
+                "package_id": i.get("package_id"),
+                "name": i.get("name"),
+                "sku": i.get("sku"),
+                "quantity": i.get("quantity"),
+                "item_price": i.get("item_price"),
+                "paid_price": i.get("paid_price"),
+                "currency": i.get("currency"),
+                "tracking_code": i.get("tracking_code"),
+                "shipment_provider": i.get("shipment_provider"),
+                "shipping_type": i.get("shipping_type"),
+                "warehouse_code": i.get("warehouse_code"),
+            }
+            for i in items
+        ],
+        "print_history": [
+            {
+                "id": p.get("id"),
+                "printed_at": p.get("printed_at"),
+                "is_reprint": p.get("is_reprint"),
+                "package_id": p.get("package_id"),
+                "order_item_ids": p.get("order_item_ids"),
+                "fetch_source": p.get("fetch_source"),
+                "print_job_id": p.get("print_job_id"),
+            }
+            for p in prints
+        ],
+        "print_summary": summary,
+    }
+
+
+@app.post("/api/orders/sync")
+def api_orders_sync(
+    body: OrderSyncBody | None = None,
+    store_ids: str | None = Query(None),
+    days: int | None = Query(None, ge=1, le=90),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.order_sync import sync_workspace_orders
+
+    payload = body or OrderSyncBody()
+    sid_list = payload.store_ids
+    if store_ids is not None:
+        sid_list = [p.strip() for p in store_ids.split(",") if p.strip()]
+        if not sid_list:
+            raise HTTPException(
+                status_code=400, detail="No stores selected. Pick at least one store."
+            )
+    try:
+        result = sync_workspace_orders(
+            ctx.workspace_id,
+            store_ids=sid_list,
+            days=payload.days if payload.days is not None else days,
+            update_after=payload.update_after,
+            created_after=payload.created_after,
+            status=payload.status,
+            include_items=payload.include_items,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +881,87 @@ def api_list_print_jobs(
     return {"jobs": safe}
 
 
+@app.post("/api/print-labels/validate")
+def api_print_labels_validate(
+    body: ValidatePrintBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    return validate_print_targets(ctx.workspace_id, body.order_ids)
+
+
+@app.post("/api/print-labels/orders")
+def api_print_labels_orders(
+    body: PrintOrdersBody,
+    background_tasks: BackgroundTasks,
+    wait: bool = Query(False, description="Block until done (local dev only)"),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    def run_print(job_id: str) -> dict[str, Any]:
+        out_path = job_pdf_path(ctx.workspace_id, job_id)
+        return print_labels_for_orders(
+            ctx.workspace_id,
+            ctx.user.id,
+            body.order_ids,
+            allow_reprint=body.allow_reprint,
+            job_id=job_id,
+            download_url=f"/api/print-labels/{job_id}/download",
+            output=out_path,
+            on_progress=progress_callback(job_id),
+        )
+
+    if wait:
+        try:
+            job_id = begin_print_job(workspace_id=ctx.workspace_id, user_id=ctx.user.id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            result = run_print(job_id)
+            complete_print_job(job_id, result)
+            return {"job_id": job_id, **result}
+        except Exception as exc:
+            fail_print_job(job_id, str(exc))
+            if isinstance(exc, ValueError):
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if isinstance(exc, LabelProcessingError):
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "label_processing_error", "message": str(exc)},
+                ) from exc
+            if isinstance(exc, DarazApiError):
+                raise _daraz_http_error(exc) from exc
+            raise
+
+    try:
+        job_id = begin_print_job(workspace_id=ctx.workspace_id, user_id=ctx.user.id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def run_job() -> None:
+        try:
+            result = run_print(job_id)
+            complete_print_job(job_id, result)
+        except ValueError as exc:
+            fail_print_job(job_id, str(exc))
+        except LabelProcessingError as exc:
+            logger.exception("Label PDF merge failed")
+            fail_print_job(job_id, str(exc))
+        except DarazApiError as exc:
+            logger.exception("Daraz API error during print")
+            fail_print_job(job_id, str(exc))
+        except Exception as exc:
+            logger.exception("Unexpected print job failure")
+            fail_print_job(job_id, f"{type(exc).__name__}: {exc}")
+
+    background_tasks.add_task(run_job)
+    return {
+        "status": "processing",
+        "job_id": job_id,
+        "poll_url": f"/api/print-labels/{job_id}/status",
+        "download_url": f"/api/print-labels/{job_id}/download",
+        "message": "Print job started",
+    }
+
+
 @app.post("/api/print-labels")
 def api_print_labels(
     background_tasks: BackgroundTasks,
@@ -582,6 +971,7 @@ def api_print_labels(
     limit: int = Query(10, ge=1, le=30),
     created_after: str | None = Query(None),
     reuse_saved: bool = Query(False),
+    allow_reprint: bool = Query(False),
     wait: bool = Query(False, description="Block until done (local dev only)"),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
@@ -601,6 +991,8 @@ def api_print_labels(
             limit=limit,
             created_after=created_after,
             reuse_saved=reuse_saved,
+            allow_reprint=allow_reprint,
+            workspace_id=ctx.workspace_id,
             output=out_path,
             on_progress=progress_callback(job_id),
             get_store_fn=get_one,

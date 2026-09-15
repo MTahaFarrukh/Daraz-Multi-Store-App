@@ -134,7 +134,8 @@ export function ShippingPage() {
     setBusy(`Starting print (${selected.length} store(s), limit ${limit})…`);
     const started = Date.now();
     try {
-      const startedJob = await Api.startPrint(selected, limit);
+      // allow_reprint=false — backend skips already-printed orders
+      const startedJob = await Api.startPrint(selected, limit, false);
       const jobId = startedJob.job_id;
       if (!jobId) throw new Error("Print job did not return a job_id");
       setActiveJobId(jobId);
@@ -172,7 +173,7 @@ export function ShippingPage() {
     <div className="stack">
       <PageHeader
         title="Shipping"
-        description="Manage ready-to-ship orders and shipping labels across selected stores."
+        description="Live Daraz ready-to-ship fetch and label printing. Duplicate label protection is enforced on the backend (already-printed orders are skipped unless reprint is allowed). For the local order cache and bulk reprint HITL, use Orders."
       />
 
       <div className="tabs" role="tablist">
@@ -229,6 +230,10 @@ export function ShippingPage() {
 
           <section className="card">
             <h3 className="section-title">Ready to ship</h3>
+            <p className="muted-line" style={{ marginBottom: "0.75rem" }}>
+              Load orders hits live Daraz. Sync on the Orders page fills the local cache —
+              Shipping still uses the live path below. Empty selection never means all stores.
+            </p>
             <div className="toolbar">
               <label className="field" style={{ margin: 0, minWidth: 160 }}>
                 <span>Orders per store</span>

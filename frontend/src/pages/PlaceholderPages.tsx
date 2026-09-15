@@ -1,14 +1,5 @@
 import { ComingSoonPage } from "@/components/ui/Primitives";
 
-export function OrdersPage() {
-  return (
-    <ComingSoonPage
-      title="Orders"
-      description="Unified cross-store order management will live here in a later phase. Use Shipping for ready-to-ship labels today."
-    />
-  );
-}
-
 export function ProductsPage() {
   return (
     <ComingSoonPage

@@ -67,6 +67,152 @@ export type OrderRow = {
   display_name?: string;
 };
 
+export type OrderStatusGroup =
+  | "pending"
+  | "ready_to_ship"
+  | "shipped"
+  | "delivered"
+  | "canceled"
+  | "returned"
+  | "other"
+  | string;
+
+export type PrintStateFilter = "unprinted" | "printed" | "any";
+
+/** Local DB order row from GET /api/orders (Unified Orders). */
+export type UnifiedOrder = {
+  id: string;
+  store_id: string;
+  store_slug?: string | null;
+  store_display_name?: string | null;
+  daraz_order_id: string;
+  order_number?: string | number | null;
+  status_raw?: string | null;
+  status_group?: OrderStatusGroup | null;
+  statuses?: string | string[] | null;
+  price?: number | string | null;
+  currency?: string | null;
+  items_count?: number | null;
+  customer_first_name?: string | null;
+  customer_last_name?: string | null;
+  payment_method?: string | null;
+  shipping_fee?: number | string | null;
+  warehouse_code?: string | null;
+  synced_at?: string | null;
+  has_print?: boolean | null;
+  print_count?: number | null;
+  last_printed_at?: string | null;
+  created_at_daraz?: string | null;
+  updated_at_daraz?: string | null;
+};
+
+export type OrderListParams = {
+  stores?: string;
+  store_ids?: string;
+  group_id?: string;
+  status_group?: string;
+  status?: string;
+  search?: string;
+  date_from?: string;
+  date_to?: string;
+  print_state?: PrintStateFilter;
+  page?: number;
+  page_size?: number;
+  sort?: string;
+};
+
+export type OrderListResponse = {
+  orders: UnifiedOrder[];
+  items: UnifiedOrder[];
+  count: number;
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type OrderStatusCountsResponse = {
+  counts: Record<string, number>;
+};
+
+export type OrderItemRow = {
+  id?: string;
+  daraz_order_item_id?: string | null;
+  daraz_order_id?: string | null;
+  status_raw?: string | null;
+  package_id?: string | null;
+  name?: string | null;
+  sku?: string | null;
+  quantity?: number | null;
+  item_price?: number | string | null;
+  paid_price?: number | string | null;
+  currency?: string | null;
+  tracking_code?: string | null;
+  shipment_provider?: string | null;
+  shipping_type?: string | null;
+  warehouse_code?: string | null;
+};
+
+export type OrderPrintHistoryRow = {
+  id?: string;
+  printed_at?: string | null;
+  is_reprint?: boolean | null;
+  package_id?: string | null;
+  order_item_ids?: string[] | null;
+  fetch_source?: string | null;
+  print_job_id?: string | null;
+};
+
+export type OrderDetailResponse = {
+  order: UnifiedOrder;
+  items: OrderItemRow[];
+  print_history: OrderPrintHistoryRow[];
+  print_summary?: {
+    has_print?: boolean;
+    print_count?: number;
+    last_printed_at?: string | null;
+  };
+};
+
+export type OrderSyncResponse = {
+  stores: number;
+  ok: number;
+  failed: number;
+  results: Array<{
+    store_id?: string;
+    sync_status?: string;
+    sync_error?: string | null;
+    orders_upserted?: number;
+    items_upserted?: number;
+    warning?: string | null;
+  }>;
+};
+
+export type PrintTargetEntry = {
+  order_id: string;
+  store_id?: string;
+  daraz_order_id?: string;
+  status_group?: string | null;
+  order_item_ids?: string[];
+  package_id?: string | null;
+  reason?: string;
+  error?: string;
+};
+
+export type PrintValidateResponse = {
+  new_printable: PrintTargetEntry[];
+  already_printed: PrintTargetEntry[];
+  not_eligible: PrintTargetEntry[];
+  errors: PrintTargetEntry[];
+};
+
+export type PrintOrdersStartResponse = {
+  status: string;
+  job_id: string;
+  poll_url: string;
+  download_url: string;
+  message?: string;
+};
+
 export type LabelDetail = {
   order_id: string | number;
   store_name?: string;

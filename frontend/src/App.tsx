@@ -8,12 +8,12 @@ import { PerformancePage } from "@/pages/PerformancePage";
 import { ShippingPage } from "@/pages/ShippingPage";
 import { StoresPage } from "@/pages/StoresPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { OrdersPage } from "@/pages/OrdersPage";
 import {
   AnalyticsPage,
   ConnectionsPage,
   FinancePage,
   InventoryPage,
-  OrdersPage,
   ProductsPage,
 } from "@/pages/PlaceholderPages";
 

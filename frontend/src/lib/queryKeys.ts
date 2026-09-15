@@ -7,6 +7,20 @@
 
 export type PerformanceMetric = "orders" | "gross_sales";
 
+/**
+ * Stable filter key for unified orders / status-counts caches.
+ * Sorts object keys and joins as `k=v` pairs (null/undefined omitted).
+ */
+export function normalizeOrdersFilterKey(
+  filters: Record<string, string | number | null | undefined>
+): string {
+  return Object.keys(filters)
+    .sort()
+    .filter((k) => filters[k] != null && filters[k] !== "")
+    .map((k) => `${k}=${String(filters[k])}`)
+    .join("&");
+}
+
 export const queryKeys = {
   /** Auth profile — optional cache; auth session remains in useAuth/Supabase. */
   me: ["me"] as const,
@@ -34,7 +48,7 @@ export const queryKeys = {
   printJobs: (workspaceId: string) => ["workspace", workspaceId, "print-jobs"] as const,
 
   /**
-   * RTS orders — only fetched when explicitly enabled (user clicked Load Orders).
+   * Live RTS orders (Shipping) — only fetched when explicitly enabled.
    * Empty storeIds must NOT enable the query.
    */
   orders: (workspaceId: string, storeIds: string[], limit: number, status = "ready_to_ship") =>
@@ -46,6 +60,17 @@ export const queryKeys = {
       limit,
       [...storeIds].sort().join(","),
     ] as const,
+
+  /** Local DB unified orders list — keyed by normalized filter string. */
+  unifiedOrders: (workspaceId: string, filterKey: string) =>
+    ["workspace", workspaceId, "unified-orders", filterKey] as const,
+
+  /** Status-group counts for filter chrome (store scope). */
+  orderStatusCounts: (workspaceId: string, filterKey: string) =>
+    ["workspace", workspaceId, "order-status-counts", filterKey] as const,
+
+  orderDetail: (workspaceId: string, orderId: string) =>
+    ["workspace", workspaceId, "order-detail", orderId] as const,
 
   // Future Phase 3+ (not implemented):
   // products: (workspaceId: string) => ["workspace", workspaceId, "products"] as const,
