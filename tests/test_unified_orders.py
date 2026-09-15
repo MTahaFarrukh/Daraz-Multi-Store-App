@@ -232,3 +232,37 @@ def test_status_counts_endpoint(client: TestClient, tenancy_env) -> None:
     counts = res.json()["counts"]
     assert counts.get("ready_to_ship") == 1
     assert counts.get("canceled") == 1
+
+
+def test_sync_default_window_uses_created_after_30d(
+    tenancy_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default sync must use created_after (~30d), not update_after (~7d).
+
+    Stale RTS that were not updated recently were missing for whole stores.
+    """
+    from src.order_sync import sync_store_orders
+
+    ws = tenancy_env.create_workspace_with_owner("user-sync", "Sync WS")
+    wid = ws["workspace"]["id"]
+    store = _add_store(tenancy_env, wid, "store_sync", "sync@seller.com")
+    captured: dict = {}
+
+    mock_client = MagicMock()
+
+    def _get_orders(**kwargs):
+        captured.update(kwargs)
+        return {"data": {"orders": []}}
+
+    mock_client.get_orders.side_effect = _get_orders
+    mock_client.timeout = 60.0
+    monkeypatch.setattr("src.order_sync.client_for_store", lambda _s: mock_client)
+    monkeypatch.setattr(
+        "src.order_sync.access_token_expires_soon", lambda *_a, **_k: False
+    )
+
+    result = sync_store_orders(wid, store)
+    assert result["sync_status"] == "ok"
+    assert captured.get("created_after")
+    assert captured.get("update_after") is None
+    assert "created_at" in str(captured.get("sort_by"))

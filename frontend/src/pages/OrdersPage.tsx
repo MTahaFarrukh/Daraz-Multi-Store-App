@@ -229,11 +229,19 @@ export function OrdersPage() {
           ? undefined
           : stores.filter((s) => s.store_id === storeScope).map((s) => s.store_id);
       const result = await syncMutation.mutateAsync(
-        storeIds?.length ? { store_ids: storeIds } : undefined
+        storeIds?.length
+          ? { store_ids: storeIds, days: 30 }
+          : { days: 30 }
       );
+      const failedSlugs = (result.results || [])
+        .filter((r) => r.sync_status !== "ok")
+        .map((r) => r.store_id)
+        .filter(Boolean);
       setOk(
-        `Synced ${result.ok}/${result.stores} store(s)` +
-          (result.failed ? ` · ${result.failed} failed` : "")
+        `Synced ${result.ok}/${result.stores} store(s) · last 30 days` +
+          (result.failed
+            ? ` · ${result.failed} failed${failedSlugs.length ? ` (${failedSlugs.join(", ")})` : ""}`
+            : "")
       );
       resetSelection();
       setPage(1);

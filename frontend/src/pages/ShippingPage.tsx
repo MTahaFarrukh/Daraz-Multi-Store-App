@@ -31,6 +31,52 @@ import {
 import type { PrintValidateResponse, UnifiedOrder } from "@/types/api";
 
 const SELECTION_KEY = "multistore_shipping_selection_v1";
+const RTS_PAGE_SIZE = 200;
+const SYNC_DAYS = 30;
+
+async function fetchAllLocalRts(storeIds: string[]): Promise<{
+  orders: UnifiedOrder[];
+  total: number;
+}> {
+  const all: UnifiedOrder[] = [];
+  let page = 1;
+  let total = 0;
+  for (;;) {
+    const data = await Api.listUnifiedOrders({
+      stores: storeIds.join(","),
+      status_group: "ready_to_ship",
+      print_state: "any",
+      page,
+      page_size: RTS_PAGE_SIZE,
+      sort: "created_at_daraz_desc",
+    });
+    const rows = data.orders || data.items || [];
+    total = typeof data.total === "number" ? data.total : all.length + rows.length;
+    all.push(...rows);
+    if (rows.length < RTS_PAGE_SIZE || all.length >= total) break;
+    page += 1;
+    if (page > 100) break;
+  }
+  return { orders: all, total };
+}
+
+function formatSyncSummary(result: {
+  ok: number;
+  stores: number;
+  failed: number;
+  results?: Array<{ store_id?: string; sync_status?: string }>;
+}): string {
+  const failedSlugs = (result.results || [])
+    .filter((r) => r.sync_status !== "ok")
+    .map((r) => r.store_id)
+    .filter(Boolean);
+  return (
+    `Synced ${result.ok}/${result.stores} store(s) · last ${SYNC_DAYS} days` +
+    (result.failed
+      ? ` · ${result.failed} failed${failedSlugs.length ? ` (${failedSlugs.join(", ")})` : ""}`
+      : "")
+  );
+}
 
 export function ShippingPage() {
   const { me } = useAuth();
@@ -64,7 +110,7 @@ export function ShippingPage() {
       status_group: "ready_to_ship" as const,
       print_state: "any" as const,
       page: 1,
-      page_size: 100,
+      page_size: RTS_PAGE_SIZE,
       sort: "created_at_daraz_desc",
     }),
     [selectedStores]
@@ -73,9 +119,8 @@ export function ShippingPage() {
   // Only fetch local RTS when enabled AND at least one store selected (empty ≠ all).
   const canLoadRts = rtsEnabled && selectedStores.length > 0;
   const rtsQuery = useUnifiedOrders(workspaceId, listFilters, { enabled: canLoadRts });
-  const orders: UnifiedOrder[] = canLoadRts
-    ? rtsQuery.data?.orders || rtsQuery.data?.items || []
-    : [];
+  const [rtsOrders, setRtsOrders] = useState<UnifiedOrder[]>([]);
+  const orders: UnifiedOrder[] = canLoadRts ? rtsOrders : [];
 
   const history = printJobsQuery.data || [];
   const historyNote =
@@ -123,6 +168,7 @@ export function ShippingPage() {
 
   useEffect(() => {
     setRtsEnabled(false);
+    setRtsOrders([]);
     setOrderSelected(new Set());
   }, [selectedStores]);
 
@@ -144,11 +190,16 @@ export function ShippingPage() {
     setBusy("Loading RTS from local cache…");
     setRtsEnabled(true);
     try {
-      const result = await rtsQuery.refetch();
-      if (result.error) throw result.error;
-      const rows = result.data?.orders || result.data?.items || [];
+      const { orders: rows, total } = await fetchAllLocalRts(selectedStores);
+      setRtsOrders(rows);
+      void rtsQuery.refetch();
+      const storeCount = new Set(
+        rows.map((o) => o.store_slug || o.store_id).filter(Boolean)
+      ).size;
       setOk(
-        `Loaded ${rows.length} RTS order(s) · Unprinted badges come from MultiStore print events`
+        `Loaded ${rows.length} RTS order(s) across ${storeCount || selectedStores.length} store(s)` +
+          (total > rows.length ? ` · showing ${rows.length} of ${total}` : "") +
+          ` · Unprinted badges come from MultiStore print events`
       );
       setOrderSelected(new Set());
     } catch (err) {
@@ -167,11 +218,11 @@ export function ShippingPage() {
     setOk("");
     setBusy("Syncing from Daraz…");
     try {
-      const result = await syncMutation.mutateAsync({ store_ids: selectedStores });
-      setOk(
-        `Synced ${result.ok}/${result.stores} store(s)` +
-          (result.failed ? ` · ${result.failed} failed` : "")
-      );
+      const result = await syncMutation.mutateAsync({
+        store_ids: selectedStores,
+        days: SYNC_DAYS,
+      });
+      setOk(formatSyncSummary(result));
       await loadRts();
     } catch (err) {
       setBusy("");
@@ -207,7 +258,11 @@ export function ShippingPage() {
         /* retry via history */
       }
       setOrderSelected(new Set());
-      await rtsQuery.refetch();
+      if (selectedStores.length) {
+        const { orders: rows } = await fetchAllLocalRts(selectedStores);
+        setRtsOrders(rows);
+      }
+      void rtsQuery.refetch();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Print failed");
     } finally {

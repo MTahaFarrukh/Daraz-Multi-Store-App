@@ -101,7 +101,7 @@ export function useSyncOrders(workspaceId: string | undefined) {
   });
 }
 
-export function useValidatePrint(workspaceId: string | undefined) {
+export function useValidatePrint(_workspaceId: string | undefined) {
   return useMutation({
     mutationFn: (orderIds: string[]) => Api.validatePrintLabels(orderIds),
   });

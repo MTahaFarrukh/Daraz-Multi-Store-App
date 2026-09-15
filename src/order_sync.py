@@ -2,14 +2,13 @@
 
 Default windows
 ---------------
-- Incremental (preferred): ``update_after = now - 7 days`` when the caller
-  does not pass an explicit window.
-- Initial / broader backfill: pass ``created_after = now - 30 days`` (or set
-  ``days`` from the API) instead of / in addition to update_after.
-
-Prefer ``update_after`` for incremental sync when provided so recently changed
-orders (status/package_id) are refreshed without re-pulling the full created
-window.
+- Default Sync (no window args): ``created_after = now - 30 days`` so RTS and
+  other open orders that have not been *updated* recently are still pulled.
+  A 7-day ``update_after`` default missed whole stores' stale ready_to_ship rows.
+- Incremental: pass ``update_after`` explicitly (e.g. now - 7 days) to refresh
+  only recently changed orders.
+- Broader backfill: pass ``days`` (sets ``created_after = now - days``) or an
+  explicit ``created_after``.
 
 Pagination uses PAGE_SIZE=100 and MAX_OFFSET=5000 with overlap detection
 similar to ``performance_sync``. Finance APIs are never contacted.
@@ -205,7 +204,8 @@ def sync_store_orders(
         }
 
     if not update_after and not created_after:
-        update_after = _iso_ago(DEFAULT_UPDATE_DAYS)
+        # Prefer created_after so multi-store RTS that sat untouched still sync.
+        created_after = _iso_ago(DEFAULT_CREATED_DAYS)
 
     try:
         try:
