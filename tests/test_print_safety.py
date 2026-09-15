@@ -228,3 +228,64 @@ def test_record_label_prints_helper(repo) -> None:
     )
     assert len(rows) == 1
     assert rows[0]["fetch_source"] == "print_awb_pdf"
+
+
+def test_all_rts_remain_visible_after_some_printed(repo) -> None:
+    """Printed state is from events — older printed + newer unprinted both list under RTS."""
+    wid = repo.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _store(repo, wid)
+    morning = _order(repo, wid, store, "900")
+    later = _order(repo, wid, store, "901")
+    # Morning print event on first order only
+    repo.insert_label_print(
+        {
+            "workspace_id": wid,
+            "store_id": store["id"],
+            "order_id": morning["id"],
+            "daraz_order_id": "900",
+            "order_item_ids": ["item-900"],
+            "printed_at": "2026-09-15T05:02:00+00:00",
+        }
+    )
+    # Later order is "newer" by created_at but has NO event — must stay unprinted
+    repo.upsert_daraz_order(
+        {
+            "workspace_id": wid,
+            "store_id": store["id"],
+            "daraz_order_id": "901",
+            "order_number": "N-901",
+            "status_raw": "ready_to_ship",
+            "status_group": "ready_to_ship",
+            "statuses": ["ready_to_ship"],
+            "created_at_daraz": "2026-09-15T12:00:00+00:00",
+        }
+    )
+
+    listed = repo.list_orders(
+        wid,
+        {
+            "status_group": "ready_to_ship",
+            "print_state": "any",
+            "page": 1,
+            "page_size": 50,
+        },
+    )
+    ids = {str(o["daraz_order_id"]) for o in listed["items"]}
+    assert ids == {"900", "901"}
+    by_id = {str(o["daraz_order_id"]): o for o in listed["items"]}
+    assert by_id["900"]["has_print"] is True
+    assert by_id["901"]["has_print"] is False
+
+    # Timestamp alone must not invent print state for 901
+    assert repo.has_label_print(wid, store["id"], "901") is False
+
+    unprinted_only = repo.list_orders(
+        wid,
+        {
+            "status_group": "ready_to_ship",
+            "print_state": "unprinted",
+            "page": 1,
+            "page_size": 50,
+        },
+    )
+    assert {str(o["daraz_order_id"]) for o in unprinted_only["items"]} == {"901"}

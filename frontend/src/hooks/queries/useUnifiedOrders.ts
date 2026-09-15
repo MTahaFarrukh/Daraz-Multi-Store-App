@@ -38,16 +38,19 @@ function toListParams(filters: UnifiedOrdersFilters): OrderListParams {
 
 export function useUnifiedOrders(
   workspaceId: string | undefined,
-  filters: UnifiedOrdersFilters
+  filters: UnifiedOrdersFilters,
+  options?: { enabled?: boolean }
 ) {
   const params = toListParams(filters);
   const filterKey = normalizeOrdersFilterKey(
     params as Record<string, string | number | null | undefined>
   );
+  const enabled =
+    Boolean(workspaceId) && (options?.enabled !== undefined ? options.enabled : true);
   return useQuery({
     queryKey: queryKeys.unifiedOrders(workspaceId || "__none__", filterKey),
     queryFn: () => Api.listUnifiedOrders(params),
-    enabled: Boolean(workspaceId),
+    enabled,
     staleTime: UNIFIED_ORDERS_STALE_MS,
     placeholderData: (prev) => prev,
   });

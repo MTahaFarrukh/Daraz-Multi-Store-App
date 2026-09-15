@@ -828,9 +828,22 @@ table.data tbody tr:hover {
   background: #fff;
 }
 
-.perf-updating {
-  opacity: 0.72;
-  transition: opacity 0.15s ease;
+.rts-selection-toolbar {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 122, 114, 0.04);
+  margin-bottom: 0.75rem;
+}
+
+.rts-selection-actions {
+  gap: 0.4rem;
+}
+
+.rts-selection-stats {
+  margin: 0;
 }
 
 @media (max-width: 900px) {

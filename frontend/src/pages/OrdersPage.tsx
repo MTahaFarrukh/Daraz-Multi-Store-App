@@ -3,6 +3,7 @@ import { Api } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import { useStores } from "@/hooks/queries/useStores";
 import { useStoreGroups } from "@/hooks/queries/useStoreGroups";
+import { usePrintJobs } from "@/hooks/queries/usePrintAndOrders";
 import {
   pollPrintJob,
   useOrderDetail,
@@ -12,6 +13,7 @@ import {
   useUnifiedOrders,
   useValidatePrint,
 } from "@/hooks/queries/useUnifiedOrders";
+import { RtsSelectionToolbar } from "@/components/orders/RtsSelectionToolbar";
 import { Dialog } from "@/components/ui/Dialog";
 import {
   EmptyState,
@@ -21,6 +23,12 @@ import {
   StatusBadge,
   SuccessBanner,
 } from "@/components/ui/Primitives";
+import {
+  formatPrintTime,
+  resolvePrintLabelStatus,
+  selectAllIds,
+  selectUnprintedIds,
+} from "@/lib/printLabelStatus";
 import type { PrintStateFilter, PrintValidateResponse, UnifiedOrder } from "@/types/api";
 
 const STATUS_TABS: Array<{ key: string; label: string }> = [
@@ -90,17 +98,8 @@ function statusLabel(group?: string | null): string {
   return map[group] || group;
 }
 
-function labelStatus(o: UnifiedOrder): { text: string; tone: "ok" | "warn" | "danger" | "muted" } {
-  if (o.has_print) {
-    return {
-      text: o.print_count && o.print_count > 1 ? `Printed ×${o.print_count}` : "Printed",
-      tone: "warn",
-    };
-  }
-  if (o.status_group === "ready_to_ship") {
-    return { text: "Unprinted", tone: "ok" };
-  }
-  return { text: "—", tone: "muted" };
+function labelStatus(o: UnifiedOrder) {
+  return resolvePrintLabelStatus(o);
 }
 
 export function OrdersPage() {
@@ -169,6 +168,7 @@ export function OrdersPage() {
   const syncMutation = useSyncOrders(workspaceId);
   const validateMutation = useValidatePrint(workspaceId);
   const printMutation = usePrintOrdersByIds(workspaceId);
+  const printJobsQuery = usePrintJobs(workspaceId, true);
 
   const orders = ordersQuery.data?.orders || ordersQuery.data?.items || [];
   const total = ordersQuery.data?.total ?? ordersQuery.data?.count ?? 0;
@@ -178,6 +178,18 @@ export function OrdersPage() {
   const totalAll = Object.values(counts).reduce((a, b) => a + (Number(b) || 0), 0);
 
   const hasSyncedData = totalAll > 0 || total > 0;
+
+  const lastBatchLabel = useMemo(() => {
+    const jobs = printJobsQuery.data || [];
+    const done = jobs
+      .filter((j) => j.status === "done" && (j.updated_at || j.started_at))
+      .sort((a, b) =>
+        String(b.updated_at || b.started_at || "").localeCompare(
+          String(a.updated_at || a.started_at || "")
+        )
+      );
+    return formatPrintTime(done[0]?.updated_at || done[0]?.started_at) || null;
+  }, [printJobsQuery.data]);
 
   function resetSelection() {
     setSelectedIds(new Set());
@@ -192,22 +204,19 @@ export function OrdersPage() {
     });
   }
 
+  function selectAllVisible() {
+    setSelectedIds(new Set(selectAllIds(orders)));
+  }
+
+  function selectUnprintedVisible() {
+    setSelectedIds(new Set(selectUnprintedIds(orders)));
+  }
+
   function toggleSelectAllVisible() {
     const ids = orders.map((o) => o.id);
     const allSelected = ids.length > 0 && ids.every((id) => selectedIds.has(id));
-    if (allSelected) {
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        ids.forEach((id) => next.delete(id));
-        return next;
-      });
-    } else {
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        ids.forEach((id) => next.add(id));
-        return next;
-      });
-    }
+    if (allSelected) resetSelection();
+    else selectAllVisible();
   }
 
   async function handleSync() {
@@ -535,6 +544,19 @@ export function OrdersPage() {
         />
       ) : (
         <>
+          {statusGroup === "ready_to_ship" ||
+          orders.some((o) => o.status_group === "ready_to_ship") ? (
+            <RtsSelectionToolbar
+              orders={orders}
+              selectedCount={selectedIds.size}
+              lastBatchLabel={lastBatchLabel}
+              onSelectAll={selectAllVisible}
+              onSelectUnprinted={selectUnprintedVisible}
+              onClear={resetSelection}
+              disabled={Boolean(busy)}
+            />
+          ) : null}
+
           <div className={`orders-table-wrap${listFetching ? " is-fetching" : ""}`}>
             <div className="table-wrap orders-table-desktop">
               <table className="data">
@@ -833,24 +855,32 @@ export function OrdersPage() {
 
       <Dialog
         open={hitlOpen}
-        title="Already printed labels"
+        title="Confirm label print"
         onClose={() => {
           setHitlOpen(false);
           setHitlValidation(null);
         }}
       >
-        <p style={{ margin: 0, color: "var(--muted)" }}>
-          {hitlValidation?.already_printed.length || 0} order(s) already have a printed
-          label. Reprinting can create duplicates on the warehouse floor.
-        </p>
-        {hitlValidation?.new_printable.length ? (
-          <p style={{ margin: 0 }}>
-            {hitlValidation.new_printable.length} unprinted order(s) can print without a
-            reprint.
-          </p>
-        ) : (
-          <p style={{ margin: 0 }}>No unprinted orders in this selection.</p>
-        )}
+        {hitlValidation ? (
+          <>
+            <p style={{ margin: 0 }}>
+              <strong>
+                {(hitlValidation.new_printable.length || 0) +
+                  (hitlValidation.already_printed.length || 0)}{" "}
+                selected
+              </strong>
+            </p>
+            <p style={{ margin: 0 }}>
+              {hitlValidation.new_printable.length} unprinted
+              <br />
+              {hitlValidation.already_printed.length} already printed
+            </p>
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              Reprinting may create duplicate physical labels. “Print Unprinted” never
+              reprints. “Reprint All” requires this explicit confirmation.
+            </p>
+          </>
+        ) : null}
         <div className="row" style={{ justifyContent: "flex-end" }}>
           <button
             type="button"
@@ -868,7 +898,7 @@ export function OrdersPage() {
               className="btn btn-primary"
               onClick={() => void confirmReprint(false)}
             >
-              Print unprinted only
+              Print {hitlValidation.new_printable.length} Unprinted
             </button>
           ) : null}
           <button
@@ -876,7 +906,9 @@ export function OrdersPage() {
             className="btn btn-accent"
             onClick={() => void confirmReprint(true)}
           >
-            Print including reprints
+            Reprint All{" "}
+            {(hitlValidation?.new_printable.length || 0) +
+              (hitlValidation?.already_printed.length || 0)}
           </button>
         </div>
       </Dialog>
