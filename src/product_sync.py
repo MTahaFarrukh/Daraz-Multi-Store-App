@@ -174,7 +174,7 @@ def sync_store_products(
     workspace_id: str,
     store: dict[str, Any],
     *,
-    fetch_details: bool = True,
+    fetch_details: bool = False,
     max_products: int | None = None,
 ) -> dict[str, Any]:
     repo = get_repo()
@@ -292,6 +292,13 @@ def sync_store_products(
             payload = product_payload_from_daraz(workspace_id, store_uuid, merged)
             if not payload["daraz_item_id"]:
                 continue
+            now = _now_iso()
+            payload["catalog_seen_at"] = now
+            if iid in details_by_id:
+                payload["detail_complete"] = True
+                payload["detail_synced_at"] = now
+            else:
+                payload["detail_complete"] = False
             row = repo.upsert_daraz_product(payload)
             products_upserted += 1
             variants = variant_payloads_from_daraz(
@@ -338,7 +345,7 @@ def sync_workspace_products(
     workspace_id: str,
     *,
     store_ids: list[str] | None = None,
-    fetch_details: bool = True,
+    fetch_details: bool = False,
 ) -> dict[str, Any]:
     repo = get_repo()
     all_stores = repo.list_stores(workspace_id)

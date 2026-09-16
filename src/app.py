@@ -1234,7 +1234,8 @@ def api_store_performance_sync(
 
 class ProductSyncBody(BaseModel):
     store_ids: list[str] | None = None
-    fetch_details: bool = True
+    # Catalog-only by default (Phase 4D). Detail hydration is lazy.
+    fetch_details: bool = False
 
 
 class ProductDefaultsBody(BaseModel):
@@ -1247,6 +1248,22 @@ class ProductDefaultsBody(BaseModel):
 
 
 class CloneDraftBody(BaseModel):
+    destination_store_id: str = Field(..., min_length=1)
+
+
+class ConnectedFetchBody(BaseModel):
+    source_store_id: str = Field(..., min_length=1)
+    daraz_item_id: str = Field(..., min_length=1)
+
+
+class ConnectedCloneDraftBody(BaseModel):
+    source_store_id: str = Field(..., min_length=1)
+    daraz_item_id: str = Field(..., min_length=1)
+    destination_store_id: str = Field(..., min_length=1)
+
+
+class ImportUrlDraftBody(BaseModel):
+    url: str = Field(..., min_length=8)
     destination_store_id: str = Field(..., min_length=1)
 
 
@@ -1412,13 +1429,89 @@ def api_product_clone_draft(
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
     from src.product_clone import build_connected_clone_draft
+    from src.product_fetch import ProductFetchError, ensure_product_detail
 
     try:
+        try:
+            ensure_product_detail(ctx.workspace_id, product_id)
+        except ProductFetchError:
+            # Fall back to local warehouse row when live detail hydrate is unavailable
+            pass
         return build_connected_clone_draft(
             ctx.workspace_id,
             source_product_id=product_id,
             destination_store_id=body.destination_store_id,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/fetch-connected")
+def api_fetch_connected_product(
+    body: ConnectedFetchBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.product_fetch import ProductFetchError, fetch_connected_product
+
+    try:
+        return fetch_connected_product(
+            ctx.workspace_id,
+            source_store_id=body.source_store_id,
+            daraz_item_id=body.daraz_item_id,
+        )
+    except ProductFetchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/clone-draft/from-connected")
+def api_clone_draft_from_connected(
+    body: ConnectedCloneDraftBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.product_fetch import ProductFetchError, clone_draft_from_connected
+
+    try:
+        return clone_draft_from_connected(
+            ctx.workspace_id,
+            source_store_id=body.source_store_id,
+            daraz_item_id=body.daraz_item_id,
+            destination_store_id=body.destination_store_id,
+        )
+    except ProductFetchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/{product_id}/ensure-detail")
+def api_ensure_product_detail(
+    product_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.product_fetch import ProductFetchError, ensure_product_detail
+
+    try:
+        return ensure_product_detail(ctx.workspace_id, product_id)
+    except ProductFetchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/import-url/draft")
+def api_import_url_draft(
+    body: ImportUrlDraftBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.product_fetch import ProductFetchError
+    from src.public_daraz import PublicDarazError, build_public_clone_draft
+
+    try:
+        return build_public_clone_draft(
+            ctx.workspace_id,
+            url=body.url,
+            destination_store_id=body.destination_store_id,
+        )
+    except (PublicDarazError, ProductFetchError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1432,13 +1525,17 @@ def api_product_create_payload_preview(
     """Build redacted CreateProduct preview. Never submits to Daraz."""
     from src.product_clone import build_connected_clone_draft
     from src.product_create_payload import build_create_product_payload_preview
+    from src.product_fetch import ProductFetchError, ensure_product_detail
 
     try:
+        ensure_product_detail(ctx.workspace_id, product_id)
         result = build_connected_clone_draft(
             ctx.workspace_id,
             source_product_id=product_id,
             destination_store_id=body.destination_store_id,
         )
+    except ProductFetchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     draft = result["draft"]

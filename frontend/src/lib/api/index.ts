@@ -20,6 +20,7 @@ import type {
   ProductDetailResponse,
   ProductListParams,
   ProductListResponse,
+  ProductRow,
   ProductSyncResponse,
   StoreGroup,
   StoreView,
@@ -220,4 +221,45 @@ export const Api = {
         body: JSON.stringify({ destination_store_id }),
       }
     ),
+
+  fetchConnectedProduct: (body: {
+    source_store_id: string;
+    daraz_item_id: string;
+  }) =>
+    api<{
+      product: ProductRow;
+      variants: Array<Record<string, unknown>>;
+      timings_ms?: Record<string, number>;
+      api_calls?: Record<string, number>;
+      source_store?: Record<string, unknown>;
+    }>("/api/products/fetch-connected", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  cloneDraftFromConnected: (body: {
+    source_store_id: string;
+    daraz_item_id: string;
+    destination_store_id: string;
+  }) =>
+    api<ProductCloneDraftResponse>("/api/products/clone-draft/from-connected", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  importUrlDraft: (body: { url: string; destination_store_id: string }) =>
+    api<ProductCloneDraftResponse>("/api/products/import-url/draft", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  ensureProductDetail: (productId: string) =>
+    api<{
+      product: ProductRow;
+      variants: Array<Record<string, unknown>>;
+      hydrated?: boolean;
+      timings_ms?: Record<string, number>;
+    }>(`/api/products/${encodeURIComponent(productId)}/ensure-detail`, {
+      method: "POST",
+    }),
 };

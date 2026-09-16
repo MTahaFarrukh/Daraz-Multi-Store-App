@@ -135,14 +135,17 @@ def test_print_excludes_without_allow_reprint(repo, tmp_path, monkeypatch) -> No
     )
     monkeypatch.setattr("src.ops.client_for_store", lambda s: MagicMock())
 
-    with pytest.raises(ValueError, match="No printable"):
-        print_labels_for_orders(
-            wid,
-            "u1",
-            [order["id"]],
-            allow_reprint=False,
-            output=tmp_path / "out.pdf",
-        )
+    result = print_labels_for_orders(
+        wid,
+        "u1",
+        [order["id"]],
+        allow_reprint=False,
+        output=tmp_path / "out.pdf",
+    )
+    assert result["print_status"] == "failed"
+    assert result["outcomes"][0]["state"] == "ALREADY_PRINTED"
+    assert result["labels"] == 0
+    assert result["prints_recorded"] == 0
 
 
 def test_allow_reprint_creates_is_reprint(repo, tmp_path, monkeypatch) -> None:
@@ -192,14 +195,16 @@ def test_failed_generation_no_print_event(repo, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("src.ops._fetch_label_document", boom)
     monkeypatch.setattr("src.ops.client_for_store", lambda s: MagicMock())
 
-    with pytest.raises(ValueError, match="No labels generated"):
-        print_labels_for_orders(
-            wid,
-            "u1",
-            [order["id"]],
-            allow_reprint=False,
-            output=tmp_path / "out.pdf",
-        )
+    result = print_labels_for_orders(
+        wid,
+        "u1",
+        [order["id"]],
+        allow_reprint=False,
+        output=tmp_path / "out.pdf",
+    )
+    assert result["print_status"] == "failed"
+    assert result["outcomes"][0]["state"] == "DOCUMENT_FAILED"
+    assert result["prints_recorded"] == 0
 
     prints = repo.list_label_prints_for_orders(wid, [order["id"]])[order["id"]]
     assert prints == []

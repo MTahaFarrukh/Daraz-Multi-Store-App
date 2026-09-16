@@ -16,7 +16,7 @@ export function useProducts(
   return useQuery({
     queryKey: queryKeys.products(workspaceId || "__none__", filterKey),
     queryFn: () => Api.listProducts(filters),
-    enabled: Boolean(workspaceId) && (options?.enabled !== false),
+    enabled: Boolean(workspaceId) && options?.enabled !== false,
     staleTime: STALE_MS,
     placeholderData: (prev) => prev,
   });
@@ -86,5 +86,55 @@ export function usePrepareCloneDraft(_workspaceId: string | undefined) {
       productId: string;
       destinationStoreId: string;
     }) => Api.prepareCloneDraft(productId, destinationStoreId),
+  });
+}
+
+export function useFetchConnectedProduct(workspaceId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { source_store_id: string; daraz_item_id: string }) =>
+      Api.fetchConnectedProduct(body),
+    onSuccess: async () => {
+      if (!workspaceId) return;
+      await qc.invalidateQueries({
+        queryKey: ["workspace", workspaceId, "products"],
+      });
+      await qc.invalidateQueries({
+        queryKey: ["workspace", workspaceId, "product"],
+      });
+    },
+  });
+}
+
+export function useCloneDraftFromConnected(_workspaceId: string | undefined) {
+  return useMutation({
+    mutationFn: (body: {
+      source_store_id: string;
+      daraz_item_id: string;
+      destination_store_id: string;
+    }) => Api.cloneDraftFromConnected(body),
+  });
+}
+
+export function useImportUrlDraft(_workspaceId: string | undefined) {
+  return useMutation({
+    mutationFn: (body: { url: string; destination_store_id: string }) =>
+      Api.importUrlDraft(body),
+  });
+}
+
+export function useEnsureProductDetail(workspaceId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (productId: string) => Api.ensureProductDetail(productId),
+    onSuccess: async (_data, productId) => {
+      if (!workspaceId) return;
+      await qc.invalidateQueries({
+        queryKey: queryKeys.product(workspaceId, productId),
+      });
+      await qc.invalidateQueries({
+        queryKey: ["workspace", workspaceId, "products"],
+      });
+    },
   });
 }

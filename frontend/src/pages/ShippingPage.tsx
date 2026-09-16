@@ -66,6 +66,9 @@ export function ShippingPage() {
   const [partialLoad, setPartialLoad] = useState(false);
   const [loadElapsedMs, setLoadElapsedMs] = useState<number | null>(null);
 
+  const [failedPrintIds, setFailedPrintIds] = useState<string[]>([]);
+  const [lastPrintSummary, setLastPrintSummary] = useState("");
+
   const validateMutation = useValidatePrint(workspaceId);
   const printMutation = usePrintOrdersByIds(workspaceId);
   const printJobsQuery = usePrintJobs(workspaceId, true);
@@ -205,9 +208,11 @@ export function ShippingPage() {
   }
 
   async function runPrint(orderIds: string[], allowReprint: boolean) {
-    setBusy(`Printing ${orderIds.length} label(s)…`);
+    setBusy(`Validating ${orderIds.length} labels… Resolving packages… Fetching labels…`);
     setError("");
     setOk("");
+    setFailedPrintIds([]);
+    setLastPrintSummary("");
     try {
       const started = await printMutation.mutateAsync({ orderIds, allowReprint });
       const jobId = started.job_id;
@@ -216,7 +221,23 @@ export function ShippingPage() {
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }
-      setOk(`PDF ready · ${status.pages ?? "?"} page(s)`);
+      const result = (status.result || status) as Record<string, any>;
+      const message =
+        result.message ||
+        result.summary?.message ||
+        `PDF ready · ${status.pages ?? result.pages ?? "?"} page(s)`;
+      const failedIds: string[] = result.failed_order_ids || [];
+      const printStatus = result.print_status || result.summary?.print_status;
+      setLastPrintSummary(message);
+      setFailedPrintIds(failedIds);
+      if (printStatus === "partial_success" || failedIds.length) {
+        setOk(message);
+        setError(
+          `${failedIds.length} label(s) need attention. Use Retry Failed to reprint only those.`
+        );
+      } else {
+        setOk(message);
+      }
       try {
         await Api.downloadPrint(jobId);
       } catch {
@@ -367,7 +388,22 @@ export function ShippingPage() {
               >
                 Print Labels
               </button>
+              {failedPrintIds.length ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={Boolean(busy)}
+                  onClick={() => runPrint(failedPrintIds, false)}
+                >
+                  Retry Failed {failedPrintIds.length}
+                </button>
+              ) : null}
             </div>
+            {lastPrintSummary ? (
+              <p className="muted-line" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
+                Last print: {lastPrintSummary}
+              </p>
+            ) : null}
           </section>
 
           {rtsEnabled && storeStatuses.length ? (

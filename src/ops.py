@@ -597,42 +597,193 @@ def print_labels_for_orders(
 ) -> dict[str, Any]:
     """Print labels for local DB order UUIDs (one document per order).
 
-    Validates print targets; skips already-printed unless ``allow_reprint``.
-    Partial failures are OK — successful orders are merged and recorded.
+    Hydrates missing items, validates targets, and records an explicit outcome
+    for every selected order (never silent-skip). Already-printed orders are
+    blocked unless ``allow_reprint``. Print events are recorded only after a
+    successful PDF merge for SUCCESS outcomes.
     """
+    import time
+
     from src.db.repo import get_repo
-    from src.print_safety import record_label_prints, validate_print_targets
+    from src.print_hydrate import hydrate_missing_order_items
+    from src.print_outcomes import (
+        ALREADY_PRINTED,
+        DARAZ_ERROR,
+        DOCUMENT_FAILED,
+        MERGE_FAILED,
+        NOT_ELIGIBLE,
+        NOT_FOUND,
+        PACKAGE_RESOLUTION_FAILED,
+        STORE_NOT_FOUND,
+        SUCCESS,
+        UNKNOWN_FAILURE,
+        make_outcome,
+        summarize_outcomes,
+    )
+    from src.print_safety import (
+        order_is_eligible,
+        record_label_prints,
+        validate_print_targets,
+    )
 
     def progress(msg: str) -> None:
         if on_progress:
             on_progress(msg)
 
+    t_total = time.perf_counter()
     repo = get_repo()
-    validated = validate_print_targets(workspace_id, order_uuids)
-    targets = list(validated["new_printable"])
-    if allow_reprint:
-        targets.extend(validated["already_printed"])
-    if not targets:
-        raise ValueError("No printable orders selected.")
 
-    # Group by store uuid
+    # Preserve selection order; drop duplicates
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw_id in order_uuids:
+        oid = str(raw_id)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        selected.append(oid)
+
+    hydrate = hydrate_missing_order_items(workspace_id, selected)
+    hydrate_ms = int(hydrate.get("hydrate_ms") or 0)
+
+    t_val = time.perf_counter()
+    validated = validate_print_targets(workspace_id, selected)
+    validation_ms = int((time.perf_counter() - t_val) * 1000)
+
+    store_cache: dict[str, dict[str, Any] | None] = {}
+
+    def _store_meta(store_uuid: str | None) -> dict[str, Any]:
+        if not store_uuid:
+            return {
+                "store_id": None,
+                "store_slug": None,
+                "store_display_name": None,
+            }
+        if store_uuid not in store_cache:
+            store_cache[store_uuid] = repo.get_store_by_uuid(workspace_id, store_uuid)
+        store = store_cache[store_uuid]
+        if not store:
+            return {
+                "store_id": store_uuid,
+                "store_slug": None,
+                "store_display_name": None,
+            }
+        return {
+            "store_id": store_uuid,
+            "store_slug": str(store.get("store_id") or ""),
+            "store_display_name": store_display_name(store),
+        }
+
+    def _order_fields(oid: str, entry: dict[str, Any] | None = None) -> dict[str, Any]:
+        order = repo.get_order_by_id(workspace_id, oid)
+        store_uuid = str(
+            (entry or {}).get("store_id")
+            or (order or {}).get("store_id")
+            or ""
+        ) or None
+        meta = _store_meta(store_uuid)
+        return {
+            "daraz_order_id": str(
+                (entry or {}).get("daraz_order_id")
+                or (order or {}).get("daraz_order_id")
+                or ""
+            )
+            or None,
+            "order_number": str((order or {}).get("order_number") or "") or None,
+            **meta,
+            "package_id": (entry or {}).get("package_id"),
+            "order_item_ids": list((entry or {}).get("order_item_ids") or []),
+        }
+
+    outcomes_by_id: dict[str, dict[str, Any]] = {}
+    fetch_targets: list[dict[str, Any]] = []
+    reprint_ids: set[str] = set()
+
+    for err in validated["errors"]:
+        oid = str(err["order_id"])
+        err_code = str(err.get("error") or "not_found")
+        state = STORE_NOT_FOUND if err_code == "store_not_found" else NOT_FOUND
+        outcomes_by_id[oid] = make_outcome(
+            order_id=oid,
+            state=state,
+            reason=err_code,
+            **_order_fields(oid),
+        )
+
+    for entry in validated["not_eligible"]:
+        oid = str(entry["order_id"])
+        order = repo.get_order_by_id(workspace_id, oid)
+        items = repo.list_order_items(workspace_id, oid) if order else []
+        item_ids = list(entry.get("order_item_ids") or [])
+        if not item_ids:
+            # Eligible header / missing lines after hydrate → package resolution
+            if not items or (order and order_is_eligible(order, items)):
+                state = PACKAGE_RESOLUTION_FAILED
+                reason = "no_order_item_ids"
+            else:
+                state = NOT_ELIGIBLE
+                reason = str(entry.get("reason") or "not_eligible")
+        else:
+            state = NOT_ELIGIBLE
+            reason = str(entry.get("reason") or "not_eligible")
+        outcomes_by_id[oid] = make_outcome(
+            order_id=oid,
+            state=state,
+            reason=reason,
+            **_order_fields(oid, entry),
+        )
+
+    for entry in validated["already_printed"]:
+        oid = str(entry["order_id"])
+        if allow_reprint:
+            fetch_targets.append(entry)
+            reprint_ids.add(oid)
+        else:
+            outcomes_by_id[oid] = make_outcome(
+                order_id=oid,
+                state=ALREADY_PRINTED,
+                reason="already_printed",
+                is_reprint=False,
+                **_order_fields(oid, entry),
+            )
+
+    for entry in validated["new_printable"]:
+        oid = str(entry["order_id"])
+        if not entry.get("order_item_ids"):
+            outcomes_by_id[oid] = make_outcome(
+                order_id=oid,
+                state=PACKAGE_RESOLUTION_FAILED,
+                reason="no_order_item_ids",
+                **_order_fields(oid, entry),
+            )
+        else:
+            fetch_targets.append(entry)
+
     by_store: dict[str, list[dict[str, Any]]] = {}
-    for t in targets:
+    for t in fetch_targets:
         by_store.setdefault(str(t["store_id"]), []).append(t)
 
     raw_labels: list[LabelDocument] = []
     label_fetch_sources: list[str] = []
     label_fetch_meta: list[dict[str, Any]] = []
-    successes: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    reprint_ids = {str(t["order_id"]) for t in validated["already_printed"]}
+    pending_successes: list[dict[str, Any]] = []
 
-    progress(f"Printing {len(targets)} order label(s)…")
+    t_fetch = time.perf_counter()
+    if fetch_targets:
+        progress(f"Printing {len(fetch_targets)} order label(s)…")
+
     for store_uuid, store_targets in by_store.items():
         store = repo.get_store_by_uuid(workspace_id, store_uuid)
+        store_cache[store_uuid] = store
         if not store:
             for t in store_targets:
-                failures.append({"order_id": t["order_id"], "error": "store_not_found"})
+                oid = str(t["order_id"])
+                outcomes_by_id[oid] = make_outcome(
+                    order_id=oid,
+                    state=STORE_NOT_FOUND,
+                    reason="store_not_found",
+                    **_order_fields(oid, t),
+                )
             continue
         sid = str(store.get("store_id", "store"))
         sname = store_display_name(store)
@@ -640,14 +791,30 @@ def print_labels_for_orders(
             client = client_for_store(store)
         except Exception as exc:  # noqa: BLE001
             for t in store_targets:
-                failures.append({"order_id": t["order_id"], "error": str(exc)})
+                oid = str(t["order_id"])
+                outcomes_by_id[oid] = make_outcome(
+                    order_id=oid,
+                    state=DARAZ_ERROR,
+                    reason=str(exc),
+                    daraz_message=str(exc),
+                    **_order_fields(oid, t),
+                )
             continue
 
-        work = [
-            (t, t["order_item_ids"], t.get("package_id"))
-            for t in store_targets
-            if t.get("order_item_ids")
-        ]
+        work: list[tuple[dict[str, Any], list[str], str | None]] = []
+        for t in store_targets:
+            oid = str(t["order_id"])
+            item_ids = list(t.get("order_item_ids") or [])
+            if not item_ids:
+                outcomes_by_id[oid] = make_outcome(
+                    order_id=oid,
+                    state=PACKAGE_RESOLUTION_FAILED,
+                    reason="no_order_item_ids",
+                    **_order_fields(oid, t),
+                )
+                continue
+            work.append((t, item_ids, t.get("package_id")))
+
         if not work:
             continue
 
@@ -669,22 +836,47 @@ def print_labels_for_orders(
             done = 0
             for future in as_completed(futures):
                 t = futures[future]
+                oid = str(t["order_id"])
                 done += 1
                 progress(f"Downloaded {done}/{len(work)} labels…")
                 try:
-                    labels_by_order[str(t["order_id"])] = future.result()
+                    labels_by_order[oid] = future.result()
+                except DarazApiError as exc:
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=DARAZ_ERROR,
+                        reason=str(exc),
+                        daraz_code=exc.code,
+                        daraz_message=str(exc),
+                        is_reprint=oid in reprint_ids,
+                        **_order_fields(oid, t),
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    failures.append({"order_id": t["order_id"], "error": str(exc)})
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=DOCUMENT_FAILED,
+                        reason=str(exc),
+                        is_reprint=oid in reprint_ids,
+                        **_order_fields(oid, t),
+                    )
 
         for t, item_ids, package_id in work:
             oid = str(t["order_id"])
             if oid not in labels_by_order:
+                if oid not in outcomes_by_id:
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=DOCUMENT_FAILED,
+                        reason="label_fetch_missing",
+                        is_reprint=oid in reprint_ids,
+                        **_order_fields(oid, t),
+                    )
                 continue
             label, fetch_source, fetch_meta = labels_by_order[oid]
             raw_labels.append(label)
             label_fetch_sources.append(fetch_source)
             label_fetch_meta.append(fetch_meta)
-            successes.append(
+            pending_successes.append(
                 {
                     "order_id": oid,
                     "store_id": store_uuid,
@@ -693,84 +885,195 @@ def print_labels_for_orders(
                     "package_id": package_id or fetch_meta.get("package_id"),
                     "is_reprint": oid in reprint_ids,
                     "fetch_source": fetch_source,
+                    "entry": t,
+                    "fetch_meta": fetch_meta,
                 }
             )
 
-    if not raw_labels:
-        raise ValueError(
-            "No labels generated."
-            + (f" Failures: {len(failures)}" if failures else "")
-        )
+    document_fetch_ms = int((time.perf_counter() - t_fetch) * 1000)
 
-    html_count = sum(1 for label in raw_labels if not label.is_pdf())
+    recorded: list[dict[str, Any]] = []
     pdf_labels: list[LabelDocument] = []
-    if html_count == 0:
-        progress(f"Using {len(raw_labels)} Daraz PDF label(s) — no conversion needed.")
-        pdf_labels = list(raw_labels)
-    else:
-        progress(f"Converting {html_count} HTML label(s) to PDF…")
-        with html_converter_session() as converter:
-            for label in raw_labels:
-                if label.is_pdf():
-                    pdf_labels.append(label)
-                else:
-                    pdf_labels.append(_ensure_pdf_document(label, converter=converter))
+    label_details: list[dict[str, Any]] = []
+    out_pdf: Path | None = None
+    merge_ms = 0
+    record_ms = 0
+    pages = 0
 
-    out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    progress("Merging PDF…")
-    merge_labels(pdf_labels, out_pdf)
+    if pending_successes and raw_labels:
+        t_merge = time.perf_counter()
+        try:
+            html_count = sum(1 for label in raw_labels if not label.is_pdf())
+            if html_count == 0:
+                progress(
+                    f"Using {len(raw_labels)} Daraz PDF label(s) — no conversion needed."
+                )
+                pdf_labels = list(raw_labels)
+            else:
+                progress(f"Converting {html_count} HTML label(s) to PDF…")
+                with html_converter_session() as converter:
+                    for label in raw_labels:
+                        if label.is_pdf():
+                            pdf_labels.append(label)
+                        else:
+                            pdf_labels.append(
+                                _ensure_pdf_document(label, converter=converter)
+                            )
 
-    # Only record print events after successful PDF merge
-    recorded = record_label_prints(workspace_id, user_id, job_id, successes)
-    new_count = sum(1 for s in successes if not s.get("is_reprint"))
-    reprint_count = sum(1 for s in successes if s.get("is_reprint"))
+            out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
+            out_pdf.parent.mkdir(parents=True, exist_ok=True)
+            progress("Merging PDF…")
+            merge_labels(pdf_labels, out_pdf)
+            pages = pdf_page_count(out_pdf)
+            merge_ms = int((time.perf_counter() - t_merge) * 1000)
 
-    rel = (
-        str(out_pdf.relative_to(PROJECT_ROOT))
-        if out_pdf.is_relative_to(PROJECT_ROOT)
-        else str(out_pdf)
-    )
-    label_details = []
-    for label, fetch_source, fetch_meta in zip(
-        raw_labels, label_fetch_sources, label_fetch_meta, strict=True
-    ):
-        notes = fetch_meta.get("print_awb_error")
-        if fetch_meta.get("print_awb_attempted") and fetch_source == "print_awb_pdf":
-            notes = None
-        label_details.append(
-            _label_detail(
-                label,
-                fetch_source,
-                converted=not label.is_pdf(),
-                package_id=fetch_meta.get("package_id"),
-                fetch_notes=notes,
+            t_rec = time.perf_counter()
+            to_record = [
+                {
+                    "order_id": s["order_id"],
+                    "store_id": s["store_id"],
+                    "daraz_order_id": s["daraz_order_id"],
+                    "order_item_ids": s["order_item_ids"],
+                    "package_id": s.get("package_id"),
+                    "is_reprint": s.get("is_reprint"),
+                    "fetch_source": s.get("fetch_source"),
+                }
+                for s in pending_successes
+            ]
+            recorded = record_label_prints(workspace_id, user_id, job_id, to_record)
+            record_ms = int((time.perf_counter() - t_rec) * 1000)
+
+            for s in pending_successes:
+                oid = str(s["order_id"])
+                base = _order_fields(oid, s.get("entry"))
+                base["package_id"] = s.get("package_id")
+                base["order_item_ids"] = list(s.get("order_item_ids") or [])
+                outcomes_by_id[oid] = make_outcome(
+                    order_id=oid,
+                    state=SUCCESS,
+                    reason=None,
+                    is_reprint=bool(s.get("is_reprint")),
+                    **base,
+                )
+
+            for label, fetch_source, fetch_meta in zip(
+                raw_labels, label_fetch_sources, label_fetch_meta, strict=True
+            ):
+                notes = fetch_meta.get("print_awb_error")
+                if (
+                    fetch_meta.get("print_awb_attempted")
+                    and fetch_source == "print_awb_pdf"
+                ):
+                    notes = None
+                label_details.append(
+                    _label_detail(
+                        label,
+                        fetch_source,
+                        converted=not label.is_pdf(),
+                        package_id=fetch_meta.get("package_id"),
+                        fetch_notes=notes,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            merge_ms = int((time.perf_counter() - t_merge) * 1000)
+            for s in pending_successes:
+                oid = str(s["order_id"])
+                base = _order_fields(oid, s.get("entry"))
+                base["package_id"] = s.get("package_id")
+                base["order_item_ids"] = list(s.get("order_item_ids") or [])
+                outcomes_by_id[oid] = make_outcome(
+                    order_id=oid,
+                    state=MERGE_FAILED,
+                    reason=str(exc),
+                    is_reprint=bool(s.get("is_reprint")),
+                    **base,
+                )
+            recorded = []
+            pdf_labels = []
+            label_details = []
+            out_pdf = None
+            pages = 0
+
+    # Every selected order must have an outcome
+    for oid in selected:
+        if oid not in outcomes_by_id:
+            outcomes_by_id[oid] = make_outcome(
+                order_id=oid,
+                state=UNKNOWN_FAILURE,
+                reason="unaccounted",
+                **_order_fields(oid),
             )
+
+    outcomes = [outcomes_by_id[oid] for oid in selected]
+    summary = summarize_outcomes(outcomes)
+    failed_outcomes = [o for o in outcomes if o.get("state") != SUCCESS]
+
+    new_count = sum(
+        1
+        for o in outcomes
+        if o.get("state") == SUCCESS and not o.get("is_reprint")
+    )
+    reprint_count = sum(
+        1 for o in outcomes if o.get("state") == SUCCESS and o.get("is_reprint")
+    )
+
+    rel = None
+    if out_pdf is not None:
+        rel = (
+            str(out_pdf.relative_to(PROJECT_ROOT))
+            if out_pdf.is_relative_to(PROJECT_ROOT)
+            else str(out_pdf)
         )
+        rel = rel.replace("\\", "/")
+
+    total_ms = int((time.perf_counter() - t_total) * 1000)
+    timings_ms = {
+        "validation_ms": validation_ms,
+        "hydrate_ms": hydrate_ms,
+        "document_fetch_ms": document_fetch_ms,
+        "merge_ms": merge_ms,
+        "record_ms": record_ms,
+        "total_ms": total_ms,
+    }
 
     return {
-        "output": str(out_pdf),
-        "output_relative": rel.replace("\\", "/"),
+        "output": str(out_pdf) if out_pdf else None,
+        "output_relative": rel,
         "download_url": download_url
-        or (f"/api/print-labels/{job_id}/download" if job_id else None),
+        or (f"/api/print-labels/{job_id}/download" if job_id and out_pdf else None),
         "html_url": None,
         "format": "pdf",
         "labels": len(pdf_labels),
-        "pages": pdf_page_count(out_pdf),
-        "order_item_count": sum(len(s.get("order_item_ids") or []) for s in successes),
+        "pages": pages,
+        "order_item_count": sum(
+            len(o.get("order_item_ids") or [])
+            for o in outcomes
+            if o.get("state") == SUCCESS
+        ),
         "label_details": label_details,
         "label_summary": {
             "pdf_native": sum(1 for d in label_details if not d["converted"]),
             "html_converted": sum(1 for d in label_details if d["converted"]),
             "new_labels_count": new_count,
             "reprint_count": reprint_count,
-            "failed_count": len(failures),
+            "failed_count": summary["failed_count"],
         },
         "new_labels_count": new_count,
         "reprint_count": reprint_count,
-        "failed_count": len(failures),
-        "failures": failures,
+        "failed_count": summary["failed_count"],
+        "failures": failed_outcomes,
+        "failed_order_ids": summary["failed_order_ids"],
         "prints_recorded": len(recorded),
+        "outcomes": outcomes,
+        "summary": summary,
+        "print_status": summary["print_status"],
+        "message": summary["message"],
+        "timings_ms": timings_ms,
+        "hydrate": {
+            "orders_hydrated": hydrate.get("orders_hydrated"),
+            "api_calls": hydrate.get("api_calls"),
+            "orders_missing": hydrate.get("orders_missing"),
+        },
         "validation": {
             "new_printable": len(validated["new_printable"]),
             "already_printed": len(validated["already_printed"]),

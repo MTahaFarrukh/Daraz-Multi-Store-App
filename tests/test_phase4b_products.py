@@ -79,6 +79,8 @@ def _add_store(repo, workspace_id: str, store_id: str) -> dict[str, Any]:
 
 
 def _seed_product_with_variant(repo, wid, store, item_id="100", **extra):
+    from datetime import UTC, datetime
+
     product = repo.upsert_daraz_product(
         {
             "workspace_id": wid,
@@ -97,6 +99,9 @@ def _seed_product_with_variant(repo, wid, store, item_id="100", **extra):
             ],
             "attributes_json": {"warranty_type": "No Warranty", "brand": "No Brand"},
             "video_ref": extra.get("video_ref"),
+            "detail_complete": True,
+            "detail_synced_at": datetime.now(UTC).isoformat(),
+            "catalog_seen_at": datetime.now(UTC).isoformat(),
         }
     )
     repo.replace_product_variants(

@@ -346,6 +346,10 @@ class TenancyRepo(Protocol):
 
     def upsert_daraz_product(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
+    def get_daraz_product_by_item_id(
+        self, workspace_id: str, store_uuid: str, daraz_item_id: str
+    ) -> dict[str, Any] | None: ...
+
     def upsert_daraz_product_variant(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
     def get_daraz_product(
@@ -397,12 +401,12 @@ class MemoryTenancyRepo:
         self.group_members: dict[str, list[str]] = {}
         self.print_jobs: dict[str, dict[str, Any]] = {}
         self.performance: dict[str, dict[str, Any]] = {}  # store_uuid|y|m
-        self.orders: dict[str, dict[str, Any]] = {}  # order uuid → row
-        self.order_items: dict[str, dict[str, Any]] = {}  # item uuid → row
-        self.label_prints: dict[str, dict[str, Any]] = {}  # print uuid → row
-        self.products: dict[str, dict[str, Any]] = {}  # product uuid → row
-        self.product_variants: dict[str, dict[str, Any]] = {}  # variant uuid → row
-        self.product_defaults: dict[str, dict[str, Any]] = {}  # workspace_id → row
+        self.orders: dict[str, dict[str, Any]] = {}  # order uuid â†’ row
+        self.order_items: dict[str, dict[str, Any]] = {}  # item uuid â†’ row
+        self.label_prints: dict[str, dict[str, Any]] = {}  # print uuid â†’ row
+        self.products: dict[str, dict[str, Any]] = {}  # product uuid â†’ row
+        self.product_variants: dict[str, dict[str, Any]] = {}  # variant uuid â†’ row
+        self.product_defaults: dict[str, dict[str, Any]] = {}  # workspace_id â†’ row
 
     def create_workspace_with_owner(self, user_id: str, name: str) -> dict[str, Any]:
         with self._lock:
@@ -1128,12 +1132,38 @@ class MemoryTenancyRepo:
                 "market_images_json": _json_or(payload.get("market_images_json"), []),
                 "video_ref": payload.get("video_ref"),
                 "raw_json": deepcopy(payload.get("raw_json")),
+                "catalog_seen_at": payload.get("catalog_seen_at")
+                or (existing or {}).get("catalog_seen_at"),
+                "detail_synced_at": (existing or {}).get("detail_synced_at"),
+                "detail_complete": bool((existing or {}).get("detail_complete")),
                 "synced_at": now,
                 "created_at": (existing or {}).get("created_at") or now,
                 "updated_at": now,
             }
+            # Catalog sync may set detail_complete=False; never clear an existing True.
+            incoming_complete = bool(payload.get("detail_complete", False))
+            if incoming_complete:
+                row["detail_complete"] = True
+                row["detail_synced_at"] = payload.get("detail_synced_at") or now
+            elif existing is None:
+                row["detail_complete"] = bool(payload.get("detail_complete", False))
+            if payload.get("catalog_seen_at"):
+                row["catalog_seen_at"] = payload.get("catalog_seen_at")
             self.products[str(row["id"])] = row
             return deepcopy(row)
+
+    def get_daraz_product_by_item_id(
+        self, workspace_id: str, store_uuid: str, daraz_item_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            for row in self.products.values():
+                if (
+                    str(row.get("workspace_id")) == str(workspace_id)
+                    and str(row.get("store_id")) == str(store_uuid)
+                    and str(row.get("daraz_item_id")) == str(daraz_item_id)
+                ):
+                    return deepcopy(row)
+            return None
 
     def upsert_daraz_product_variant(self, payload: dict[str, Any]) -> dict[str, Any]:
         store_uuid = str(payload["store_id"])
@@ -2666,7 +2696,8 @@ class PostgresTenancyRepo:
         primary_category_id, primary_category_name, brand, description,
         description_en, short_description, short_description_en, package_content,
         status_raw, product_url, attributes_json, variation_json, images_json,
-        market_images_json, video_ref, raw_json, synced_at, created_at, updated_at
+        market_images_json, video_ref, raw_json, catalog_seen_at, detail_synced_at,
+        detail_complete, synced_at, created_at, updated_at
     """
 
     _VARIANT_SELECT = """
@@ -2700,9 +2731,12 @@ class PostgresTenancyRepo:
             "market_images_json": self._json_maybe(row[19]) or [],
             "video_ref": row[20],
             "raw_json": self._json_maybe(row[21]),
-            "synced_at": row[22].isoformat() if row[22] else None,
-            "created_at": row[23].isoformat() if row[23] else None,
-            "updated_at": row[24].isoformat() if row[24] else None,
+            "catalog_seen_at": row[22].isoformat() if row[22] else None,
+            "detail_synced_at": row[23].isoformat() if row[23] else None,
+            "detail_complete": bool(row[24]),
+            "synced_at": row[25].isoformat() if row[25] else None,
+            "created_at": row[26].isoformat() if row[26] else None,
+            "updated_at": row[27].isoformat() if row[27] else None,
         }
 
     def _variant_row(self, row) -> dict[str, Any]:
@@ -2732,6 +2766,9 @@ class PostgresTenancyRepo:
     def upsert_daraz_product(self, payload: dict[str, Any]) -> dict[str, Any]:
         from src.db.connection import connect
 
+        detail_complete = bool(payload.get("detail_complete", False))
+        catalog_seen = payload.get("catalog_seen_at")
+        detail_synced = payload.get("detail_synced_at")
         with connect() as conn:
             row = conn.execute(
                 f"""
@@ -2741,14 +2778,16 @@ class PostgresTenancyRepo:
                     description_en, short_description, short_description_en,
                     package_content, status_raw, product_url, attributes_json,
                     variation_json, images_json, market_images_json, video_ref,
-                    raw_json, synced_at
+                    raw_json, catalog_seen_at, detail_synced_at, detail_complete,
+                    synced_at
                 ) VALUES (
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s, %s::jsonb,
                     %s::jsonb, %s::jsonb, %s::jsonb, %s,
-                    %s::jsonb, NOW()
+                    %s::jsonb, COALESCE(%s::timestamptz, NOW()), %s::timestamptz, %s,
+                    NOW()
                 )
                 ON CONFLICT (store_id, daraz_item_id) DO UPDATE SET
                     title = EXCLUDED.title,
@@ -2769,6 +2808,15 @@ class PostgresTenancyRepo:
                     market_images_json = EXCLUDED.market_images_json,
                     video_ref = EXCLUDED.video_ref,
                     raw_json = EXCLUDED.raw_json,
+                    catalog_seen_at = COALESCE(EXCLUDED.catalog_seen_at, daraz_products.catalog_seen_at),
+                    detail_synced_at = CASE
+                        WHEN EXCLUDED.detail_complete THEN EXCLUDED.detail_synced_at
+                        ELSE daraz_products.detail_synced_at
+                    END,
+                    detail_complete = CASE
+                        WHEN EXCLUDED.detail_complete THEN TRUE
+                        ELSE daraz_products.detail_complete
+                    END,
                     synced_at = NOW(),
                     updated_at = NOW()
                 RETURNING {self._PRODUCT_SELECT}
@@ -2797,10 +2845,30 @@ class PostgresTenancyRepo:
                     json.dumps(payload["raw_json"])
                     if payload.get("raw_json") is not None
                     else None,
+                    catalog_seen,
+                    detail_synced,
+                    detail_complete,
                 ),
             ).fetchone()
             conn.commit()
         return self._product_row(row)
+
+    def get_daraz_product_by_item_id(
+        self, workspace_id: str, store_uuid: str, daraz_item_id: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {self._PRODUCT_SELECT}
+                FROM daraz_products
+                WHERE workspace_id = %s AND store_id = %s AND daraz_item_id = %s
+                LIMIT 1
+                """,
+                (workspace_id, store_uuid, str(daraz_item_id)),
+            ).fetchone()
+        return self._product_row(row) if row else None
 
     _VARIANT_UPSERT_SQL = """
         INSERT INTO daraz_product_variants (

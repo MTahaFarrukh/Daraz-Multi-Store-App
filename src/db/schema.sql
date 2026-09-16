@@ -239,11 +239,20 @@ CREATE TABLE IF NOT EXISTS daraz_products (
     -- opaque platform video id; informational only (cannot be re-uploaded via API)
     video_ref TEXT,
     raw_json JSONB,
+    -- Phase 4D: catalog list vs detail hydration
+    catalog_seen_at TIMESTAMPTZ,
+    detail_synced_at TIMESTAMPTZ,
+    detail_complete BOOLEAN NOT NULL DEFAULT FALSE,
     synced_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (store_id, daraz_item_id)
 );
+
+-- Idempotent upgrades for existing databases
+ALTER TABLE daraz_products ADD COLUMN IF NOT EXISTS catalog_seen_at TIMESTAMPTZ;
+ALTER TABLE daraz_products ADD COLUMN IF NOT EXISTS detail_synced_at TIMESTAMPTZ;
+ALTER TABLE daraz_products ADD COLUMN IF NOT EXISTS detail_complete BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_daraz_products_workspace
     ON daraz_products (workspace_id);

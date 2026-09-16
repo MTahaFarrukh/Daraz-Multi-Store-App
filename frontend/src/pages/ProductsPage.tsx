@@ -18,6 +18,8 @@ import {
 } from "@/components/ui/Primitives";
 import type { ProductCloneDraftResponse, ProductRow } from "@/types/api";
 import { sanitizeProductHtml } from "@/lib/sanitizeHtml";
+import { CopyProductDialog } from "@/pages/products/CopyProductDialog";
+import { CloneDraftPreview } from "@/pages/products/CloneDraftPreview";
 
 const PAGE_SIZE = 40;
 
@@ -49,7 +51,8 @@ export function ProductsPage() {
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [copyProduct, setCopyProduct] = useState<ProductRow | null>(null);
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [hubCopyProduct, setHubCopyProduct] = useState<ProductRow | null>(null);
   const [destStore, setDestStore] = useState("");
   const [draftResult, setDraftResult] = useState<ProductCloneDraftResponse | null>(null);
 
@@ -91,7 +94,7 @@ export function ProductsPage() {
   async function handleSync() {
     setError("");
     setOk("");
-    setBusy("Syncing products from Daraz…");
+    setBusy("Syncing catalog from Daraz…");
     try {
       const storeIds =
         storeScope === "all"
@@ -100,9 +103,15 @@ export function ProductsPage() {
       const result = await syncMutation.mutateAsync(
         storeIds?.length ? { store_ids: storeIds } : undefined
       );
+      const upserted = (result.results || []).reduce(
+        (sum, r) => sum + (r.products_upserted || 0),
+        0
+      );
       setOk(
-        `Synced ${result.ok}/${result.stores} store(s)` +
-          (result.failed ? ` · ${result.failed} failed` : "")
+        `Catalog synced · ${result.ok}/${result.stores} store(s)` +
+          (upserted ? ` · ${upserted} product(s)` : "") +
+          (result.failed ? ` · ${result.failed} failed` : "") +
+          " · full details load on demand"
       );
       setPage(1);
     } catch (err) {
@@ -112,8 +121,8 @@ export function ProductsPage() {
     }
   }
 
-  async function prepareCopy() {
-    if (!copyProduct || !destStore) {
+  async function prepareHubCopy() {
+    if (!hubCopyProduct || !destStore) {
       setError("Select a destination store");
       return;
     }
@@ -121,7 +130,7 @@ export function ProductsPage() {
     setBusy("Preparing clone draft…");
     try {
       const result = await cloneMutation.mutateAsync({
-        productId: copyProduct.id,
+        productId: hubCopyProduct.id,
         destinationStoreId: destStore,
       });
       setDraftResult(result);
@@ -140,16 +149,30 @@ export function ProductsPage() {
     <div className="stack">
       <PageHeader
         title="Products"
-        description="Multi-store Product Hub from your connected Daraz catalogs. Sync once, browse locally, prepare connected-store copy drafts."
+        description="Multi-store Product Hub from your connected Daraz catalogs. Sync the catalog, then copy by Item ID or Daraz link."
         actions={
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={syncMutation.isPending || Boolean(busy)}
-            onClick={handleSync}
-          >
-            Sync Products
-          </button>
+          <div className="row" style={{ gap: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={Boolean(busy)}
+              onClick={() => {
+                setError("");
+                setOk("");
+                setCopyOpen(true);
+              }}
+            >
+              + Copy Product
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={syncMutation.isPending || Boolean(busy)}
+              onClick={handleSync}
+            >
+              Sync Products
+            </button>
+          </div>
         }
       />
 
@@ -236,7 +259,7 @@ export function ProductsPage() {
       {!productsQuery.isLoading && products.length === 0 ? (
         <EmptyState
           title="No products yet"
-          description="Sync Products to pull your connected-store catalog into MultiStore."
+          description="Use + Copy Product for a single Item ID, or Sync Products to pull catalog listings (not full details)."
         />
       ) : null}
 
@@ -310,7 +333,7 @@ export function ProductsPage() {
                       type="button"
                       className="btn btn-ghost"
                       onClick={() => {
-                        setCopyProduct(p);
+                        setHubCopyProduct(p);
                         setDestStore("");
                         setDraftResult(null);
                       }}
@@ -359,7 +382,7 @@ export function ProductsPage() {
             product={detailQuery.data.product}
             variants={detailQuery.data.variants}
             onCopy={() => {
-              setCopyProduct(detailQuery.data!.product);
+              setHubCopyProduct(detailQuery.data!.product);
               setDestStore("");
               setDraftResult(null);
               setDetailId(null);
@@ -369,26 +392,26 @@ export function ProductsPage() {
       </Dialog>
 
       <Dialog
-        open={Boolean(copyProduct)}
+        open={Boolean(hubCopyProduct)}
         onClose={() => {
-          setCopyProduct(null);
+          setHubCopyProduct(null);
           setDraftResult(null);
         }}
         title="Copy Product"
       >
-        {copyProduct ? (
+        {hubCopyProduct ? (
           <div className="stack">
             <p style={{ margin: 0 }}>
               <strong>Source:</strong>{" "}
-              {copyProduct.store_display_name || copyProduct.store_slug}
+              {hubCopyProduct.store_display_name || hubCopyProduct.store_slug}
             </p>
-            <p style={{ margin: 0 }}>{copyProduct.title_en || copyProduct.title}</p>
+            <p style={{ margin: 0 }}>{hubCopyProduct.title_en || hubCopyProduct.title}</p>
             <label>
               Destination Store
               <select value={destStore} onChange={(e) => setDestStore(e.target.value)}>
                 <option value="">Select store…</option>
                 {stores
-                  .filter((s) => s.store_id !== copyProduct.store_slug)
+                  .filter((s) => s.store_id !== hubCopyProduct.store_slug)
                   .map((s) => (
                     <option key={s.store_id} value={s.store_id}>
                       {s.display_name || s.store_name || s.store_id}
@@ -401,7 +424,7 @@ export function ProductsPage() {
                 type="button"
                 className="btn btn-primary"
                 disabled={!destStore || cloneMutation.isPending}
-                onClick={prepareCopy}
+                onClick={prepareHubCopy}
               >
                 Prepare Copy
               </button>
@@ -413,6 +436,17 @@ export function ProductsPage() {
           </div>
         ) : null}
       </Dialog>
+
+      <CopyProductDialog
+        open={copyOpen}
+        onClose={() => setCopyOpen(false)}
+        stores={stores}
+        workspaceId={workspaceId}
+        onError={setError}
+        onOk={setOk}
+        busy={busy}
+        setBusy={setBusy}
+      />
     </div>
   );
 }
@@ -506,99 +540,6 @@ function ProductDetailBody({
       </table>
       <button type="button" className="btn btn-primary" onClick={onCopy}>
         Copy
-      </button>
-    </div>
-  );
-}
-
-function CloneDraftPreview({
-  result,
-  variants,
-}: {
-  result: ProductCloneDraftResponse;
-  variants: Array<Record<string, any>>;
-}) {
-  const fidelity = result.fidelity || {};
-  const draft = result.draft as Record<string, any>;
-  const media = draft.media || {};
-  const enhancement = media.description_enhancement || {};
-  return (
-    <div className="stack" style={{ marginTop: "0.75rem" }}>
-      <h4 style={{ margin: 0 }}>Clone Ready</h4>
-      <p className="muted-line" style={{ margin: 0 }}>
-        {variants.length} variant(s) · {(media.product_images || []).length} image(s) ·
-        Creation remains gated
-      </p>
-
-      <div>
-        <strong>WILL COPY</strong>
-        <ul>
-          {(fidelity.copied || []).map((x) => (
-            <li key={x}>✓ {x}</li>
-          ))}
-        </ul>
-        <strong>WILL CHANGE</strong>
-        <ul>
-          {(fidelity.changed_by_multistore || []).map((x) => (
-            <li key={x}>• {x}</li>
-          ))}
-        </ul>
-        <strong>NOT AUTOMATICALLY COPIED</strong>
-        <ul>
-          {(fidelity.not_available || []).map((x) => (
-            <li key={x}>• {x}</li>
-          ))}
-        </ul>
-      </div>
-
-      <p style={{ margin: 0 }}>
-        Description enhancement:{" "}
-        {enhancement.had_existing_images
-          ? "✓ Existing description images preserved"
-          : enhancement.enhancement === "appended"
-            ? "✓ Product images will be included in description"
-            : enhancement.message || "—"}
-      </p>
-
-      {(result.warnings || []).length ? (
-        <div className="banner banner-info">
-          {(result.warnings || []).map((w) => (
-            <div key={w}>⚠ {w}</div>
-          ))}
-        </div>
-      ) : null}
-      {(result.errors || []).length ? (
-        <div className="banner banner-error">
-          {(result.errors || []).map((w) => (
-            <div key={w}>✕ {w}</div>
-          ))}
-        </div>
-      ) : null}
-      {(result.possible_duplicates || []).length ? (
-        <div className="banner banner-info">
-          Possible duplicate(s) on destination:
-          <ul>
-            {result.possible_duplicates.map((d) => (
-              <li key={d.id}>
-                {d.title} ({d.match_reason})
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      <h4 style={{ margin: "0.35rem 0 0" }}>Generated Seller SKUs</h4>
-      <ul>
-        {variants.map((v) => (
-          <li key={v.seller_sku}>
-            <code>{v.seller_sku}</code> · PKR {v.price} · qty {v.quantity} · pkg{" "}
-            {v.package_weight}/{v.package_length}×{v.package_width}×{v.package_height}
-          </li>
-        ))}
-      </ul>
-
-      <button type="button" className="btn btn-ghost" disabled title="Gated until migrate+create proof">
-        Create Copy (gated)
       </button>
     </div>
   );

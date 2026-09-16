@@ -97,6 +97,10 @@ def fetch_store_live_rts(
         }
 
     window = created_after or _iso_ago(RTS_CREATED_AFTER_DAYS)
+    token_refresh_ms = 0.0
+    orders_get_ms = 0.0
+    normalize_ms = 0.0
+    reconcile_ms = 0.0
     try:
         try:
 
@@ -104,7 +108,9 @@ def fetch_store_live_rts(
                 return repo.upsert_store(workspace_id, record)
 
             if access_token_expires_soon(store, within_minutes=60):
+                tr0 = time.perf_counter()
                 refresh_one_store(store, upsert_fn=_upsert)
+                token_refresh_ms = (time.perf_counter() - tr0) * 1000
             refreshed = repo.get_store(workspace_id, slug) or store
         except Exception as exc:  # noqa: BLE001
             logger.info("RTS token refresh skipped store=%s: %s", slug, exc)
@@ -122,6 +128,7 @@ def fetch_store_live_rts(
         pages = 0
 
         while offset <= MAX_OFFSET:
+            pg0 = time.perf_counter()
             resp = client.get_orders(
                 status="ready_to_ship",
                 created_after=window,
@@ -130,6 +137,7 @@ def fetch_store_live_rts(
                 sort_by="updated_at",
                 sort_direction="DESC",
             )
+            orders_get_ms += (time.perf_counter() - pg0) * 1000
             pages += 1
             data = resp.get("data") or {}
             ct = data.get("countTotal") or data.get("count_total") or data.get("total_count")
@@ -138,7 +146,9 @@ def fetch_store_live_rts(
                     count_total = int(ct)
                 except (TypeError, ValueError):
                     pass
+            n0 = time.perf_counter()
             orders = extract_orders(resp)
+            normalize_ms += (time.perf_counter() - n0) * 1000
             if not orders:
                 break
 
@@ -177,6 +187,7 @@ def fetch_store_live_rts(
         min_u, max_u = _min_max(updated_vals)
 
         # Reconcile print events + optional header upsert (no item hydration).
+        rc0 = time.perf_counter()
         out_orders: list[dict[str, Any]] = []
         for order in raw_orders:
             daraz_oid = str(order.get("order_id") or "")
@@ -220,6 +231,7 @@ def fetch_store_live_rts(
                     "fetch_source": "live_rts",
                 }
             )
+        reconcile_ms = (time.perf_counter() - rc0) * 1000
 
         elapsed = int((time.perf_counter() - t0) * 1000)
         ok = warning is None and not incomplete
@@ -242,6 +254,13 @@ def fetch_store_live_rts(
             "min_updated_at": min_u,
             "max_updated_at": max_u,
             "elapsed_ms": elapsed,
+            "timings_ms": {
+                "token_refresh": round(token_refresh_ms, 1),
+                "orders_get": round(orders_get_ms, 1),
+                "normalize": round(normalize_ms, 1),
+                "print_reconcile": round(reconcile_ms, 1),
+                "total": elapsed,
+            },
             "orders": out_orders,
         }
     except DarazApiError as exc:
@@ -342,8 +361,12 @@ def load_shipping_rts(
                 "max_created_at": r.get("max_created_at"),
                 "created_after": r.get("created_after"),
                 "pages": r.get("pages"),
+                "timings_ms": r.get("timings_ms"),
             }
         )
+
+    slowest_store_ms = max((r.get("elapsed_ms") or 0) for r in ordered) if ordered else 0
+    serialize_ms = 0.0  # included in wall clock; no separate serialize step
 
     return {
         "source": "live_daraz_rts",
@@ -357,5 +380,17 @@ def load_shipping_rts(
         "elapsed_ms": total_elapsed,
         "concurrency": STORE_CONCURRENCY,
         "rts_created_after_days": RTS_CREATED_AFTER_DAYS,
+        "timings_ms": {
+            "wall_total": total_elapsed,
+            "slowest_store": slowest_store_ms,
+            "serialize": serialize_ms,
+            "stores": [
+                {
+                    "store_id": r.get("store_id"),
+                    **(r.get("timings_ms") or {"total": r.get("elapsed_ms")}),
+                }
+                for r in ordered
+            ],
+        },
         "stores": store_summaries,
     }
