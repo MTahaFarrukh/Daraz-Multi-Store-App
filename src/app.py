@@ -1256,6 +1256,8 @@ def _product_public_view(
     store: dict[str, Any] | None = None,
     variants: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from src.description_enhance import sanitize_description_html
+
     st = store or {}
     prices = [
         float(v["price"])
@@ -1267,8 +1269,12 @@ def _product_public_view(
         for v in (variants or [])
         if v.get("quantity") is not None
     ]
+    raw_desc = product.get("description_en") or product.get("description") or ""
+    raw_short = product.get("short_description_en") or product.get("short_description") or ""
     return {
         **product,
+        "description_html_safe": sanitize_description_html(raw_desc),
+        "short_description_html_safe": sanitize_description_html(raw_short),
         "store_slug": st.get("store_id"),
         "store_display_name": st.get("display_name")
         or st.get("store_name")
@@ -1424,10 +1430,8 @@ def api_product_create_payload_preview(
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
     """Build redacted CreateProduct preview. Never submits to Daraz."""
-    from src.product_clone import (
-        build_connected_clone_draft,
-        build_create_product_payload_preview,
-    )
+    from src.product_clone import build_connected_clone_draft
+    from src.product_create_payload import build_create_product_payload_preview
 
     try:
         result = build_connected_clone_draft(
@@ -1437,10 +1441,12 @@ def api_product_create_payload_preview(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    preview = build_create_product_payload_preview(result["draft"])
+    draft = result["draft"]
+    preview = result.get("preview") or build_create_product_payload_preview(draft)
     return {
         "preview": preview,
-        "validation": result["draft"].get("validation"),
+        "validation": draft.get("validation"),
+        "brand_resolution": draft.get("brand_resolution"),
         "create_probe_enabled": get_env("ALLOW_PRODUCT_CREATE_PROBE", "").lower()
         in {"1", "true", "yes"},
     }
@@ -1449,6 +1455,8 @@ def api_product_create_payload_preview(
 class CreateProbeBody(BaseModel):
     destination_store_id: str = Field(..., min_length=1)
     confirm: bool = False
+    execute: bool = False
+    allow_duplicates: bool = False
 
 
 @app.post("/api/products/{product_id}/create-probe")
@@ -1457,50 +1465,25 @@ def api_product_create_probe_for_id(
     body: CreateProbeBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    if get_env("ALLOW_PRODUCT_CREATE_PROBE", "").lower() not in {"1", "true", "yes"}:
-        raise HTTPException(
-            status_code=403,
-            detail="CreateProduct probe disabled (ALLOW_PRODUCT_CREATE_PROBE)",
-        )
-    if not body.confirm:
-        raise HTTPException(
-            status_code=400,
-            detail="Set confirm=true to run the supervised create probe",
-        )
-    from src.product_clone import (
-        build_connected_clone_draft,
-        build_create_product_payload_preview,
+    """Supervised CreateProduct path. Blocked unless ALLOW_PRODUCT_CREATE_PROBE.
+
+    Never runs on startup/tests by default. execute=true required to call Daraz.
+    """
+    from src.product_create import run_supervised_create
+
+    result = run_supervised_create(
+        ctx.workspace_id,
+        source_product_id=product_id,
+        destination_store_id=body.destination_store_id,
+        confirm=body.confirm,
+        allow_duplicates=body.allow_duplicates,
+        execute=body.execute,
     )
-
-    try:
-        result = build_connected_clone_draft(
-            ctx.workspace_id,
-            source_product_id=product_id,
-            destination_store_id=body.destination_store_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    draft = result["draft"]
-    if draft.get("validation", {}).get("errors"):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Draft has validation errors",
-                "errors": draft["validation"]["errors"],
-            },
-        )
-
-    return {
-        "status": "NOT_RUN",
-        "reason": (
-            "Supervised CreateProduct is gated until image migrate→final URL is proven "
-            "and an operator explicitly runs a dedicated create script. "
-            "Payload preview is available; live create was not executed."
-        ),
-        "preview": build_create_product_payload_preview(draft),
-        "validation": draft.get("validation"),
-    }
+    if result.get("status") == "BLOCKED":
+        reason = str(result.get("reason") or "blocked")
+        code = 403 if "ALLOW_PRODUCT_CREATE_PROBE" in reason else 400
+        raise HTTPException(status_code=code, detail=reason)
+    return result
 
 
 # Legacy download paths — intentionally disabled (no unauthenticated PDF access).

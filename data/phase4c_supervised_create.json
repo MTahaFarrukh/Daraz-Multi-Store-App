@@ -1,0 +1,13 @@
+{
+  "connected_stores": 1,
+  "stores": [
+    {
+      "store_id": "mtfdigitalemporiumofficial_gmail_com",
+      "display_name": "Mtfdigitalemporiumofficial"
+    }
+  ],
+  "supervised_create": {
+    "status": "NOT_RUN",
+    "reason": "No safe second connected destination store available (found 1). Do not create anything."
+  }
+}

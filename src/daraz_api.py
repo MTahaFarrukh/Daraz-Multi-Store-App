@@ -326,15 +326,41 @@ class DarazClient:
             business["name"] = name
         return self._request("/category/brands/query", business_params=business)
 
+    def migrate_image(self, image_url: str) -> dict[str, Any]:
+        """POST /image/migrate — singular URL; returns data.image.url immediately.
+
+        XML contract (Lazada/Daraz docs):
+        <Request><Image><Url>...</Url></Image></Request>
+        """
+        url = (image_url or "").strip()
+        if not url:
+            raise ValueError("image_url required")
+        payload = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f"<Request><Image><Url>{url}</Url></Image></Request>"
+        )
+        return self._request(
+            "/image/migrate",
+            method="POST",
+            business_params={"payload": payload},
+        )
+
     def migrate_images(self, image_urls: list[str]) -> dict[str, Any]:
-        """POST /images/migrate — XML payload with one or more Image/Url nodes."""
+        """POST /images/migrate — batch migrate; returns batch_id for polling.
+
+        Critical: wrapper must be ``<Images>`` (plural). Singular ``<Image>`` also
+        returns a batch_id on Daraz PK but that id is unpollable (E005).
+        Up to 8 URLs per call.
+        """
         urls = [u.strip() for u in image_urls if u and str(u).strip()]
         if not urls:
             raise ValueError("image_urls required")
+        if len(urls) > 8:
+            raise ValueError("migrate_images accepts at most 8 URLs per call")
         body_urls = "".join(f"<Url>{u}</Url>" for u in urls)
         payload = (
             '<?xml version="1.0" encoding="UTF-8"?>'
-            f"<Request><Image>{body_urls}</Image></Request>"
+            f"<Request><Images>{body_urls}</Images></Request>"
         )
         return self._request(
             "/images/migrate",
@@ -343,7 +369,14 @@ class DarazClient:
         )
 
     def get_image_response(self, batch_id: str) -> dict[str, Any]:
-        """GET /image/response/get — poll migrate batch (contract still being proven)."""
+        """GET /image/response/get — poll batch migrate result.
+
+        Contract (live-proven Phase 4C):
+        - method: GET only
+        - param: batch_id (snake_case; batchId → MissingParameter)
+        - wait ~0.5s+ after migrate before first poll
+        - success: data.images[].url
+        """
         return self._request(
             "/image/response/get",
             business_params={"batch_id": str(batch_id)},

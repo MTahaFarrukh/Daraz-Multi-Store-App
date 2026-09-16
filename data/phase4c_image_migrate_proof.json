@@ -1,0 +1,24 @@
+{
+  "source_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+  "is_daraz_cdn": true,
+  "cdn_reuse": {
+    "status": "completed",
+    "strategy": "reuse_cdn",
+    "url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png"
+  },
+  "singular_or_batch_force": {
+    "status": "completed",
+    "strategy": "singular_migrate",
+    "url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+    "batch_id": null,
+    "error": null
+  },
+  "batch_poll": {
+    "batch_id": "214110c817895815511648060e243c",
+    "poll_ok": true,
+    "final_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+    "images_count": 1
+  },
+  "final_image_url_proof": "PROVEN",
+  "cdn_reuse_proof": "PROVEN"
+}

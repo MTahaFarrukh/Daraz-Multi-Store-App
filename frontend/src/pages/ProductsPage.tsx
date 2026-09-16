@@ -17,6 +17,7 @@ import {
   SuccessBanner,
 } from "@/components/ui/Primitives";
 import type { ProductCloneDraftResponse, ProductRow } from "@/types/api";
+import { sanitizeProductHtml } from "@/lib/sanitizeHtml";
 
 const PAGE_SIZE = 40;
 
@@ -464,7 +465,12 @@ function ProductDetailBody({
         className="muted-line"
         style={{ maxHeight: 160, overflow: "auto", fontSize: "0.85rem" }}
         dangerouslySetInnerHTML={{
-          __html: (product.description_en || product.description || "").slice(0, 4000),
+          __html: sanitizeProductHtml(
+            product.description_html_safe ||
+              product.description_en ||
+              product.description ||
+              ""
+          ).slice(0, 4000),
         }}
       />
       <h4 style={{ margin: "0.5rem 0 0" }}>Variants</h4>

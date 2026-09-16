@@ -336,6 +336,8 @@ export type ProductRow = {
   package_content?: string | null;
   description?: string | null;
   description_en?: string | null;
+  description_html_safe?: string | null;
+  short_description_html_safe?: string | null;
   attributes_json?: Record<string, unknown>;
   variation_json?: Record<string, unknown>;
 };

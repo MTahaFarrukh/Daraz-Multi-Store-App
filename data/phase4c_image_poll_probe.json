@@ -1,0 +1,91 @@
+{
+  "source_image": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+  "item_id": 1974026524,
+  "migrates": {
+    "images_migrate_Image": {
+      "ok": true,
+      "code": "0",
+      "batch_id": "21410ddd17895810729044299edfb3",
+      "request_id": "2102f0f017895810729073790"
+    },
+    "images_migrate_Images": {
+      "ok": true,
+      "code": "0",
+      "batch_id": "212a6c4017895810761571015ee896",
+      "request_id": "0b8ded6517895810761602059"
+    },
+    "image_migrate_Image": {
+      "ok": true,
+      "code": "0",
+      "request_id": "0b8039f817895810781207595",
+      "data_keys": [
+        "image"
+      ],
+      "image_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png"
+    },
+    "image_migrate_Images": {
+      "ok": false,
+      "code": "5",
+      "msg": "E005: Invalid Request Format",
+      "request_id": "2102f1d517895810804303815",
+      "type": "ISP",
+      "message": "E005: Invalid Request Format"
+    }
+  },
+  "polls": {
+    "GET_/image/response/get_batch_id": {
+      "ok": true,
+      "code": "0",
+      "request_id": "0b8ded6517895810837622167",
+      "data_keys": [
+        "images"
+      ],
+      "first_image_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+      "images_count": 1
+    },
+    "GET_/image/response/get_batchId": {
+      "ok": false,
+      "code": "MissingParameter",
+      "msg": "The input parameter \u201cbatch_id\u201d that is mandatory for processing this request is not supplied",
+      "request_id": "2102f0f017895810859103980",
+      "type": "ISV",
+      "message": "The input parameter \u201cbatch_id\u201d that is mandatory for processing this request is not supplied"
+    },
+    "POST_/image/response/get_batch_id": {
+      "ok": false,
+      "code": "UnsupportedHTTPMethod",
+      "msg": "This http method is not supported",
+      "request_id": "212a6f9c17895810877446944",
+      "type": "ISV",
+      "message": "This http method is not supported"
+    },
+    "GET_/images/response/get_batch_id": {
+      "ok": false,
+      "code": "InvalidApiPath",
+      "msg": "The specified API Path is invalid",
+      "request_id": "2102f0f017895810898974048",
+      "type": "ISV",
+      "message": "The specified API Path is invalid"
+    },
+    "GET_/image/response/get_payload_xml": {
+      "ok": false,
+      "code": "MissingParameter",
+      "msg": "The input parameter \u201cbatch_id\u201d that is mandatory for processing this request is not supplied",
+      "request_id": "0b8039f817895810919457812",
+      "type": "ISV",
+      "message": "The input parameter \u201cbatch_id\u201d that is mandatory for processing this request is not supplied"
+    },
+    "retry_GET_batch_id_after_3s": {
+      "ok": true,
+      "code": "0",
+      "request_id": "0b8039f817895810957637872",
+      "data_keys": [
+        "images"
+      ],
+      "first_image_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+      "images_count": 1
+    }
+  },
+  "poll_batch_from": "images_migrate_Images",
+  "poll_batch_id": "212a6c4017895810761571015ee896"
+}

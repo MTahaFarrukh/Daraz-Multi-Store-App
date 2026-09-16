@@ -1,12 +1,16 @@
-"""Build ProductCloneDraft from a connected-store source product."""
+"""Build ProductCloneDraft from a connected-store source product (Phase 4C)."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
+from src.brand_resolve import resolve_brand_for_category
+from src.category_validate import validate_draft_against_category
 from src.db.repo import get_repo
 from src.description_enhance import enhance_description_with_images
+from src.image_migrate import is_daraz_product_cdn_url
 from src.package_resolve import resolve_variant_package
+from src.product_create_payload import build_create_product_payload_preview
 from src.seller_sku import DEFAULT_SKU_PREFIX, generate_seller_sku
 
 SourceType = Literal["connected_store", "daraz_url", "community"]
@@ -24,17 +28,37 @@ def _product_images(product: dict[str, Any]) -> list[str]:
     return urls
 
 
+def _image_strategy_for(urls: list[str]) -> dict[str, Any]:
+    if not urls:
+        return {"strategy": "none", "reuse_cdn": 0, "needs_migrate": 0}
+    reuse = sum(1 for u in urls if is_daraz_product_cdn_url(u))
+    needs = len(urls) - reuse
+    if needs == 0:
+        strategy = "reuse_cdn"
+    elif reuse == 0:
+        strategy = "migrate_all"
+    else:
+        strategy = "mixed"
+    return {
+        "strategy": strategy,
+        "reuse_cdn": reuse,
+        "needs_migrate": needs,
+        "resolved_images": list(urls),  # CDN reuse; migrate applied at create time
+    }
+
+
 def build_connected_clone_draft(
     workspace_id: str,
     *,
     source_product_id: str,
     destination_store_id: str,
+    category_attributes_payload: dict[str, Any] | None = None,
+    brand_query_fn=None,
 ) -> dict[str, Any]:
     """Create a ProductCloneDraft for connected_store → connected_store.
 
-    Quantity strategy (Phase 4A recommendation):
-    Use workspace ``default_initial_quantity`` (default 1), NOT live source stock.
-    Source quantity is shown informationally with a warning.
+    Quantity strategy: workspace ``default_initial_quantity`` (default 1),
+    NOT live source stock.
     """
     repo = get_repo()
     product = repo.get_daraz_product(workspace_id, source_product_id)
@@ -126,6 +150,7 @@ def build_connected_clone_draft(
         )
 
     image_urls = _product_images(product)
+    img_meta = _image_strategy_for(image_urls)
     desc_source = product.get("description_en") or product.get("description") or ""
     enhancement = enhance_description_with_images(desc_source, image_urls)
 
@@ -177,7 +202,23 @@ def build_connected_clone_draft(
             f"Possible duplicate(s) on destination: {len(duplicates)} match(es)"
         )
 
-    can_create = len(errors) == 0 and len(draft_variants) > 0 and bool(image_urls)
+    # Brand resolution (optional live client; offline draft keeps source string)
+    brand_resolution: dict[str, Any] = {
+        "status": "PENDING",
+        "brand": product.get("brand"),
+        "message": "Brand resolution deferred until destination category query",
+    }
+    resolved_brand = product.get("brand")
+    if brand_query_fn is not None:
+        brand_resolution = resolve_brand_for_category(
+            source_brand=product.get("brand"),
+            primary_category_id=product.get("primary_category_id"),
+            query_brands=brand_query_fn,
+        )
+        if brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}:
+            resolved_brand = brand_resolution.get("brand")
+        elif brand_resolution.get("status") == "UNRESOLVED":
+            errors.append(f"brand:{brand_resolution.get('message')}")
 
     draft = {
         "source_type": "connected_store",
@@ -198,8 +239,11 @@ def build_connected_clone_draft(
             "title_en": product.get("title_en"),
             "primary_category_id": product.get("primary_category_id"),
             "primary_category_name": product.get("primary_category_name"),
-            "brand": product.get("brand"),
-            "attributes": product.get("attributes_json") or {},
+            "brand": resolved_brand,
+            "attributes": {
+                **(product.get("attributes_json") or {}),
+                "brand": resolved_brand,
+            },
             "variation": product.get("variation_json") or {},
             "description_html": enhancement["html"],
             "description_source_html": desc_source,
@@ -210,6 +254,8 @@ def build_connected_clone_draft(
         },
         "media": {
             "product_images": image_urls,
+            "resolved_images": img_meta.get("resolved_images") or image_urls,
+            "image_strategy": img_meta,
             "market_images": [
                 i.get("url") if isinstance(i, dict) else i
                 for i in (product.get("market_images_json") or [])
@@ -224,9 +270,10 @@ def build_connected_clone_draft(
                 "source_id": product.get("video_ref"),
                 "status": "unsupported" if product.get("video_ref") else "none",
             },
-            "migration_status": "pending",
+            "migration_status": img_meta.get("strategy"),
         },
         "variants": draft_variants,
+        "brand_resolution": brand_resolution,
         "possible_duplicates": [
             {
                 "id": d.get("id"),
@@ -243,58 +290,61 @@ def build_connected_clone_draft(
             "warnings": list(dict.fromkeys(warnings)),
             "errors": list(dict.fromkeys(errors)),
             "fidelity": fidelity,
-            "can_create": can_create,
+            "can_create": False,  # set after category validation
             "create_gated": True,
+            "category": None,
         },
     }
+
+    category_result = None
+    if category_attributes_payload is not None:
+        category_result = validate_draft_against_category(draft, category_attributes_payload)
+        draft["validation"]["category"] = category_result
+        if not category_result["valid"]:
+            for m in category_result["missing_required"]:
+                errors.append(f"category_missing:{m}")
+            for inv in category_result["invalid_values"]:
+                errors.append(
+                    f"category_invalid:{inv.get('attribute')}={inv.get('value')}"
+                )
+        draft["validation"]["errors"] = list(dict.fromkeys(errors))
+        draft["validation"]["missing_mandatory"] = list(dict.fromkeys(errors))
+
+    can_create = (
+        len(draft["validation"]["errors"]) == 0
+        and len(draft_variants) > 0
+        and bool(image_urls)
+        and (category_result is None or category_result.get("valid"))
+        and not duplicates
+        and brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}
+    )
+    # PENDING brand OK for preview; create requires resolved brand
+    if brand_resolution.get("status") == "PENDING" and category_result is None and not duplicates:
+        # Preview-only readiness (create still gated)
+        draft["validation"]["can_create"] = False
+        draft["validation"]["preview_ready"] = (
+            len(draft["validation"]["errors"]) == 0
+            and len(draft_variants) > 0
+            and bool(image_urls)
+        )
+    else:
+        draft["validation"]["can_create"] = can_create
+        draft["validation"]["preview_ready"] = can_create or (
+            len(draft["validation"]["errors"]) == 0 and bool(image_urls)
+        )
+
     return {
         "draft": draft,
         "fidelity": fidelity,
         "warnings": draft["validation"]["warnings"],
         "errors": draft["validation"]["errors"],
         "possible_duplicates": draft["possible_duplicates"],
+        "preview": build_create_product_payload_preview(draft),
     }
 
 
-def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any]:
-    """Redacted CreateProduct-oriented preview (XML not yet submitted).
-
-    Used by gated probe endpoints. Does not call Daraz.
-    """
-    product = draft.get("product") or {}
-    variants = draft.get("variants") or []
-    images = (draft.get("media") or {}).get("product_images") or []
-    skus = []
-    for v in variants:
-        skus.append(
-            {
-                "SellerSku": v.get("seller_sku"),
-                "price": v.get("price"),
-                "quantity": v.get("quantity"),
-                "package_weight": v.get("package_weight"),
-                "package_length": v.get("package_length"),
-                "package_width": v.get("package_width"),
-                "package_height": v.get("package_height"),
-                "saleProp": v.get("sale_props"),
-            }
-        )
-    return {
-        "PrimaryCategory": product.get("primary_category_id"),
-        "Attributes": {
-            "name": product.get("title"),
-            "name_en": product.get("title_en") or product.get("title"),
-            "description_en": "[html redacted — length "
-            f"{len(product.get('description_html') or '')}]",
-            "short_description_en": "[html redacted]",
-            "brand": product.get("brand"),
-            "warranty_type": product.get("warranty_type"),
-            "package_content": product.get("package_content"),
-        },
-        "Images": [u for u in images[:8]],
-        "Skus": skus,
-        "notes": [
-            "Images must be Daraz-migrated URLs before live create",
-            "Video not included",
-            "Payload is preview-only unless ALLOW_PRODUCT_CREATE_PROBE=true",
-        ],
-    }
+# Re-export for callers that imported from product_clone
+__all__ = [
+    "build_connected_clone_draft",
+    "build_create_product_payload_preview",
+]

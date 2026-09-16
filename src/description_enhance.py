@@ -91,12 +91,18 @@ class _Sanitizer(HTMLParser):
 
 
 def _safe_img_src(src: str) -> bool:
-    if src.startswith("data:"):
+    raw = (src or "").strip()
+    if not raw:
         return False
-    if src.startswith("//"):
-        src = "https:" + src
+    lowered = raw.lower()
+    if lowered.startswith("data:") or lowered.startswith("javascript:") or lowered.startswith(
+        "vbscript:"
+    ):
+        return False
+    if raw.startswith("//"):
+        raw = "https:" + raw
     try:
-        parsed = urlparse(src)
+        parsed = urlparse(raw)
     except Exception:  # noqa: BLE001
         return False
     if parsed.scheme not in {"http", "https"}:
