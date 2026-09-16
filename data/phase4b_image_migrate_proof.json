@@ -1,0 +1,21 @@
+{
+  "source_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+  "status": "timeout",
+  "batch_id": "2140e85217895766703891753e8726",
+  "migrated_url": "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+  "error": "5:E005: Invalid Request Format",
+  "raw_keys": [
+    "_trace_id_",
+    "code",
+    "message",
+    "request_id",
+    "type"
+  ],
+  "raw_sample": {
+    "code": "5",
+    "type": "ISP",
+    "message": "E005: Invalid Request Format",
+    "request_id": "2101578317895766995791714",
+    "_trace_id_": "2101404617895766995763685e55a3"
+  }
+}

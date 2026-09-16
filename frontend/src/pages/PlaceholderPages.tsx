@@ -1,14 +1,5 @@
 import { ComingSoonPage } from "@/components/ui/Primitives";
 
-export function ProductsPage() {
-  return (
-    <ComingSoonPage
-      title="Products"
-      description="Product Hub and listing management are planned for a later phase."
-    />
-  );
-}
-
 export function InventoryPage() {
   return (
     <ComingSoonPage

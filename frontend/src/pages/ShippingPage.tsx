@@ -8,8 +8,6 @@ import { usePrintJobs } from "@/hooks/queries/usePrintAndOrders";
 import {
   pollPrintJob,
   usePrintOrdersByIds,
-  useSyncOrders,
-  useUnifiedOrders,
   useValidatePrint,
 } from "@/hooks/queries/useUnifiedOrders";
 import { RtsSelectionToolbar } from "@/components/orders/RtsSelectionToolbar";
@@ -31,52 +29,17 @@ import {
 import type { PrintValidateResponse, UnifiedOrder } from "@/types/api";
 
 const SELECTION_KEY = "multistore_shipping_selection_v1";
-const RTS_PAGE_SIZE = 200;
-const SYNC_DAYS = 30;
 
-async function fetchAllLocalRts(storeIds: string[]): Promise<{
-  orders: UnifiedOrder[];
-  total: number;
-}> {
-  const all: UnifiedOrder[] = [];
-  let page = 1;
-  let total = 0;
-  for (;;) {
-    const data = await Api.listUnifiedOrders({
-      stores: storeIds.join(","),
-      status_group: "ready_to_ship",
-      print_state: "any",
-      page,
-      page_size: RTS_PAGE_SIZE,
-      sort: "created_at_daraz_desc",
-    });
-    const rows = data.orders || data.items || [];
-    total = typeof data.total === "number" ? data.total : all.length + rows.length;
-    all.push(...rows);
-    if (rows.length < RTS_PAGE_SIZE || all.length >= total) break;
-    page += 1;
-    if (page > 100) break;
-  }
-  return { orders: all, total };
-}
-
-function formatSyncSummary(result: {
-  ok: number;
-  stores: number;
-  failed: number;
-  results?: Array<{ store_id?: string; sync_status?: string }>;
-}): string {
-  const failedSlugs = (result.results || [])
-    .filter((r) => r.sync_status !== "ok")
-    .map((r) => r.store_id)
-    .filter(Boolean);
-  return (
-    `Synced ${result.ok}/${result.stores} store(s) · last ${SYNC_DAYS} days` +
-    (result.failed
-      ? ` · ${result.failed} failed${failedSlugs.length ? ` (${failedSlugs.join(", ")})` : ""}`
-      : "")
-  );
-}
+type StoreRtsStatus = {
+  store_id?: string;
+  display_name?: string;
+  ok?: boolean;
+  incomplete?: boolean;
+  error?: string | null;
+  unique?: number;
+  countTotal?: number | null;
+  elapsed_ms?: number;
+};
 
 export function ShippingPage() {
   const { me } = useAuth();
@@ -98,29 +61,16 @@ export function ShippingPage() {
   const [hitlOpen, setHitlOpen] = useState(false);
   const [hitlValidation, setHitlValidation] = useState<PrintValidateResponse | null>(null);
   const [pendingPrintIds, setPendingPrintIds] = useState<string[]>([]);
+  const [rtsOrders, setRtsOrders] = useState<UnifiedOrder[]>([]);
+  const [storeStatuses, setStoreStatuses] = useState<StoreRtsStatus[]>([]);
+  const [partialLoad, setPartialLoad] = useState(false);
+  const [loadElapsedMs, setLoadElapsedMs] = useState<number | null>(null);
 
-  const syncMutation = useSyncOrders(workspaceId);
   const validateMutation = useValidatePrint(workspaceId);
   const printMutation = usePrintOrdersByIds(workspaceId);
   const printJobsQuery = usePrintJobs(workspaceId, true);
 
-  const listFilters = useMemo(
-    () => ({
-      stores: selectedStores.length ? selectedStores.join(",") : undefined,
-      status_group: "ready_to_ship" as const,
-      print_state: "any" as const,
-      page: 1,
-      page_size: RTS_PAGE_SIZE,
-      sort: "created_at_daraz_desc",
-    }),
-    [selectedStores]
-  );
-
-  // Only fetch local RTS when enabled AND at least one store selected (empty ≠ all).
-  const canLoadRts = rtsEnabled && selectedStores.length > 0;
-  const rtsQuery = useUnifiedOrders(workspaceId, listFilters, { enabled: canLoadRts });
-  const [rtsOrders, setRtsOrders] = useState<UnifiedOrder[]>([]);
-  const orders: UnifiedOrder[] = canLoadRts ? rtsOrders : [];
+  const orders: UnifiedOrder[] = rtsEnabled ? rtsOrders : [];
 
   const history = printJobsQuery.data || [];
   const historyNote =
@@ -142,6 +92,11 @@ export function ShippingPage() {
       );
     return formatPrintTime(done[0]?.updated_at || done[0]?.started_at) || null;
   }, [history]);
+
+  const unprintedCount = useMemo(
+    () => orders.filter((o) => !o.has_print && !(Number(o.print_count) > 0)).length,
+    [orders]
+  );
 
   useEffect(() => {
     if (!storesQuery.isSuccess || selectionReady) return;
@@ -169,6 +124,8 @@ export function ShippingPage() {
   useEffect(() => {
     setRtsEnabled(false);
     setRtsOrders([]);
+    setStoreStatuses([]);
+    setPartialLoad(false);
     setOrderSelected(new Set());
   }, [selectedStores]);
 
@@ -180,53 +137,61 @@ export function ShippingPage() {
     if (metaErr) setError(metaErr);
   }, [storesQuery.error, groupsQuery.error]);
 
-  async function loadRts() {
+  async function loadRts(retryStoreId?: string) {
     setError("");
     setOk("");
-    if (!selectedStores.length) {
+    const targets = retryStoreId ? [retryStoreId] : selectedStores;
+    if (!targets.length) {
       setError("Select at least one store");
       return;
     }
-    setBusy("Loading RTS from local cache…");
+    setBusy("Loading current RTS from Daraz…");
     setRtsEnabled(true);
     try {
-      const { orders: rows, total } = await fetchAllLocalRts(selectedStores);
-      setRtsOrders(rows);
-      void rtsQuery.refetch();
-      const storeCount = new Set(
-        rows.map((o) => o.store_slug || o.store_id).filter(Boolean)
-      ).size;
-      setOk(
-        `Loaded ${rows.length} RTS order(s) across ${storeCount || selectedStores.length} store(s)` +
-          (total > rows.length ? ` · showing ${rows.length} of ${total}` : "") +
-          ` · Unprinted badges come from MultiStore print events`
-      );
+      const result = await Api.loadShippingRts(targets, true);
+      const incoming = result.orders || [];
+
+      if (retryStoreId) {
+        // Merge: replace that store's rows, keep others
+        setRtsOrders((prev) => {
+          const kept = prev.filter(
+            (o) => (o.store_slug || o.store_id) !== retryStoreId
+          );
+          return [...kept, ...incoming];
+        });
+        setStoreStatuses((prev) => {
+          const others = prev.filter((s) => s.store_id !== retryStoreId);
+          return [...others, ...(result.stores || [])];
+        });
+      } else {
+        setRtsOrders(incoming);
+        setStoreStatuses(result.stores || []);
+      }
+
+      setPartialLoad(Boolean(result.partial));
+      setLoadElapsedMs(result.elapsed_ms ?? null);
       setOrderSelected(new Set());
+
+      const lines = (result.stores || []).map((s) => {
+        const name = s.display_name || s.store_id || "?";
+        if (!s.ok) return `${name}: failed${s.error ? ` (${s.error})` : ""}`;
+        return `${name}: ${s.unique ?? 0} RTS · ${s.elapsed_ms ?? "?"}ms`;
+      });
+      const summary =
+        `RTS loaded · ${result.count} order(s) · ${result.unprinted_count} unprinted` +
+        (result.partial ? " · PARTIAL — some stores failed" : "") +
+        (result.elapsed_ms != null ? ` · ${result.elapsed_ms}ms` : "") +
+        (lines.length ? ` · ${lines.join(" · ")}` : "");
+      setOk(summary);
+      if (result.partial) {
+        setError(
+          `Incomplete RTS batch: ${result.stores_failed}/${result.stores_requested} store(s) failed. Successful stores are still shown.`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load RTS");
     } finally {
       setBusy("");
-    }
-  }
-
-  async function syncThenLoad() {
-    if (!selectedStores.length) {
-      setError("Select at least one store");
-      return;
-    }
-    setError("");
-    setOk("");
-    setBusy("Syncing from Daraz…");
-    try {
-      const result = await syncMutation.mutateAsync({
-        store_ids: selectedStores,
-        days: SYNC_DAYS,
-      });
-      setOk(formatSyncSummary(result));
-      await loadRts();
-    } catch (err) {
-      setBusy("");
-      setError(err instanceof Error ? err.message : "Sync failed");
     }
   }
 
@@ -258,11 +223,7 @@ export function ShippingPage() {
         /* retry via history */
       }
       setOrderSelected(new Set());
-      if (selectedStores.length) {
-        const { orders: rows } = await fetchAllLocalRts(selectedStores);
-        setRtsOrders(rows);
-      }
-      void rtsQuery.refetch();
+      await loadRts();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Print failed");
     } finally {
@@ -271,9 +232,13 @@ export function ShippingPage() {
   }
 
   async function handlePrintSelected() {
-    const ids = Array.from(orderSelected);
+    const ids = Array.from(orderSelected).filter(Boolean);
     if (!ids.length) {
       setError("Select at least one order");
+      return;
+    }
+    if (ids.some((id) => !id || id === "null" || id === "undefined")) {
+      setError("Some RTS rows are missing local ids — reload RTS and try again");
       return;
     }
     setBusy("Validating print targets…");
@@ -323,7 +288,7 @@ export function ShippingPage() {
     <div className="stack">
       <PageHeader
         title="Shipping"
-        description="RTS labels from your local order cache with Unprinted/Printed badges from MultiStore print events. Empty store selection never means all stores."
+        description="Load current ready-to-ship orders live from Daraz for selected stores. Print badges come only from MultiStore print events. Empty store selection never means all stores."
       />
 
       <div className="tabs" role="tablist">
@@ -377,26 +342,18 @@ export function ShippingPage() {
               }}
             />
             <p className="muted-line" style={{ marginTop: "0.65rem" }}>
-              Sync pulls Daraz into the local cache. Load RTS shows all ready-to-ship
-              rows — previously printed stay visible as Printed; new ones show UNPRINTED.{" "}
+              Load RTS queries Daraz current ready_to_ship for the selected stores only — no full
+              warehouse sync required.{" "}
               <Link to="/app/orders" style={{ fontWeight: 700, color: "var(--teal-deep)" }}>
-                Open Orders →
+                Open Orders warehouse →
               </Link>
             </p>
             <div className="row" style={{ marginTop: "0.75rem" }}>
               <button
                 type="button"
-                className="btn btn-ghost"
-                disabled={!selectedStores.length || Boolean(busy)}
-                onClick={syncThenLoad}
-              >
-                Sync + Load RTS
-              </button>
-              <button
-                type="button"
                 className="btn btn-primary"
                 disabled={!selectedStores.length || Boolean(busy)}
-                onClick={loadRts}
+                onClick={() => loadRts()}
               >
                 Load RTS
               </button>
@@ -411,23 +368,65 @@ export function ShippingPage() {
             </div>
           </section>
 
+          {rtsEnabled && storeStatuses.length ? (
+            <section className="card">
+              <h3 className="section-title">Per-store result</h3>
+              {partialLoad ? (
+                <div className="banner banner-info" style={{ marginBottom: "0.75rem" }}>
+                  Partial load — successful stores are listed; failed stores need Retry.
+                </div>
+              ) : null}
+              <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
+                {storeStatuses.map((s) => (
+                  <li key={s.store_id || s.display_name} style={{ marginBottom: "0.35rem" }}>
+                    {s.ok ? (
+                      <>
+                        ✓ <strong>{s.display_name || s.store_id}</strong> — {s.unique ?? 0}{" "}
+                        RTS
+                        {s.countTotal != null ? ` (Daraz ${s.countTotal})` : ""} ·{" "}
+                        {s.elapsed_ms ?? "?"}ms
+                      </>
+                    ) : (
+                      <>
+                        ✕ <strong>{s.display_name || s.store_id}</strong> — Failed
+                        {s.error ? `: ${s.error}` : ""}{" "}
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled={Boolean(busy)}
+                          onClick={() => loadRts(s.store_id)}
+                        >
+                          Retry
+                        </button>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className="muted-line" style={{ marginBottom: 0 }}>
+                Total shown: {orders.length} · Unprinted: {unprintedCount}
+                {loadElapsedMs != null ? ` · ${loadElapsedMs}ms` : ""}
+                {lastBatchLabel ? ` · Last print batch ${lastBatchLabel}` : ""}
+              </p>
+            </section>
+          ) : null}
+
           {!rtsEnabled ? (
             <EmptyState
-              title="Load RTS orders"
-              description="Select stores, then Sync + Load RTS (or Load RTS if already synced). Empty store selection never means all stores."
+              title="Load current RTS"
+              description="Select stores, then Load RTS. MultiStore queries Daraz live ready_to_ship — Sync Orders is not required for printing."
             />
           ) : orders.length === 0 ? (
             <EmptyState
-              title="No RTS orders in local cache"
-              description="Try Sync + Load RTS. If Seller Center shows RTS orders, sync may still be catching up."
-              action={
-                <button type="button" className="btn btn-primary" onClick={syncThenLoad}>
-                  Sync + Load RTS
-                </button>
+              title="No current RTS"
+              description={
+                partialLoad
+                  ? "No orders from successful stores (or all selected stores failed)."
+                  : "Daraz returned no ready_to_ship orders for the selected stores."
               }
             />
           ) : (
-            <section className="card">
+            <>
               <RtsSelectionToolbar
                 orders={orders}
                 selectedCount={orderSelected.size}
@@ -439,165 +438,83 @@ export function ShippingPage() {
                 onClear={() => setOrderSelected(new Set())}
                 disabled={Boolean(busy)}
               />
-              <div className="table-wrap" style={{ marginTop: "0.75rem" }}>
-                <table className="data">
+              <section className="card" style={{ overflowX: "auto" }}>
+                <table className="data-table">
                   <thead>
                     <tr>
-                      <th className="col-check" />
-                      <th>Store</th>
+                      <th />
                       <th>Order</th>
-                      <th>Items</th>
-                      <th>Label</th>
+                      <th>Store</th>
+                      <th>Status</th>
+                      <th>Print</th>
                       <th>Created</th>
                     </tr>
                   </thead>
                   <tbody>
                     {orders.map((o) => {
+                      const id = String(o.id || "");
                       const label = resolvePrintLabelStatus(o);
                       return (
-                        <tr
-                          key={o.id}
-                          className={orderSelected.has(o.id) ? "row-selected" : undefined}
-                        >
-                          <td className="col-check">
+                        <tr key={`${o.store_slug}-${o.daraz_order_id}-${id}`}>
+                          <td>
                             <input
                               type="checkbox"
-                              checked={orderSelected.has(o.id)}
-                              onChange={() => toggleOrder(o.id)}
-                              aria-label={`Select ${o.order_number || o.daraz_order_id}`}
+                              checked={id ? orderSelected.has(id) : false}
+                              disabled={!id}
+                              onChange={() => id && toggleOrder(id)}
                             />
+                          </td>
+                          <td>
+                            <strong>{o.order_number || o.daraz_order_id}</strong>
+                            <div className="muted-line" style={{ fontSize: "0.75rem" }}>
+                              {o.daraz_order_id}
+                            </div>
                           </td>
                           <td>{o.store_display_name || o.store_slug || "—"}</td>
                           <td>
-                            <strong>{String(o.order_number || o.daraz_order_id)}</strong>
+                            <StatusBadge>{o.status_group || o.status_raw || "RTS"}</StatusBadge>
                           </td>
-                          <td>{o.items_count ?? "—"}</td>
                           <td>
                             <StatusBadge tone={label.tone}>{label.text}</StatusBadge>
                           </td>
-                          <td>{o.created_at_daraz || "—"}</td>
+                          <td style={{ whiteSpace: "nowrap", fontSize: "0.8rem" }}>
+                            {o.created_at_daraz || "—"}
+                          </td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
-              </div>
-            </section>
+              </section>
+            </>
           )}
         </>
       ) : (
         <section className="card">
-          <h3 className="section-title">Print history</h3>
-          {historyNote ? <p style={{ color: "var(--muted)" }}>{historyNote}</p> : null}
-          {history.length > 0 ? (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Job</th>
-                    <th>Status</th>
-                    <th>Started</th>
-                    <th>Pages</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {history.map((j) => (
-                    <tr key={j.id}>
-                      <td style={{ fontFamily: "monospace", fontSize: "0.75rem" }}>
-                        {j.id.slice(0, 8)}…
-                      </td>
-                      <td>
-                        <StatusBadge
-                          tone={
-                            j.status === "done"
-                              ? "ok"
-                              : j.status === "error"
-                                ? "danger"
-                                : "muted"
-                          }
-                        >
-                          {j.status}
-                        </StatusBadge>
-                      </td>
-                      <td>{j.started_at || j.updated_at || "—"}</td>
-                      <td>{j.pages ?? "—"}</td>
-                      <td>
-                        {j.has_download && j.status === "done" ? (
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm"
-                            onClick={() => Api.downloadPrint(j.id)}
-                          >
-                            Download
-                          </button>
-                        ) : null}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
+          <h3 className="section-title">Print History</h3>
+          {historyNote ? <p className="muted-line">{historyNote}</p> : null}
+          <ul>
+            {history.map((j) => (
+              <li key={j.id}>
+                {j.status} · {formatPrintTime(j.updated_at || j.started_at) || "—"} ·{" "}
+                {j.id}
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
-      <Dialog
-        open={hitlOpen}
-        title="Confirm label print"
-        onClose={() => {
-          setHitlOpen(false);
-          setHitlValidation(null);
-        }}
-      >
-        {hitlValidation ? (
-          <>
-            <p style={{ margin: 0 }}>
-              <strong>
-                {(hitlValidation.new_printable.length || 0) +
-                  (hitlValidation.already_printed.length || 0)}{" "}
-                selected
-              </strong>
-            </p>
-            <p style={{ margin: 0 }}>
-              {hitlValidation.new_printable.length} unprinted
-              <br />
-              {hitlValidation.already_printed.length} already printed
-            </p>
-            <p style={{ margin: 0, color: "var(--muted)" }}>
-              Select All never silently reprints. Choose Print Unprinted or explicitly
-              Reprint All.
-            </p>
-          </>
-        ) : null}
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => {
-              setHitlOpen(false);
-              setHitlValidation(null);
-            }}
-          >
-            Cancel
+      <Dialog open={hitlOpen} title="Already printed" onClose={() => setHitlOpen(false)}>
+        <p>
+          {hitlValidation?.already_printed.length || 0} already printed ·{" "}
+          {hitlValidation?.new_printable.length || 0} unprinted
+        </p>
+        <div className="row">
+          <button type="button" className="btn btn-primary" onClick={() => confirmReprint(false)}>
+            Print {hitlValidation?.new_printable.length || 0} Unprinted
           </button>
-          {hitlValidation?.new_printable.length ? (
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => void confirmReprint(false)}
-            >
-              Print {hitlValidation.new_printable.length} Unprinted
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="btn btn-accent"
-            onClick={() => void confirmReprint(true)}
-          >
-            Reprint All{" "}
-            {(hitlValidation?.new_printable.length || 0) +
-              (hitlValidation?.already_printed.length || 0)}
+          <button type="button" className="btn btn-ghost" onClick={() => confirmReprint(true)}>
+            Reprint All {pendingPrintIds.length}
           </button>
         </div>
       </Dialog>

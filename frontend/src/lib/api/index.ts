@@ -15,8 +15,15 @@ import type {
   PrintJobStatus,
   PrintOrdersStartResponse,
   PrintValidateResponse,
+  ProductCloneDraftResponse,
+  ProductDefaults,
+  ProductDetailResponse,
+  ProductListParams,
+  ProductListResponse,
+  ProductSyncResponse,
   StoreGroup,
   StoreView,
+  UnifiedOrder,
 } from "@/types/api";
 
 function buildOrdersQs(params: OrderListParams): string {
@@ -100,6 +107,34 @@ export const Api = {
       body: JSON.stringify(body || {}),
     }),
 
+  /** Live current RTS for Shipping — does not require prior warehouse sync. */
+  loadShippingRts: (store_ids: string[], upsert_headers = true) =>
+    api<{
+      source: string;
+      partial: boolean;
+      stores_requested: number;
+      stores_ok: number;
+      stores_failed: number;
+      orders: UnifiedOrder[];
+      count: number;
+      unprinted_count: number;
+      elapsed_ms: number;
+      concurrency: number;
+      stores: Array<{
+        store_id?: string;
+        display_name?: string;
+        ok?: boolean;
+        incomplete?: boolean;
+        error?: string | null;
+        unique?: number;
+        countTotal?: number | null;
+        elapsed_ms?: number;
+      }>;
+    }>("/api/shipping/rts", {
+      method: "POST",
+      body: JSON.stringify({ store_ids, upsert_headers }),
+    }),
+
   validatePrintLabels: (order_ids: string[]) =>
     api<PrintValidateResponse>("/api/print-labels/validate", {
       method: "POST",
@@ -154,4 +189,35 @@ export const Api = {
     });
     return api<PerformanceSyncResponse>(`/api/store-performance/sync?${qs}`, { method: "POST" });
   },
+
+  listProducts: (params: ProductListParams = {}) => {
+    const qs = buildOrdersQs(params as OrderListParams);
+    return api<ProductListResponse>(qs ? `/api/products?${qs}` : "/api/products");
+  },
+
+  getProduct: (productId: string) =>
+    api<ProductDetailResponse>(`/api/products/${encodeURIComponent(productId)}`),
+
+  syncProducts: (body?: { store_ids?: string[]; fetch_details?: boolean }) =>
+    api<ProductSyncResponse>("/api/products/sync", {
+      method: "POST",
+      body: JSON.stringify(body || {}),
+    }),
+
+  getProductDefaults: () => api<{ defaults: ProductDefaults }>("/api/product-defaults"),
+
+  saveProductDefaults: (body: Partial<ProductDefaults>) =>
+    api<{ defaults: ProductDefaults }>("/api/product-defaults", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  prepareCloneDraft: (productId: string, destination_store_id: string) =>
+    api<ProductCloneDraftResponse>(
+      `/api/products/${encodeURIComponent(productId)}/clone-draft`,
+      {
+        method: "POST",
+        body: JSON.stringify({ destination_store_id }),
+      }
+    ),
 };

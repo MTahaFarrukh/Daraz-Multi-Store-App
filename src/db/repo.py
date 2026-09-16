@@ -32,6 +32,169 @@ def _parse_ts(value: Any) -> datetime | None:
         return None
 
 
+def _num(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_or(value: Any, fallback: Any) -> Any:
+    """Coerce a JSONB-ish payload value, falling back to the column default."""
+    if value is None:
+        return deepcopy(fallback)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return deepcopy(fallback)
+    return deepcopy(value)
+
+
+PRODUCT_DEFAULT_INITIAL_QUANTITY = 1
+PRODUCT_DEFAULT_SKU_PREFIX = "MTF-"
+
+_PRODUCT_DEFAULT_DIMENSION_KEYS = (
+    "default_package_weight",
+    "default_package_length",
+    "default_package_width",
+    "default_package_height",
+)
+
+
+def empty_product_defaults(workspace_id: str) -> dict[str, Any]:
+    """Shape returned by get_product_defaults when no row exists yet."""
+    row: dict[str, Any] = {"workspace_id": str(workspace_id)}
+    for key in _PRODUCT_DEFAULT_DIMENSION_KEYS:
+        row[key] = None
+    row["default_initial_quantity"] = PRODUCT_DEFAULT_INITIAL_QUANTITY
+    row["sku_prefix"] = PRODUCT_DEFAULT_SKU_PREFIX
+    row["updated_at"] = None
+    return row
+
+
+def merge_product_defaults(
+    existing: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Partial update: keys absent from payload keep their current value."""
+    merged = dict(existing)
+    for key in _PRODUCT_DEFAULT_DIMENSION_KEYS:
+        if key in payload:
+            merged[key] = _num(payload.get(key))
+    if "default_initial_quantity" in payload:
+        qty = _int_or_none(payload.get("default_initial_quantity"))
+        merged["default_initial_quantity"] = (
+            qty if qty is not None else PRODUCT_DEFAULT_INITIAL_QUANTITY
+        )
+    if "sku_prefix" in payload:
+        prefix = payload.get("sku_prefix")
+        merged["sku_prefix"] = (
+            str(prefix) if prefix is not None else PRODUCT_DEFAULT_SKU_PREFIX
+        )
+    return merged
+
+
+def _normalize_status_filter(value: Any) -> set[str] | None:
+    """Accept a scalar or list of statuses; compare case-insensitively."""
+    if value is None or value == "":
+        return None
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    statuses = {str(v).strip().lower() for v in values if str(v).strip()}
+    return statuses or None
+
+
+_PRODUCT_SORT_OPTIONS: dict[str, tuple[str, bool]] = {
+    "created_at_desc": ("created_at", True),
+    "created_at_asc": ("created_at", False),
+    "updated_at_desc": ("updated_at", True),
+    "updated_at_asc": ("updated_at", False),
+    "synced_at_desc": ("synced_at", True),
+    "synced_at_asc": ("synced_at", False),
+    "title_asc": ("title", False),
+    "title_desc": ("title", True),
+}
+
+
+def _product_sort(sort: Any) -> tuple[str, bool]:
+    """Return (field, descending) for a product list sort key."""
+    return _PRODUCT_SORT_OPTIONS.get(str(sort or "").lower(), ("created_at", True))
+
+
+def normalize_product_title(value: Any) -> str:
+    """Lowercase alphanumeric-only form used for exact duplicate detection."""
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def product_title_tokens(value: Any) -> set[str]:
+    cleaned = "".join(
+        ch if ch.isalnum() else " " for ch in str(value or "").lower()
+    )
+    return {tok for tok in cleaned.split() if tok}
+
+
+def _token_overlap(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+# Above this Jaccard overlap two titles are treated as near-identical; the lower
+# bound only applies when the candidate is in the same Daraz category.
+_DUPLICATE_TITLE_THRESHOLD = 0.6
+_DUPLICATE_TITLE_THRESHOLD_SAME_CATEGORY = 0.35
+
+
+def rank_product_duplicates(
+    candidates: list[dict[str, Any]],
+    *,
+    title: Any,
+    category_id: Any = None,
+) -> list[dict[str, Any]]:
+    """Soft-match candidate products against a title/category, best match first."""
+    target_norm = normalize_product_title(title)
+    target_tokens = product_title_tokens(title)
+    wanted_category = _int_or_none(category_id)
+    matches: list[dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_title = candidate.get("title") or candidate.get("title_en") or ""
+        same_category = (
+            wanted_category is not None
+            and _int_or_none(candidate.get("primary_category_id")) == wanted_category
+        )
+        if target_norm and normalize_product_title(candidate_title) == target_norm:
+            score, reason = 1.0, "title_exact"
+        else:
+            score = _token_overlap(
+                target_tokens, product_title_tokens(candidate_title)
+            )
+            if score >= _DUPLICATE_TITLE_THRESHOLD:
+                reason = "title_similar"
+            elif (
+                same_category and score >= _DUPLICATE_TITLE_THRESHOLD_SAME_CATEGORY
+            ):
+                reason = "category_title_partial"
+            else:
+                continue
+        row = deepcopy(candidate)
+        row["match_score"] = round(score, 4)
+        row["match_reason"] = reason
+        row["same_category"] = same_category
+        matches.append(row)
+    matches.sort(key=lambda r: (-r["match_score"], str(r.get("title") or "")))
+    return matches
+
+
 def store_row_to_record(row: dict[str, Any], *, include_tokens: bool = True) -> dict[str, Any]:
     """Normalize a DB/memory store row into the dict shape used by ops/token_store."""
     record: dict[str, Any] = {
@@ -181,6 +344,46 @@ class TenancyRepo(Protocol):
 
     def insert_label_print(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
+    def upsert_daraz_product(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+
+    def upsert_daraz_product_variant(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+
+    def get_daraz_product(
+        self, workspace_id: str, product_id: str
+    ) -> dict[str, Any] | None: ...
+
+    def list_daraz_products(
+        self, workspace_id: str, filters: dict[str, Any] | None = None
+    ) -> dict[str, Any]: ...
+
+    def list_daraz_product_variants(
+        self, workspace_id: str, product_id: str
+    ) -> list[dict[str, Any]]: ...
+
+    def replace_product_variants(
+        self, workspace_id: str, product_id: str, variants: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]: ...
+
+    def get_product_defaults(self, workspace_id: str) -> dict[str, Any]: ...
+
+    def upsert_product_defaults(
+        self, workspace_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def list_destination_seller_skus(
+        self, workspace_id: str, store_uuid: str
+    ) -> set[str]: ...
+
+    def find_possible_product_duplicates(
+        self,
+        workspace_id: str,
+        store_uuid: str,
+        *,
+        title: str,
+        category_id: Any = None,
+        exclude_product_id: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
 
 class MemoryTenancyRepo:
     """In-memory repo for tests and local AUTH_TEST_MODE without Postgres."""
@@ -197,6 +400,9 @@ class MemoryTenancyRepo:
         self.orders: dict[str, dict[str, Any]] = {}  # order uuid → row
         self.order_items: dict[str, dict[str, Any]] = {}  # item uuid → row
         self.label_prints: dict[str, dict[str, Any]] = {}  # print uuid → row
+        self.products: dict[str, dict[str, Any]] = {}  # product uuid → row
+        self.product_variants: dict[str, dict[str, Any]] = {}  # variant uuid → row
+        self.product_defaults: dict[str, dict[str, Any]] = {}  # workspace_id → row
 
     def create_workspace_with_owner(self, user_id: str, name: str) -> dict[str, Any]:
         with self._lock:
@@ -883,6 +1089,301 @@ class MemoryTenancyRepo:
             }
             self.label_prints[str(row["id"])] = row
             return deepcopy(row)
+
+    # --- Phase 4B: local product warehouse ---------------------------------
+
+    def upsert_daraz_product(self, payload: dict[str, Any]) -> dict[str, Any]:
+        store_uuid = str(payload["store_id"])
+        daraz_item_id = str(payload["daraz_item_id"])
+        now = _now().isoformat()
+        with self._lock:
+            existing = None
+            for row in self.products.values():
+                if (
+                    str(row.get("store_id")) == store_uuid
+                    and str(row.get("daraz_item_id")) == daraz_item_id
+                ):
+                    existing = row
+                    break
+            row = {
+                "id": (existing or {}).get("id") or _uuid(),
+                "workspace_id": str(payload["workspace_id"]),
+                "store_id": store_uuid,
+                "daraz_item_id": daraz_item_id,
+                "title": payload.get("title"),
+                "title_en": payload.get("title_en"),
+                "primary_category_id": _int_or_none(payload.get("primary_category_id")),
+                "primary_category_name": payload.get("primary_category_name"),
+                "brand": payload.get("brand"),
+                "description": payload.get("description"),
+                "description_en": payload.get("description_en"),
+                "short_description": payload.get("short_description"),
+                "short_description_en": payload.get("short_description_en"),
+                "package_content": payload.get("package_content"),
+                "status_raw": payload.get("status_raw"),
+                "product_url": payload.get("product_url"),
+                "attributes_json": _json_or(payload.get("attributes_json"), {}),
+                "variation_json": _json_or(payload.get("variation_json"), {}),
+                "images_json": _json_or(payload.get("images_json"), []),
+                "market_images_json": _json_or(payload.get("market_images_json"), []),
+                "video_ref": payload.get("video_ref"),
+                "raw_json": deepcopy(payload.get("raw_json")),
+                "synced_at": now,
+                "created_at": (existing or {}).get("created_at") or now,
+                "updated_at": now,
+            }
+            self.products[str(row["id"])] = row
+            return deepcopy(row)
+
+    def upsert_daraz_product_variant(self, payload: dict[str, Any]) -> dict[str, Any]:
+        store_uuid = str(payload["store_id"])
+        daraz_sku_id = str(payload["daraz_sku_id"])
+        now = _now().isoformat()
+        with self._lock:
+            existing = None
+            for row in self.product_variants.values():
+                if (
+                    str(row.get("store_id")) == store_uuid
+                    and str(row.get("daraz_sku_id")) == daraz_sku_id
+                ):
+                    existing = row
+                    break
+            row = {
+                "id": (existing or {}).get("id") or _uuid(),
+                "workspace_id": str(payload["workspace_id"]),
+                "store_id": store_uuid,
+                "product_id": str(payload["product_id"]),
+                "daraz_sku_id": daraz_sku_id,
+                "seller_sku": payload.get("seller_sku"),
+                "shop_sku": payload.get("shop_sku"),
+                "sale_props_json": _json_or(payload.get("sale_props_json"), {}),
+                "price": _num(payload.get("price")),
+                "special_price": _num(payload.get("special_price")),
+                "quantity": _int_or_none(payload.get("quantity")),
+                "package_weight": _num(payload.get("package_weight")),
+                "package_length": _num(payload.get("package_length")),
+                "package_width": _num(payload.get("package_width")),
+                "package_height": _num(payload.get("package_height")),
+                "images_json": _json_or(payload.get("images_json"), []),
+                "status_raw": payload.get("status_raw"),
+                "synced_at": now,
+                "created_at": (existing or {}).get("created_at") or now,
+                "updated_at": now,
+            }
+            self.product_variants[str(row["id"])] = row
+            return deepcopy(row)
+
+    def get_daraz_product(
+        self, workspace_id: str, product_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.products.get(str(product_id))
+            if not row or str(row.get("workspace_id")) != str(workspace_id):
+                return None
+            return deepcopy(row)
+
+    def _product_matches_search_unlocked(
+        self, product: dict[str, Any], needle: str
+    ) -> bool:
+        n = needle.lower()
+        fields = [
+            product.get("title"),
+            product.get("title_en"),
+            product.get("brand"),
+            product.get("daraz_item_id"),
+        ]
+        if any(n in str(f).lower() for f in fields if f):
+            return True
+        for variant in self.product_variants.values():
+            if str(variant.get("product_id")) != str(product.get("id")):
+                continue
+            if n in str(variant.get("seller_sku") or "").lower():
+                return True
+            if n in str(variant.get("shop_sku") or "").lower():
+                return True
+        return False
+
+    def list_daraz_products(
+        self, workspace_id: str, filters: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        filters = filters or {}
+        page = max(1, int(filters.get("page") or 1))
+        page_size = max(1, min(int(filters.get("page_size") or 50), 200))
+        statuses = _normalize_status_filter(filters.get("status"))
+        category_id = _int_or_none(filters.get("category_id"))
+        search = (filters.get("search") or "").strip()
+        sort = (filters.get("sort") or "created_at_desc").lower()
+
+        with self._lock:
+            allowed_uuids = self._allowed_store_uuids_unlocked(
+                workspace_id, filters.get("store_uuids"), filters.get("store_slugs")
+            )
+            rows = []
+            for product in self.products.values():
+                if str(product.get("workspace_id")) != str(workspace_id):
+                    continue
+                if (
+                    allowed_uuids is not None
+                    and str(product.get("store_id")) not in allowed_uuids
+                ):
+                    continue
+                if statuses is not None:
+                    if str(product.get("status_raw") or "").lower() not in statuses:
+                        continue
+                if (
+                    category_id is not None
+                    and _int_or_none(product.get("primary_category_id")) != category_id
+                ):
+                    continue
+                if search and not self._product_matches_search_unlocked(
+                    product, search
+                ):
+                    continue
+                rows.append(deepcopy(product))
+
+            variant_counts: dict[str, int] = {}
+            for variant in self.product_variants.values():
+                if str(variant.get("workspace_id")) != str(workspace_id):
+                    continue
+                pid = str(variant.get("product_id"))
+                variant_counts[pid] = variant_counts.get(pid, 0) + 1
+
+        sort_field, sort_desc = _product_sort(sort)
+        rows.sort(
+            key=lambda p: (
+                str(p.get(sort_field) or "").lower(),
+                str(p.get("daraz_item_id") or ""),
+            ),
+            reverse=sort_desc,
+        )
+        total = len(rows)
+        start = (page - 1) * page_size
+        page_rows = rows[start : start + page_size]
+        for product in page_rows:
+            product["variants_count"] = variant_counts.get(str(product["id"]), 0)
+        return {
+            "items": page_rows,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def _allowed_store_uuids_unlocked(
+        self,
+        workspace_id: str,
+        store_uuids: list[str] | None,
+        store_slugs: list[str] | None,
+    ) -> set[str] | None:
+        slug_to_uuid = {
+            str(s.get("store_id", "")).lower(): str(s["id"])
+            for s in self.stores.values()
+            if str(s.get("workspace_id")) == str(workspace_id)
+        }
+        allowed: set[str] | None = None
+        if store_uuids is not None:
+            allowed = {str(u) for u in store_uuids}
+        if store_slugs is not None:
+            slug_uuids = {
+                slug_to_uuid[s.lower()]
+                for s in store_slugs
+                if s and s.lower() in slug_to_uuid
+            }
+            allowed = slug_uuids if allowed is None else allowed & slug_uuids
+        return allowed
+
+    def list_daraz_product_variants(
+        self, workspace_id: str, product_id: str
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            product = self.products.get(str(product_id))
+            if not product or str(product.get("workspace_id")) != str(workspace_id):
+                return []
+            variants = [
+                deepcopy(v)
+                for v in self.product_variants.values()
+                if str(v.get("product_id")) == str(product_id)
+                and str(v.get("workspace_id")) == str(workspace_id)
+            ]
+        variants.sort(key=lambda v: str(v.get("created_at") or ""))
+        return variants
+
+    def replace_product_variants(
+        self, workspace_id: str, product_id: str, variants: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        product = self.get_daraz_product(workspace_id, product_id)
+        if product is None:
+            raise ValueError("Product not found")
+        keep_sku_ids = {str(v["daraz_sku_id"]) for v in variants}
+        with self._lock:
+            stale = [
+                vid
+                for vid, row in self.product_variants.items()
+                if str(row.get("product_id")) == str(product_id)
+                and str(row.get("daraz_sku_id")) not in keep_sku_ids
+            ]
+            for vid in stale:
+                del self.product_variants[vid]
+        for variant in variants:
+            payload = dict(variant)
+            payload["workspace_id"] = workspace_id
+            payload["product_id"] = product_id
+            payload.setdefault("store_id", product["store_id"])
+            self.upsert_daraz_product_variant(payload)
+        return self.list_daraz_product_variants(workspace_id, product_id)
+
+    def get_product_defaults(self, workspace_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self.product_defaults.get(str(workspace_id))
+            if not row:
+                return empty_product_defaults(workspace_id)
+            return deepcopy(row)
+
+    def upsert_product_defaults(
+        self, workspace_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        existing = self.get_product_defaults(workspace_id)
+        merged = merge_product_defaults(existing, payload or {})
+        merged["workspace_id"] = str(workspace_id)
+        merged["updated_at"] = _now().isoformat()
+        with self._lock:
+            self.product_defaults[str(workspace_id)] = merged
+            return deepcopy(merged)
+
+    def list_destination_seller_skus(
+        self, workspace_id: str, store_uuid: str
+    ) -> set[str]:
+        with self._lock:
+            return {
+                str(v["seller_sku"])
+                for v in self.product_variants.values()
+                if str(v.get("workspace_id")) == str(workspace_id)
+                and str(v.get("store_id")) == str(store_uuid)
+                and v.get("seller_sku")
+            }
+
+    def find_possible_product_duplicates(
+        self,
+        workspace_id: str,
+        store_uuid: str,
+        *,
+        title: str,
+        category_id: Any = None,
+        exclude_product_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            candidates = [
+                deepcopy(p)
+                for p in self.products.values()
+                if str(p.get("workspace_id")) == str(workspace_id)
+                and str(p.get("store_id")) == str(store_uuid)
+                and (
+                    exclude_product_id is None
+                    or str(p.get("id")) != str(exclude_product_id)
+                )
+            ]
+        return rank_product_duplicates(
+            candidates, title=title, category_id=category_id
+        )
 
 
 class PostgresTenancyRepo:
@@ -2157,6 +2658,522 @@ class PostgresTenancyRepo:
             "created_at": row[17].isoformat() if row[17] else None,
             "updated_at": row[18].isoformat() if row[18] else None,
         }
+
+    # --- Phase 4B: local product warehouse ---------------------------------
+
+    _PRODUCT_SELECT = """
+        id, workspace_id, store_id, daraz_item_id, title, title_en,
+        primary_category_id, primary_category_name, brand, description,
+        description_en, short_description, short_description_en, package_content,
+        status_raw, product_url, attributes_json, variation_json, images_json,
+        market_images_json, video_ref, raw_json, synced_at, created_at, updated_at
+    """
+
+    _VARIANT_SELECT = """
+        id, workspace_id, store_id, product_id, daraz_sku_id, seller_sku, shop_sku,
+        sale_props_json, price, special_price, quantity, package_weight,
+        package_length, package_width, package_height, images_json, status_raw,
+        synced_at, created_at, updated_at
+    """
+
+    def _product_row(self, row) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "store_id": str(row[2]),
+            "daraz_item_id": row[3],
+            "title": row[4],
+            "title_en": row[5],
+            "primary_category_id": _int_or_none(row[6]),
+            "primary_category_name": row[7],
+            "brand": row[8],
+            "description": row[9],
+            "description_en": row[10],
+            "short_description": row[11],
+            "short_description_en": row[12],
+            "package_content": row[13],
+            "status_raw": row[14],
+            "product_url": row[15],
+            "attributes_json": self._json_maybe(row[16]) or {},
+            "variation_json": self._json_maybe(row[17]) or {},
+            "images_json": self._json_maybe(row[18]) or [],
+            "market_images_json": self._json_maybe(row[19]) or [],
+            "video_ref": row[20],
+            "raw_json": self._json_maybe(row[21]),
+            "synced_at": row[22].isoformat() if row[22] else None,
+            "created_at": row[23].isoformat() if row[23] else None,
+            "updated_at": row[24].isoformat() if row[24] else None,
+        }
+
+    def _variant_row(self, row) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "store_id": str(row[2]),
+            "product_id": str(row[3]),
+            "daraz_sku_id": row[4],
+            "seller_sku": row[5],
+            "shop_sku": row[6],
+            "sale_props_json": self._json_maybe(row[7]) or {},
+            "price": _num(row[8]),
+            "special_price": _num(row[9]),
+            "quantity": _int_or_none(row[10]),
+            "package_weight": _num(row[11]),
+            "package_length": _num(row[12]),
+            "package_width": _num(row[13]),
+            "package_height": _num(row[14]),
+            "images_json": self._json_maybe(row[15]) or [],
+            "status_raw": row[16],
+            "synced_at": row[17].isoformat() if row[17] else None,
+            "created_at": row[18].isoformat() if row[18] else None,
+            "updated_at": row[19].isoformat() if row[19] else None,
+        }
+
+    def upsert_daraz_product(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                f"""
+                INSERT INTO daraz_products (
+                    workspace_id, store_id, daraz_item_id, title, title_en,
+                    primary_category_id, primary_category_name, brand, description,
+                    description_en, short_description, short_description_en,
+                    package_content, status_raw, product_url, attributes_json,
+                    variation_json, images_json, market_images_json, video_ref,
+                    raw_json, synced_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s::jsonb,
+                    %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                    %s::jsonb, NOW()
+                )
+                ON CONFLICT (store_id, daraz_item_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    title_en = EXCLUDED.title_en,
+                    primary_category_id = EXCLUDED.primary_category_id,
+                    primary_category_name = EXCLUDED.primary_category_name,
+                    brand = EXCLUDED.brand,
+                    description = EXCLUDED.description,
+                    description_en = EXCLUDED.description_en,
+                    short_description = EXCLUDED.short_description,
+                    short_description_en = EXCLUDED.short_description_en,
+                    package_content = EXCLUDED.package_content,
+                    status_raw = EXCLUDED.status_raw,
+                    product_url = EXCLUDED.product_url,
+                    attributes_json = EXCLUDED.attributes_json,
+                    variation_json = EXCLUDED.variation_json,
+                    images_json = EXCLUDED.images_json,
+                    market_images_json = EXCLUDED.market_images_json,
+                    video_ref = EXCLUDED.video_ref,
+                    raw_json = EXCLUDED.raw_json,
+                    synced_at = NOW(),
+                    updated_at = NOW()
+                RETURNING {self._PRODUCT_SELECT}
+                """,
+                (
+                    payload["workspace_id"],
+                    payload["store_id"],
+                    str(payload["daraz_item_id"]),
+                    payload.get("title"),
+                    payload.get("title_en"),
+                    _int_or_none(payload.get("primary_category_id")),
+                    payload.get("primary_category_name"),
+                    payload.get("brand"),
+                    payload.get("description"),
+                    payload.get("description_en"),
+                    payload.get("short_description"),
+                    payload.get("short_description_en"),
+                    payload.get("package_content"),
+                    payload.get("status_raw"),
+                    payload.get("product_url"),
+                    json.dumps(_json_or(payload.get("attributes_json"), {})),
+                    json.dumps(_json_or(payload.get("variation_json"), {})),
+                    json.dumps(_json_or(payload.get("images_json"), [])),
+                    json.dumps(_json_or(payload.get("market_images_json"), [])),
+                    payload.get("video_ref"),
+                    json.dumps(payload["raw_json"])
+                    if payload.get("raw_json") is not None
+                    else None,
+                ),
+            ).fetchone()
+            conn.commit()
+        return self._product_row(row)
+
+    _VARIANT_UPSERT_SQL = """
+        INSERT INTO daraz_product_variants (
+            workspace_id, store_id, product_id, daraz_sku_id, seller_sku, shop_sku,
+            sale_props_json, price, special_price, quantity, package_weight,
+            package_length, package_width, package_height, images_json, status_raw,
+            synced_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s,
+            %s::jsonb, %s, %s, %s, %s,
+            %s, %s, %s, %s::jsonb, %s,
+            NOW()
+        )
+        ON CONFLICT (store_id, daraz_sku_id) DO UPDATE SET
+            product_id = EXCLUDED.product_id,
+            seller_sku = EXCLUDED.seller_sku,
+            shop_sku = EXCLUDED.shop_sku,
+            sale_props_json = EXCLUDED.sale_props_json,
+            price = EXCLUDED.price,
+            special_price = EXCLUDED.special_price,
+            quantity = EXCLUDED.quantity,
+            package_weight = EXCLUDED.package_weight,
+            package_length = EXCLUDED.package_length,
+            package_width = EXCLUDED.package_width,
+            package_height = EXCLUDED.package_height,
+            images_json = EXCLUDED.images_json,
+            status_raw = EXCLUDED.status_raw,
+            synced_at = NOW(),
+            updated_at = NOW()
+        RETURNING
+    """
+
+    @staticmethod
+    def _variant_upsert_params(payload: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            payload["workspace_id"],
+            payload["store_id"],
+            payload["product_id"],
+            str(payload["daraz_sku_id"]),
+            payload.get("seller_sku"),
+            payload.get("shop_sku"),
+            json.dumps(_json_or(payload.get("sale_props_json"), {})),
+            _num(payload.get("price")),
+            _num(payload.get("special_price")),
+            _int_or_none(payload.get("quantity")),
+            _num(payload.get("package_weight")),
+            _num(payload.get("package_length")),
+            _num(payload.get("package_width")),
+            _num(payload.get("package_height")),
+            json.dumps(_json_or(payload.get("images_json"), [])),
+            payload.get("status_raw"),
+        )
+
+    def upsert_daraz_product_variant(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                self._VARIANT_UPSERT_SQL + self._VARIANT_SELECT,
+                self._variant_upsert_params(payload),
+            ).fetchone()
+            conn.commit()
+        return self._variant_row(row)
+
+    def get_daraz_product(
+        self, workspace_id: str, product_id: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {self._PRODUCT_SELECT}
+                FROM daraz_products
+                WHERE workspace_id = %s AND id = %s
+                """,
+                (workspace_id, product_id),
+            ).fetchone()
+        return self._product_row(row) if row else None
+
+    def list_daraz_products(
+        self, workspace_id: str, filters: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        filters = filters or {}
+        page = max(1, int(filters.get("page") or 1))
+        page_size = max(1, min(int(filters.get("page_size") or 50), 200))
+        store_uuids = filters.get("store_uuids")
+        store_slugs = filters.get("store_slugs")
+        statuses = _normalize_status_filter(filters.get("status"))
+        category_id = _int_or_none(filters.get("category_id"))
+        search = (filters.get("search") or "").strip()
+        sort_field, sort_desc = _product_sort(filters.get("sort"))
+
+        where = ["p.workspace_id = %s"]
+        params: list[Any] = [workspace_id]
+        if store_uuids is not None:
+            where.append("p.store_id = ANY(%s::uuid[])")
+            params.append(list(store_uuids) or ["00000000-0000-0000-0000-000000000000"])
+        if store_slugs is not None:
+            where.append(
+                "p.store_id IN (SELECT id FROM daraz_stores WHERE workspace_id = %s AND store_id = ANY(%s))"
+            )
+            params.extend([workspace_id, list(store_slugs) or [""]])
+        if statuses is not None:
+            where.append("lower(COALESCE(p.status_raw, '')) = ANY(%s)")
+            params.append(sorted(statuses))
+        if category_id is not None:
+            where.append("p.primary_category_id = %s")
+            params.append(category_id)
+        if search:
+            where.append(
+                """(
+                    p.title ILIKE %s
+                    OR COALESCE(p.title_en, '') ILIKE %s
+                    OR COALESCE(p.brand, '') ILIKE %s
+                    OR p.daraz_item_id ILIKE %s
+                    OR EXISTS (
+                        SELECT 1 FROM daraz_product_variants v
+                        WHERE v.product_id = p.id
+                          AND (
+                            COALESCE(v.seller_sku, '') ILIKE %s
+                            OR COALESCE(v.shop_sku, '') ILIKE %s
+                          )
+                    )
+                )"""
+            )
+            like = f"%{search}%"
+            params.extend([like] * 6)
+
+        sort_sql_field = {
+            "created_at": "p.created_at",
+            "updated_at": "p.updated_at",
+            "synced_at": "p.synced_at",
+            "title": "lower(p.title)",
+        }[sort_field]
+        direction = "DESC" if sort_desc else "ASC"
+        order_sql = f"{sort_sql_field} {direction} NULLS LAST, p.daraz_item_id {direction}"
+
+        where_sql = " AND ".join(where)
+        offset = (page - 1) * page_size
+        with connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM daraz_products p WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT p.id, p.workspace_id, p.store_id, p.daraz_item_id, p.title,
+                       p.title_en, p.primary_category_id, p.primary_category_name,
+                       p.brand, p.description, p.description_en, p.short_description,
+                       p.short_description_en, p.package_content, p.status_raw,
+                       p.product_url, p.attributes_json, p.variation_json,
+                       p.images_json, p.market_images_json, p.video_ref, p.raw_json,
+                       p.synced_at, p.created_at, p.updated_at,
+                       (SELECT COUNT(*)::int FROM daraz_product_variants v
+                         WHERE v.product_id = p.id)
+                FROM daraz_products p
+                WHERE {where_sql}
+                ORDER BY {order_sql}
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            ).fetchall()
+
+        items = []
+        for row in rows:
+            item = self._product_row(row[:25])
+            item["variants_count"] = int(row[25] or 0)
+            items.append(item)
+        return {
+            "items": items,
+            "total": int(total),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def list_daraz_product_variants(
+        self, workspace_id: str, product_id: str
+    ) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {self._VARIANT_SELECT}
+                FROM daraz_product_variants
+                WHERE workspace_id = %s AND product_id = %s
+                ORDER BY created_at ASC
+                """,
+                (workspace_id, product_id),
+            ).fetchall()
+        return [self._variant_row(r) for r in rows]
+
+    def replace_product_variants(
+        self, workspace_id: str, product_id: str, variants: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        product = self.get_daraz_product(workspace_id, product_id)
+        if product is None:
+            raise ValueError("Product not found")
+        keep = [str(v["daraz_sku_id"]) for v in variants]
+        with connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM daraz_product_variants
+                WHERE workspace_id = %s AND product_id = %s
+                  AND NOT (daraz_sku_id = ANY(%s::text[]))
+                """,
+                (workspace_id, product_id, keep),
+            )
+            for variant in variants:
+                payload = dict(variant)
+                payload["workspace_id"] = workspace_id
+                payload["product_id"] = product_id
+                payload.setdefault("store_id", product["store_id"])
+                conn.execute(
+                    self._VARIANT_UPSERT_SQL + self._VARIANT_SELECT,
+                    self._variant_upsert_params(payload),
+                )
+            conn.commit()
+        return self.list_daraz_product_variants(workspace_id, product_id)
+
+    _PRODUCT_DEFAULTS_SELECT = """
+        workspace_id, default_package_weight, default_package_length,
+        default_package_width, default_package_height, default_initial_quantity,
+        sku_prefix, updated_at
+    """
+
+    @staticmethod
+    def _product_defaults_row(row) -> dict[str, Any]:
+        return {
+            "workspace_id": str(row[0]),
+            "default_package_weight": _num(row[1]),
+            "default_package_length": _num(row[2]),
+            "default_package_width": _num(row[3]),
+            "default_package_height": _num(row[4]),
+            "default_initial_quantity": _int_or_none(row[5])
+            or PRODUCT_DEFAULT_INITIAL_QUANTITY,
+            "sku_prefix": row[6] if row[6] is not None else PRODUCT_DEFAULT_SKU_PREFIX,
+            "updated_at": row[7].isoformat() if row[7] else None,
+        }
+
+    def get_product_defaults(self, workspace_id: str) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {self._PRODUCT_DEFAULTS_SELECT}
+                FROM workspace_product_defaults
+                WHERE workspace_id = %s
+                """,
+                (workspace_id,),
+            ).fetchone()
+        return (
+            self._product_defaults_row(row)
+            if row
+            else empty_product_defaults(workspace_id)
+        )
+
+    def upsert_product_defaults(
+        self, workspace_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        merged = merge_product_defaults(
+            self.get_product_defaults(workspace_id), payload or {}
+        )
+        with connect() as conn:
+            row = conn.execute(
+                f"""
+                INSERT INTO workspace_product_defaults (
+                    workspace_id, default_package_weight, default_package_length,
+                    default_package_width, default_package_height,
+                    default_initial_quantity, sku_prefix, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (workspace_id) DO UPDATE SET
+                    default_package_weight = EXCLUDED.default_package_weight,
+                    default_package_length = EXCLUDED.default_package_length,
+                    default_package_width = EXCLUDED.default_package_width,
+                    default_package_height = EXCLUDED.default_package_height,
+                    default_initial_quantity = EXCLUDED.default_initial_quantity,
+                    sku_prefix = EXCLUDED.sku_prefix,
+                    updated_at = NOW()
+                RETURNING {self._PRODUCT_DEFAULTS_SELECT}
+                """,
+                (
+                    workspace_id,
+                    merged.get("default_package_weight"),
+                    merged.get("default_package_length"),
+                    merged.get("default_package_width"),
+                    merged.get("default_package_height"),
+                    merged.get("default_initial_quantity")
+                    or PRODUCT_DEFAULT_INITIAL_QUANTITY,
+                    merged.get("sku_prefix") or PRODUCT_DEFAULT_SKU_PREFIX,
+                ),
+            ).fetchone()
+            conn.commit()
+        return self._product_defaults_row(row)
+
+    def list_destination_seller_skus(
+        self, workspace_id: str, store_uuid: str
+    ) -> set[str]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT seller_sku
+                FROM daraz_product_variants
+                WHERE workspace_id = %s AND store_id = %s
+                  AND seller_sku IS NOT NULL AND seller_sku <> ''
+                """,
+                (workspace_id, store_uuid),
+            ).fetchall()
+        return {str(r[0]) for r in rows}
+
+    def find_possible_product_duplicates(
+        self,
+        workspace_id: str,
+        store_uuid: str,
+        *,
+        title: str,
+        category_id: Any = None,
+        exclude_product_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        wanted_category = _int_or_none(category_id)
+        tokens = sorted(
+            (t for t in product_title_tokens(title) if len(t) >= 3),
+            key=len,
+            reverse=True,
+        )[:5]
+
+        where = ["p.workspace_id = %s", "p.store_id = %s"]
+        params: list[Any] = [workspace_id, store_uuid]
+        if exclude_product_id:
+            where.append("p.id <> %s")
+            params.append(exclude_product_id)
+
+        # Coarse pre-filter only; the actual soft matching happens in Python so
+        # memory and Postgres repos agree on scores.
+        coarse: list[str] = []
+        if wanted_category is not None:
+            coarse.append("p.primary_category_id = %s")
+            params.append(wanted_category)
+        for token in tokens:
+            coarse.append(
+                "(COALESCE(p.title, '') ILIKE %s OR COALESCE(p.title_en, '') ILIKE %s)"
+            )
+            params.extend([f"%{token}%", f"%{token}%"])
+        if not coarse:
+            return []
+        where.append("(" + " OR ".join(coarse) + ")")
+
+        with connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {self._PRODUCT_SELECT}
+                FROM daraz_products p
+                WHERE {" AND ".join(where)}
+                LIMIT 200
+                """,
+                tuple(params),
+            ).fetchall()
+        candidates = [self._product_row(r) for r in rows]
+        return rank_product_duplicates(
+            candidates, title=title, category_id=category_id
+        )
 
 
 _repo: TenancyRepo | None = None

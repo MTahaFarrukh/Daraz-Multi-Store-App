@@ -1,0 +1,463 @@
+{
+  "brands_{'primary_category_id': '10002730', 'startRow': '0', 'pageSize': '20'}": {
+    "ok": true,
+    "data_type": "dict",
+    "keys": [
+      "enable_total",
+      "module",
+      "page_index",
+      "page_size",
+      "start_row",
+      "total_page",
+      "total_record"
+    ],
+    "len": null,
+    "sample": {
+      "enable_total": true,
+      "start_row": 0,
+      "page_index": 1,
+      "module": [
+        {
+          "name": "test123123",
+          "global_identifier": "test123123",
+          "name_en": "test carmen",
+          "brand_id": 23885
+        },
+        {
+          "name": "2K Games",
+          "global_identifier": "2K Games",
+          "name_en": "2K Games",
+          "brand_id": 23886
+        },
+        {
+          "name": "3D Crystal Puzzle",
+          "global_identifier": "3D Crystal Puzzle",
+          "name_en": "3D Crystal Puzzle",
+          "brand_id": 23887
+        },
+        {
+          "name": "3M",
+          "global_identifier": "3M",
+          "name_en": "3M",
+          "brand_id": 23888
+        },
+        {
+          "name": "AGIP",
+          "global_identifier": "AGIP",
+          "name_en": "AGIP",
+          "brand_id": 127387001
+        },
+        {
+          "name": "ALLIANCE",
+          "global_identifier": "ALLIANCE",
+          "name_en": "ALLIANCE",
+          "brand_id": 23893
+        },
+        {
+          "name": "Automoblox",
+          "global_identifier": "Automoblox",
+          "name_en": "Automoblox",
+          "brand_id": 23896
+        },
+        {
+          "name": "Active Care Plus",
+          "global_identifier": "Active Care Plus",
+          "name_en": "Active Care Plus",
+          "brand_id": 23899
+        },
+        {
+          "name": "Active Pure",
+          "global_identifier": "Active Pure",
+          "name_en": "Active Pure",
+          "brand_id": 23900
+        },
+        {
+          "name": "Adobe",
+          "global_identifier": "Adobe",
+          "name_en": "Adobe",
+          "brand_id": 23902
+        },
+        {
+          "name": "Adora",
+          "global_identifier": "Adora",
+          "name_en": "Adora",
+          "brand_id": 23903
+        },
+        {
+          "name": "Anosa",
+          "global_identifier": "Anosa",
+          "name_en": "Anosa",
+          "brand_id": 23910
+        },
+        {
+          "name": "Apacer",
+          "global_identifier": "Apacer",
+          "name_en": "Apacer",
+          "brand_id": 23912
+        },
+        {
+          "name": "Arimino",
+          "global_identifier": "Arimino",
+          "name_en": "Arimino",
+          "brand_id": 23915
+        },
+        {
+          "name": "Ashleigh & Burwood",
+          "global_identifier": "Ashleigh & Burwood",
+          "name_en": "Ashleigh & Burwood",
+          "brand_id": 23920
+        },
+        {
+          "name": "Atlas",
+          "global_identifier": "Atlas",
+          "name_en": "Atlas",
+          "brand_id": 15114
+        },
+        {
+          "name": "Avalon Organics",
+          "global_identifier": "Avalon Organics",
+          "name_en": "Avalon Organics",
+          "brand_id": 23923
+        },
+        {
+          "name": "B-Speech",
+          "global_identifier": "B-Speech",
+          "name_en": "B-Speech",
+          "brand_id": 23931
+        },
+        {
+          "name": "Ba Wang",
+          "global_identifier": "Ba Wang",
+          "name_en": "Ba Wang",
+          "brand_id": 23932
+        },
+        {
+          "name": "BabyOrganix",
+          "global_identifier": "BabyOrganix",
+          "name_en": "BabyOrganix",
+          "brand_id": 23933
+        }
+      ],
+      "total_page": 3922,
+      "page_size": 20,
+      "total_record": 78430
+    }
+  },
+  "brands_{'primary_category_id': '10002730', 'startRow': '0', 'limit': '20'}": {
+    "ok": false,
+    "code": "MissingParameter",
+    "msg": "The input parameter “pageSize” that is mandatory for processing this request is not supplied"
+  },
+  "brands_{'startRow': '0', 'pageSize': '20', 'name': 'No Brand'}": {
+    "ok": true,
+    "data_type": "dict",
+    "keys": [
+      "enable_total",
+      "module",
+      "page_index",
+      "page_size",
+      "start_row",
+      "total_page",
+      "total_record"
+    ],
+    "len": null,
+    "sample": {
+      "enable_total": true,
+      "start_row": 0,
+      "page_index": 1,
+      "module": [
+        {
+          "name": "test123123",
+          "global_identifier": "test123123",
+          "name_en": "test carmen",
+          "brand_id": 23885
+        },
+        {
+          "name": "2K Games",
+          "global_identifier": "2K Games",
+          "name_en": "2K Games",
+          "brand_id": 23886
+        },
+        {
+          "name": "3D Crystal Puzzle",
+          "global_identifier": "3D Crystal Puzzle",
+          "name_en": "3D Crystal Puzzle",
+          "brand_id": 23887
+        },
+        {
+          "name": "3M",
+          "global_identifier": "3M",
+          "name_en": "3M",
+          "brand_id": 23888
+        },
+        {
+          "name": "AGIP",
+          "global_identifier": "AGIP",
+          "name_en": "AGIP",
+          "brand_id": 127387001
+        },
+        {
+          "name": "ALLIANCE",
+          "global_identifier": "ALLIANCE",
+          "name_en": "ALLIANCE",
+          "brand_id": 23893
+        },
+        {
+          "name": "Automoblox",
+          "global_identifier": "Automoblox",
+          "name_en": "Automoblox",
+          "brand_id": 23896
+        },
+        {
+          "name": "Active Care Plus",
+          "global_identifier": "Active Care Plus",
+          "name_en": "Active Care Plus",
+          "brand_id": 23899
+        },
+        {
+          "name": "Active Pure",
+          "global_identifier": "Active Pure",
+          "name_en": "Active Pure",
+          "brand_id": 23900
+        },
+        {
+          "name": "Adobe",
+          "global_identifier": "Adobe",
+          "name_en": "Adobe",
+          "brand_id": 23902
+        },
+        {
+          "name": "Adora",
+          "global_identifier": "Adora",
+          "name_en": "Adora",
+          "brand_id": 23903
+        },
+        {
+          "name": "Anosa",
+          "global_identifier": "Anosa",
+          "name_en": "Anosa",
+          "brand_id": 23910
+        },
+        {
+          "name": "Apacer",
+          "global_identifier": "Apacer",
+          "name_en": "Apacer",
+          "brand_id": 23912
+        },
+        {
+          "name": "Arimino",
+          "global_identifier": "Arimino",
+          "name_en": "Arimino",
+          "brand_id": 23915
+        },
+        {
+          "name": "Ashleigh & Burwood",
+          "global_identifier": "Ashleigh & Burwood",
+          "name_en": "Ashleigh & Burwood",
+          "brand_id": 23920
+        },
+        {
+          "name": "Atlas",
+          "global_identifier": "Atlas",
+          "name_en": "Atlas",
+          "brand_id": 15114
+        },
+        {
+          "name": "Avalon Organics",
+          "global_identifier": "Avalon Organics",
+          "name_en": "Avalon Organics",
+          "brand_id": 23923
+        },
+        {
+          "name": "B-Speech",
+          "global_identifier": "B-Speech",
+          "name_en": "B-Speech",
+          "brand_id": 23931
+        },
+        {
+          "name": "Ba Wang",
+          "global_identifier": "Ba Wang",
+          "name_en": "Ba Wang",
+          "brand_id": 23932
+        },
+        {
+          "name": "BabyOrganix",
+          "global_identifier": "BabyOrganix",
+          "name_en": "BabyOrganix",
+          "brand_id": 23933
+        }
+      ],
+      "total_page": 3922,
+      "page_size": 20,
+      "total_record": 78430
+    }
+  },
+  "migrate": {
+    "batch_id": "2140e7af17895736192492762e0d9a",
+    "code": "0",
+    "request_id": "2140f1fa17895736192513361",
+    "_trace_id_": "2140e7af17895736192492762e0d9a"
+  },
+  "five_sku": {
+    "item_id": 1962226787,
+    "variation": {
+      "Variation1": {
+        "name": "color_family",
+        "label": "Color family",
+        "hasImage": true,
+        "customize": false,
+        "options": [
+          "Pack of 2 Cloud",
+          "Pack of 2 Paw 1",
+          "Pack of 2 Paw 2",
+          "Pack of 2 Flower",
+          "Random 2 Pcs"
+        ]
+      }
+    },
+    "sku_count": 5,
+    "skus": [
+      {
+        "SellerSku": "TumblerStoppers-Random 2 Pcs",
+        "saleProp": {
+          "color_family": "Random 2 Pcs"
+        },
+        "price": 698.0,
+        "quantity": 10,
+        "package_weight": "0.03",
+        "package_length": "0.10",
+        "package_width": "0.20",
+        "package_height": "0.50",
+        "Images": [
+          "https://static-01.daraz.pk/p/f32c8e9146f4c4559b6c41a51ac9f53e.jpg"
+        ]
+      },
+      {
+        "SellerSku": "TumblerStoppers-Pack of 2 Flower",
+        "saleProp": {
+          "color_family": "Pack of 2 Flower"
+        },
+        "price": 698.0,
+        "quantity": 0,
+        "package_weight": "0.03",
+        "package_length": "0.10",
+        "package_width": "0.20",
+        "package_height": "0.50",
+        "Images": [
+          "https://static-01.daraz.pk/p/e45d1d5216953a8bab3934b7110db730.jpg",
+          "https://static-01.daraz.pk/p/997d618e04b5b30a626bf60218639694.jpg"
+        ]
+      },
+      {
+        "SellerSku": "TumblerStoppers-Pack of 2 Cloud",
+        "saleProp": {
+          "color_family": "Pack of 2 Cloud"
+        },
+        "price": 698.0,
+        "quantity": 9,
+        "package_weight": "0.03",
+        "package_length": "0.10",
+        "package_width": "0.20",
+        "package_height": "0.50",
+        "Images": [
+          "https://static-01.daraz.pk/p/cf6bd2cc55322df72adecbef6d610538.jpg",
+          "https://static-01.daraz.pk/p/aa8795df2c0a005cd2eb5e2db8c0f48d.jpg",
+          "https://static-01.daraz.pk/p/c869978b9978f5c8ef5d38b066be47d2.jpg",
+          "https://static-01.daraz.pk/p/2eaa60acf285ede0db8a2c116ee4cad0.jpg",
+          "https://static-01.daraz.pk/p/bc9398b40d4ff92a95ba64b1be008c40.jpg",
+          "https://static-01.daraz.pk/p/ba123eb9bee9482733289bc667a3a5f6.jpg",
+          "https://static-01.daraz.pk/p/9d5bd4a620ee08613355b5f9f40d8329.jpg",
+          "https://static-01.daraz.pk/p/9e768e9f9c1dd0c64e3b1edf90fa430b.jpg"
+        ]
+      },
+      {
+        "SellerSku": "TumblerStoppers-Pack of 2 Paw 2",
+        "saleProp": {
+          "color_family": "Pack of 2 Paw 2"
+        },
+        "price": 698.0,
+        "quantity": 9,
+        "package_weight": "0.03",
+        "package_length": "0.10",
+        "package_width": "0.20",
+        "package_height": "0.50",
+        "Images": [
+          "https://static-01.daraz.pk/p/5dae7fb0c83a7a0e26109a88e96fba52.jpg",
+          "https://static-01.daraz.pk/p/bd68ac6522c3b94a9cbf32320718f9e7.jpg",
+          "https://static-01.daraz.pk/p/6fcfc25a152debebdf8147f82dcb3aaf.jpg",
+          "https://static-01.daraz.pk/p/df0ca6b4f5b155e75ac04ef8b4f1ebf7.jpg",
+          "https://static-01.daraz.pk/p/4ebeaa531b2e0eb5d453e70d027ba13a.jpg",
+          "https://static-01.daraz.pk/p/150c6d64a96eace1f5f736e81de026e5.jpg"
+        ]
+      },
+      {
+        "SellerSku": "TumblerStoppers-Pack of 2 Paw 1",
+        "saleProp": {
+          "color_family": "Pack of 2 Paw 1"
+        },
+        "price": 698.0,
+        "quantity": 10,
+        "package_weight": "0.03",
+        "package_length": "0.10",
+        "package_width": "0.20",
+        "package_height": "0.50",
+        "Images": [
+          "https://static-01.daraz.pk/p/4f3b56f243e0b37cab5514913f77e236.jpg",
+          "https://static-01.daraz.pk/p/f533308551916e3b8f44205351b67784.jpg",
+          "https://static-01.daraz.pk/p/980bc726d44038a0a3313d43fbdd0514.jpg",
+          "https://static-01.daraz.pk/p/eedf66e28644c29f93933409fd342c87.jpg",
+          "https://static-01.daraz.pk/p/b82665c79f661f9080e087fad0ee9949.jpg",
+          "https://static-01.daraz.pk/p/0fb4bea7fca6be5d3afda04e15e6e6cf.jpg",
+          "https://static-01.daraz.pk/p/f48ddba241a719170bab900cede2eb38.jpg"
+        ]
+      }
+    ],
+    "attr_keys": [
+      "Hazmat",
+      "brand",
+      "delivery_option_sof",
+      "delivery_option_standard",
+      "description",
+      "description_en",
+      "name",
+      "name_en",
+      "promotion_whitebkg_image",
+      "short_description_en",
+      "source",
+      "utensils_barware_type"
+    ],
+    "images_count": 8,
+    "video": null,
+    "desc_has_img": true
+  },
+  "seller_sku_samples": [
+    {
+      "sku": "TumblerStoppers-Random 2 Pcs",
+      "len": 28
+    },
+    {
+      "sku": "TumblerStoppers-Pack of 2 Flower",
+      "len": 32
+    },
+    {
+      "sku": "TumblerStoppers-Pack of 2 Cloud",
+      "len": 31
+    },
+    {
+      "sku": "TumblerStoppers-Pack of 2 Paw 2",
+      "len": 31
+    },
+    {
+      "sku": "TumblerStoppers-Pack of 2 Paw 1",
+      "len": 31
+    },
+    {
+      "sku": "MTF-POPSICLE-Squishy",
+      "len": 20
+    },
+    {
+      "sku": "MTF-BUTTER-SQUISHY",
+      "len": 18
+    }
+  ]
+}

@@ -1,0 +1,1923 @@
+{
+  "generated_at": "2026-09-16T15:43:09.650106+00:00",
+  "store_id": "mtfdigitalemporiumofficial_gmail_com",
+  "api_base": "https://api.daraz.pk/rest",
+  "note": "READ-ONLY spike. CreateProduct intentionally NOT called.",
+  "calls": [
+    {
+      "label": "GET /products/get (filter=all, limit=2)",
+      "ok": true,
+      "code": "0",
+      "top_keys": [
+        "_trace_id_",
+        "code",
+        "data",
+        "request_id"
+      ],
+      "field_paths": [
+        "_trace_id_",
+        "code",
+        "data",
+        "data.products",
+        "data.products[].attributes",
+        "data.products[].attributes.Hazmat",
+        "data.products[].attributes.brand",
+        "data.products[].attributes.delivery_option_sof",
+        "data.products[].attributes.delivery_option_standard",
+        "data.products[].attributes.description",
+        "data.products[].attributes.description_en",
+        "data.products[].attributes.name",
+        "data.products[].attributes.name_en",
+        "data.products[].attributes.promotion_whitebkg_image",
+        "data.products[].attributes.short_description_en",
+        "data.products[].attributes.source",
+        "data.products[].attributes.warranty_type",
+        "data.products[].created_time",
+        "data.products[].images",
+        "data.products[].item_id",
+        "data.products[].primary_category",
+        "data.products[].skus",
+        "data.products[].skus[].Available",
+        "data.products[].skus[].Images",
+        "data.products[].skus[].SellerSku",
+        "data.products[].skus[].ShopSku",
+        "data.products[].skus[].SkuId",
+        "data.products[].skus[].Status",
+        "data.products[].skus[].Url",
+        "data.products[].skus[].channelInventories",
+        "data.products[].skus[].dropshippingStock",
+        "data.products[].skus[].fblWarehouseInventories",
+        "data.products[].skus[].fulfilmentStock",
+        "data.products[].skus[].multiWarehouseInventories",
+        "data.products[].skus[].multiWarehouseInventories[].bizCode",
+        "data.products[].skus[].multiWarehouseInventories[].bizType",
+        "data.products[].skus[].multiWarehouseInventories[].occupyQuantity",
+        "data.products[].skus[].multiWarehouseInventories[].quantity",
+        "data.products[].skus[].multiWarehouseInventories[].sellableQuantity",
+        "data.products[].skus[].multiWarehouseInventories[].totalQuantity",
+        "data.products[].skus[].multiWarehouseInventories[].warehouseCode",
+        "data.products[].skus[].multiWarehouseInventories[].warehouseType",
+        "data.products[].skus[].multiWarehouseInventories[].withholdQuantity",
+        "data.products[].skus[].occupiedStock",
+        "data.products[].skus[].package_height",
+        "data.products[].skus[].package_length",
+        "data.products[].skus[].package_weight",
+        "data.products[].skus[].package_width",
+        "data.products[].skus[].preorderStock",
+        "data.products[].skus[].price",
+        "data.products[].skus[].quantity",
+        "data.products[].skus[].saleProp",
+        "data.products[].skus[].sellableStock",
+        "data.products[].skus[].special_from_date",
+        "data.products[].skus[].special_from_time",
+        "data.products[].skus[].special_price",
+        "data.products[].skus[].special_time_format",
+        "data.products[].skus[].special_to_date",
+        "data.products[].skus[].special_to_time",
+        "data.products[].skus[].withholdingStock",
+        "data.products[].status",
+        "data.products[].updated_time",
+        "data.total_products",
+        "request_id"
+      ],
+      "sample": {
+        "data": {
+          "total_products": 408,
+          "products": [
+            {
+              "created_time": "1789323709576",
+              "updated_time": "1789323709857",
+              "images": [
+                "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+                "https://static-01.daraz.pk/p/15a8a3c6d0f4bcb686927127a4919909.png",
+                "https://static-01.daraz.pk/p/3631f45258b9cc66f0d37266944c7731.png",
+                "https://static-01.daraz.pk/p/7ca12aa1718efdfe384f4b72f60826cf.jpg",
+                "https://static-01.daraz.pk/p/d773da7a0d6e95488fd42a16b83d35ec.jpg",
+                "https://static-01.daraz.pk/p/8c43ecc83a5e7b4cee6f406a7c7bcd8f.jpg",
+                "https://static-01.daraz.pk/p/118bffaf14df514b44e0fc536cee92c3.jpg",
+                "https://static-01.daraz.pk/p/eeb02d2553212057147f5b2a636deec7.jpg"
+              ],
+              "skus": [
+                {
+                  "sellableStock": 20,
+                  "SellerSku": "MTF-POPSICLE-Squishy",
+                  "ShopSku": "1974026524_PK-14063587225",
+                  "occupiedStock": 0,
+                  "dropshippingStock": 0,
+                  "Url": "https://www.daraz.pk/products/i1974026524-s14063587225.html",
+                  "package_height": "4.00",
+                  "fblWarehouseInventories": [],
+                  "price": 1999.0,
+                  "package_length": "10.00",
+                  "special_from_date": "2026-09-13",
+                  "Available": 20,
+                  "preorderStock": 0,
+                  "special_to_date": "2035-09-28",
+                  "Status": "active",
+                  "quantity": 20,
+                  "Images": [],
+                  "special_time_format": "yyyy-MM-dd HH:mm:ss",
+                  "saleProp": {},
+                  "fulfilmentStock": 0,
+                  "multiWarehouseInventories": [
+                    {
+                      "occupyQuantity": 0,
+                      "quantity": 20,
+                      "totalQuantity": 20,
+                      "bizType": 1,
+                      "withholdQuantity": 0,
+                      "bizCode": "",
+                      "warehouseType": "dropshipping",
+                      "warehouseCode": "dropshipping",
+                      "sellableQuantity": 20
+                    }
+                  ],
+                  "package_width": "5.00",
+                  "special_to_time": "2035-09-28 23:20:03",
+                  "special_from_time": "2026-09-13 23:20:03",
+                  "special_price": 1099.0,
+                  "channelInventories": [],
+                  "package_weight": "0.08",
+                  "SkuId": 14063587225,
+                  "withholdingStock": 0
+                }
+              ],
+              "item_id": 1974026524,
+              "primary_category": 10002730,
+              "attributes": {
+                "name": "آئس کریم پوپسیکل بلائنڈ ڈبہ سکویشی کھلونا-مسٹری سکویشی کیوب ، سینسر اسکویز فجیٹ کھلونا ، بچوں اور بڑوں کے لئے تناؤ سے نجات کا کھلونا",
+                "description": "<article class=\"lzd-article\" style=\"white-space:break-spaces\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span style=\"font-weight:bold\">Discover a surprise with the Popsicle Blind Box Sensory Squishy Cube!</span><span> 🍭</span></p><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Each b…(+4394 chars)",
+                "description_en": "<article class=\"lzd-article\" style=\"white-space:break-spaces\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span style=\"font-weight:bold\">Discover a surprise with the Popsicle Blind Box Sensory Squishy Cube!</span><span> 🍭</span></p><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Each b…(+4410 chars)",
+                "name_en": "Ice Cream Popsicle Blind Box Squishy Toy – Mystery Squishy Cube, Sensory Squeeze Fidget Toy, Stress Relief Toy for Kids & Adults",
+                "short_description_en": "<article style=\"white-space:break-spaces\" class=\"lzd-article\"><ul><li><div style=\"line-height:1.7;text-align:left;text-indent:0\"><span>🍭 </span><span style=\"font-weight:bold\">Fun Popsicle Design:</span><span> Cute popsicle-shaped squishy cube with a colorful, eye-catching appearance.</span></div></li><li><div style=\"line-height:1.7;text-align:left;text-indent:0\"><span>🎁 </span><span style=\"font-we…(+1552 chars)",
+                "Hazmat": "None",
+                "warranty_type": "No Warranty",
+                "delivery_option_standard": "Yes",
+                "brand": "No Brand",
+                "promotion_whitebkg_image": [
+                  "https://static-01.daraz.pk/p/15a8a3c6d0f4bcb686927127a4919909.png"
+                ],
+                "source": "asc",
+                "delivery_option_sof": "0"
+              },
+              "status": "Active"
+            },
+            {
+              "created_time": "1789277546643",
+              "updated_time": "1789277546848",
+              "images": [
+                "https://static-01.daraz.pk/p/0ec33ef28a975ba6c020378993c3de90.png",
+                "https://static-01.daraz.pk/p/06da7eea3a01be86a521f72a5bd700c7.jpg",
+                "https://static-01.daraz.pk/p/2b2f234d184c9050479ed99bb2794984.jpg",
+                "https://static-01.daraz.pk/p/858cf10189d2e032a0946c1fa3beecad.jpg",
+                "https://static-01.daraz.pk/p/945d71df3c84601b4e7f97d06f173927.jpg"
+              ],
+              "skus": [
+                {
+                  "sellableStock": 12,
+                  "SellerSku": "MTF-BUTTER-SQUISHY",
+                  "ShopSku": "1973317031_PK-14063886750",
+                  "occupiedStock": 0,
+                  "dropshippingStock": 0,
+                  "Url": "https://www.daraz.pk/products/i1973317031-s14063886750.html",
+                  "package_height": "4.00",
+                  "fblWarehouseInventories": [],
+                  "price": 1999.0,
+                  "package_length": "10.00",
+                  "special_from_date": "2026-09-13",
+                  "Available": 12,
+                  "preorderStock": 0,
+                  "special_to_date": "2034-09-28",
+                  "Status": "active",
+                  "quantity": 12,
+                  "Images": [],
+                  "special_time_format": "yyyy-MM-dd HH:mm:ss",
+                  "saleProp": {},
+                  "fulfilmentStock": 0,
+                  "multiWarehouseInventories": [
+                    {
+                      "occupyQuantity": 0,
+                      "quantity": 12,
+                      "totalQuantity": 12,
+                      "bizType": 1,
+                      "withholdQuantity": 0,
+                      "bizCode": "",
+                      "warehouseType": "dropshipping",
+                      "warehouseCode": "dropshipping",
+                      "sellableQuantity": 12
+                    }
+                  ],
+                  "package_width": "4.00",
+                  "special_to_time": "2034-09-28 10:32:15",
+                  "special_from_time": "2026-09-13 10:32:15",
+                  "special_price": 1499.0,
+                  "channelInventories": [],
+                  "package_weight": "0.09",
+                  "SkuId": 14063886750,
+                  "withholdingStock": 0
+                }
+              ],
+              "item_id": 1973317031,
+              "primary_category": 10002730,
+              "attributes": {
+                "name": "اسکویشی اسٹریچ بٹر اسٹک فیجٹ ٹوائے چیز شیپ اسٹریس ریلیف گیم فنی ڈیکمپریشن پرینک سکوز ٹوائے فار اینگزائٹی ریلیف",
+                "description": "<article class=\"lzd-article\" style=\"white-space:break-spaces\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Meet the </span><span style=\"font-weight:bold\">Butter Squishy</span><span> 🧈💛 — a fun, ultra-soft sensory toy designed to look like a classic stick of butter!</span></p><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-…(+2735 chars)",
+                "description_en": "<article class=\"lzd-article\" style=\"white-space:break-spaces\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Meet the </span><span style=\"font-weight:bold\">Butter Squishy</span><span> 🧈💛 — a fun, ultra-soft sensory toy designed to look like a classic stick of butter!</span></p><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-…(+2733 chars)",
+                "name_en": "Squishy Stretch Butter Stick Fidget Toy Cheese Shape Stress Relief Game Funny Decompression Prank Squeeze Toy for Anxiety Relief",
+                "short_description_en": "<article style=\"white-space:break-spaces\" class=\"lzd-article\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Product Highlights</span></p><ul><li><div style=\"line-height:1.7;text-align:left;text-indent:0\"><span>🧈 </span><span style=\"font-weight:bold\">Realistic Butter Bar Design</span><span> – Fun butter-inspired shape with a bright yellow …(+1383 chars)",
+                "Hazmat": "None",
+                "warranty_type": "No Warranty",
+                "delivery_option_standard": "Yes",
+                "brand": "No Brand",
+                "promotion_whitebkg_image": [
+                  "https://static-01.daraz.pk/p/0ec33ef28a975ba6c020378993c3de90.png"
+                ],
+                "source": "asc",
+                "delivery_option_sof": "0"
+              },
+              "status": "Active"
+            }
+          ]
+        },
+        "code": "0",
+        "request_id": "0baf027617895733941874323",
+        "_trace_id_": "21010ebb17895733941854406eeb4e"
+      }
+    },
+    {
+      "label": "GET /product/item/get item_id=1974026524",
+      "ok": true,
+      "code": "0",
+      "top_keys": [
+        "_trace_id_",
+        "code",
+        "data",
+        "request_id"
+      ],
+      "field_paths": [
+        "_trace_id_",
+        "code",
+        "data",
+        "data.attributes",
+        "data.attributes.Hazmat",
+        "data.attributes.brand",
+        "data.attributes.delivery_option_sof",
+        "data.attributes.delivery_option_standard",
+        "data.attributes.description",
+        "data.attributes.description_en",
+        "data.attributes.name",
+        "data.attributes.name_en",
+        "data.attributes.promotion_whitebkg_image",
+        "data.attributes.short_description_en",
+        "data.attributes.source",
+        "data.attributes.video",
+        "data.attributes.warranty_type",
+        "data.created_time",
+        "data.images",
+        "data.item_id",
+        "data.marketImages",
+        "data.primary_category",
+        "data.skus",
+        "data.skus[].Available",
+        "data.skus[].Images",
+        "data.skus[].SellerSku",
+        "data.skus[].ShopSku",
+        "data.skus[].SkuId",
+        "data.skus[].Status",
+        "data.skus[].Url",
+        "data.skus[].channelInventories",
+        "data.skus[].fblWarehouseInventories",
+        "data.skus[].multiWarehouseInventories",
+        "data.skus[].multiWarehouseInventories[].bizCode",
+        "data.skus[].multiWarehouseInventories[].bizType",
+        "data.skus[].multiWarehouseInventories[].occupyQuantity",
+        "data.skus[].multiWarehouseInventories[].quantity",
+        "data.skus[].multiWarehouseInventories[].sellableQuantity",
+        "data.skus[].multiWarehouseInventories[].totalQuantity",
+        "data.skus[].multiWarehouseInventories[].warehouseCode",
+        "data.skus[].multiWarehouseInventories[].warehouseType",
+        "data.skus[].multiWarehouseInventories[].withholdQuantity",
+        "data.skus[].package_height",
+        "data.skus[].package_length",
+        "data.skus[].package_weight",
+        "data.skus[].package_width",
+        "data.skus[].price",
+        "data.skus[].quantity",
+        "data.skus[].saleProp",
+        "data.skus[].special_from_date",
+        "data.skus[].special_from_time",
+        "data.skus[].special_price",
+        "data.skus[].special_time_format",
+        "data.skus[].special_to_date",
+        "data.skus[].special_to_time",
+        "data.status",
+        "data.updated_time",
+        "data.variation",
+        "request_id"
+      ],
+      "sample": {
+        "data": {
+          "created_time": "1789323709576",
+          "updated_time": "1789323709857",
+          "images": [
+            "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png",
+            "https://static-01.daraz.pk/p/15a8a3c6d0f4bcb686927127a4919909.png",
+            "https://static-01.daraz.pk/p/3631f45258b9cc66f0d37266944c7731.png",
+            "https://static-01.daraz.pk/p/7ca12aa1718efdfe384f4b72f60826cf.jpg",
+            "https://static-01.daraz.pk/p/d773da7a0d6e95488fd42a16b83d35ec.jpg",
+            "https://static-01.daraz.pk/p/8c43ecc83a5e7b4cee6f406a7c7bcd8f.jpg",
+            "https://static-01.daraz.pk/p/118bffaf14df514b44e0fc536cee92c3.jpg",
+            "https://static-01.daraz.pk/p/eeb02d2553212057147f5b2a636deec7.jpg"
+          ],
+          "skus": [
+            {
+              "Status": "active",
+              "quantity": 20,
+              "Images": [],
+              "SellerSku": "MTF-POPSICLE-Squishy",
+              "ShopSku": "1974026524_PK-14063587225",
+              "special_time_format": "yyyy-MM-dd HH:mm:ss",
+              "Url": "https://www.daraz.pk/products/i1974026524-s14063587225.html",
+              "saleProp": {},
+              "multiWarehouseInventories": [
+                {
+                  "occupyQuantity": 0,
+                  "quantity": 20,
+                  "totalQuantity": 20,
+                  "bizType": 1,
+                  "withholdQuantity": 0,
+                  "bizCode": "",
+                  "warehouseType": "dropshipping",
+                  "warehouseCode": "dropshipping",
+                  "sellableQuantity": 20
+                }
+              ],
+              "package_width": "5.00",
+              "special_to_time": "2035-09-28 23:20:03",
+              "special_from_time": "2026-09-13 23:20:03",
+              "package_height": "4.00",
+              "fblWarehouseInventories": [],
+              "special_price": 1099.0,
+              "price": 1999.0,
+              "channelInventories": [],
+              "package_length": "10.00",
+              "special_from_date": "2026-09-13",
+              "Available": 20,
+              "package_weight": "0.08",
+              "SkuId": 14063587225,
+              "special_to_date": "2035-09-28"
+            }
+          ],
+          "item_id": 1974026524,
+          "variation": {},
+          "primary_category": 10002730,
+          "marketImages": [
+            "https://static-01.daraz.pk/p/15a8a3c6d0f4bcb686927127a4919909.png"
+          ],
+          "attributes": {
+            "name": "آئس کریم پوپسیکل بلائنڈ ڈبہ سکویشی کھلونا-مسٹری سکویشی کیوب ، سینسر اسکویز فجیٹ کھلونا ، بچوں اور بڑوں کے لئے تناؤ سے نجات کا کھلونا",
+            "description": "<article class=\"lzd-article\" style=\"white-space:break-spaces\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span style=\"font-weight:bold\">Discover a surprise with the Popsicle Blind Box Sensory Squishy Cube!</span><span> 🍭</span></p><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Each b…(+4394 chars)",
+            "video": "7100016814542",
+            "description_en": "<article class=\"lzd-article\" style=\"white-space:break-spaces\"><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span style=\"font-weight:bold\">Discover a surprise with the Popsicle Blind Box Sensory Squishy Cube!</span><span> 🍭</span></p><p style=\"line-height:1.7;text-align:left;text-indent:0;margin-left:0;margin-top:0;margin-bottom:0\"><span>Each b…(+4410 chars)",
+            "name_en": "Ice Cream Popsicle Blind Box Squishy Toy – Mystery Squishy Cube, Sensory Squeeze Fidget Toy, Stress Relief Toy for Kids & Adults",
+            "short_description_en": "<article style=\"white-space:break-spaces\" class=\"lzd-article\"><ul><li><div style=\"line-height:1.7;text-align:left;text-indent:0\"><span>🍭 </span><span style=\"font-weight:bold\">Fun Popsicle Design:</span><span> Cute popsicle-shaped squishy cube with a colorful, eye-catching appearance.</span></div></li><li><div style=\"line-height:1.7;text-align:left;text-indent:0\"><span>🎁 </span><span style=\"font-we…(+1552 chars)",
+            "Hazmat": "None",
+            "warranty_type": "No Warranty",
+            "delivery_option_standard": "Yes",
+            "brand": "No Brand",
+            "promotion_whitebkg_image": [
+              "https://static-01.daraz.pk/p/15a8a3c6d0f4bcb686927127a4919909.png"
+            ],
+            "source": "asc",
+            "delivery_option_sof": "0"
+          },
+          "status": "Active"
+        },
+        "code": "0",
+        "request_id": "210115c517895733969363666",
+        "_trace_id_": "21010b7817895733969342637eb661"
+      }
+    },
+    {
+      "label": "GET /product/item/get seller_sku=MTF-POPSICLE-Squishy",
+      "ok": false,
+      "error": "ItemId is a required parameter and must be filled in.",
+      "error_code": "4191",
+      "http_status": 200,
+      "payload": {
+        "code": "4191",
+        "type": "ISP",
+        "message": "ItemId is a required parameter and must be filled in.",
+        "request_id": "2140f1fa17895733992954304",
+        "_trace_id_": "2140c80f17895733992931409e4625"
+      }
+    },
+    {
+      "label": "GET /product/item/get foreign item_id=1000123456 (ownership probe)",
+      "ok": false,
+      "error": "E207: SKU not exist",
+      "error_code": "207",
+      "http_status": 200,
+      "payload": {
+        "code": "207",
+        "type": "ISP",
+        "message": "E207: SKU not exist",
+        "request_id": "2101055117895734018306062",
+        "_trace_id_": "21010b7d17895734018275224e41cf"
+      }
+    },
+    {
+      "label": "GET /category/tree/get",
+      "ok": true,
+      "code": "0",
+      "top_keys": [
+        "_trace_id_",
+        "code",
+        "data",
+        "request_id"
+      ],
+      "field_paths": [
+        "_trace_id_",
+        "code",
+        "data",
+        "data[].category_id",
+        "data[].children",
+        "data[].children[].category_id",
+        "data[].children[].leaf",
+        "data[].children[].name",
+        "data[].children[].var",
+        "data[].leaf",
+        "data[].name",
+        "data[].var",
+        "request_id"
+      ],
+      "sample": {
+        "data": [
+          {
+            "children": [
+              {
+                "var": false,
+                "name": "Mobiles",
+                "leaf": true,
+                "category_id": 3
+              },
+              {
+                "var": false,
+                "name": "Tablets",
+                "leaf": true,
+                "category_id": 7
+              },
+              {
+                "var": false,
+                "name": "Gadgets",
+                "leaf": true,
+                "category_id": 48
+              },
+              {
+                "var": false,
+                "name": "Landline Phones",
+                "leaf": true,
+                "category_id": 49
+              },
+              {
+                "var": false,
+                "name": "Insurance & Protection",
+                "leaf": true,
+                "category_id": 10003072
+              },
+              "…(+6 more)"
+            ],
+            "var": false,
+            "name": "Mobiles & Tablets",
+            "leaf": false,
+            "category_id": 2
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Traditional Laptops",
+                    "leaf": true,
+                    "category_id": 57
+                  },
+                  {
+                    "var": false,
+                    "name": "Macbooks",
+                    "leaf": true,
+                    "category_id": 7902
+                  }
+                ],
+                "var": false,
+                "name": "Laptops",
+                "leaf": false,
+                "category_id": 55
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "All-In-One",
+                    "leaf": true,
+                    "category_id": 5638
+                  },
+                  {
+                    "var": false,
+                    "name": "Towers",
+                    "leaf": true,
+                    "category_id": 20000401
+                  }
+                ],
+                "var": false,
+                "name": "Desktops Computers",
+                "leaf": false,
+                "category_id": 61
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Gadgets",
+                    "leaf": true,
+                    "category_id": 79
+                  },
+                  {
+                    "var": false,
+                    "name": "Laptop Batteries",
+                    "leaf": true,
+                    "category_id": 87
+                  },
+                  {
+                    "var": false,
+                    "name": "Blank Media",
+                    "leaf": true,
+                    "category_id": 88
+                  },
+                  {
+                    "var": false,
+                    "name": "Cooling PadsCooling Stands",
+                    "leaf": true,
+                    "category_id": 89
+                  },
+                  {
+                    "var": false,
+                    "name": "External DVD Writers",
+                    "leaf": true,
+                    "category_id": 90
+                  },
+                  "…(+21 more)"
+                ],
+                "var": false,
+                "name": "Computer Accessories",
+                "leaf": false,
+                "category_id": 78
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Desktop Casings",
+                    "leaf": true,
+                    "category_id": 108
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Cooling Fans",
+                        "leaf": true,
+                        "category_id": 111
+                      },
+                      {
+                        "var": false,
+                        "name": "Heatsinks",
+                        "leaf": true,
+                        "category_id": 112
+                      }
+                    ],
+                    "var": false,
+                    "name": "Fans & Heatsinks",
+                    "leaf": false,
+                    "category_id": 110
+                  },
+                  {
+                    "var": false,
+                    "name": "Graphic Cards",
+                    "leaf": true,
+                    "category_id": 113
+                  },
+                  {
+                    "var": false,
+                    "name": "Front Bay Devices",
+                    "leaf": true,
+                    "category_id": 115
+                  },
+                  {
+                    "var": false,
+                    "name": "Motherboards",
+                    "leaf": true,
+                    "category_id": 116
+                  },
+                  "…(+6 more)"
+                ],
+                "var": false,
+                "name": "Computer Components",
+                "leaf": false,
+                "category_id": 107
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Network Gadgets",
+                    "leaf": true,
+                    "category_id": 122
+                  },
+                  {
+                    "var": false,
+                    "name": "Homeplugs & Powerlines",
+                    "leaf": true,
+                    "category_id": 123
+                  },
+                  {
+                    "var": false,
+                    "name": "Access Points",
+                    "leaf": true,
+                    "category_id": 124
+                  },
+                  {
+                    "var": false,
+                    "name": "Data Cards",
+                    "leaf": true,
+                    "category_id": 126
+                  },
+                  {
+                    "var": false,
+                    "name": "Network Interface Cards",
+                    "leaf": true,
+                    "category_id": 127
+                  },
+                  "…(+8 more)"
+                ],
+                "var": false,
+                "name": "Network Components",
+                "leaf": false,
+                "category_id": 121
+              },
+              "…(+10 more)"
+            ],
+            "var": false,
+            "name": "Computers & Laptops",
+            "leaf": false,
+            "category_id": 54
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Cables",
+                        "leaf": true,
+                        "category_id": 150
+                      },
+                      {
+                        "var": false,
+                        "name": "Cases and Covers",
+                        "leaf": true,
+                        "category_id": 151
+                      },
+                      {
+                        "var": false,
+                        "name": "Microphones",
+                        "leaf": true,
+                        "category_id": 152
+                      },
+                      {
+                        "var": false,
+                        "name": "Screen Guards",
+                        "leaf": true,
+                        "category_id": 153
+                      },
+                      {
+                        "var": false,
+                        "name": "Others",
+                        "leaf": true,
+                        "category_id": 5695
+                      },
+                      {
+                        "var": false,
+                        "name": "Armband",
+                        "leaf": true,
+                        "category_id": 7478
+                      },
+                      {
+                        "var": false,
+                        "name": "Mounting kit",
+                        "leaf": true,
+                        "category_id": 7479
+                      },
+                      {
+                        "var": false,
+                        "name": "Chargers",
+                        "leaf": true,
+                        "category_id": 7480
+                      }
+                    ],
+                    "var": false,
+                    "name": "Audio Accessories",
+                    "leaf": false,
+                    "category_id": 149
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "In-Ear Headphones",
+                        "leaf": true,
+                        "category_id": 155
+                      },
+                      {
+                        "var": false,
+                        "name": "Over-The-Ear Headphones",
+                        "leaf": true,
+                        "category_id": 156
+                      },
+                      {
+                        "var": false,
+                        "name": "On-ear Headphones",
+                        "leaf": true,
+                        "category_id": 157
+                      },
+                      {
+                        "var": false,
+                        "name": "Bluetooth Headsets",
+                        "leaf": true,
+                        "category_id": 158
+                      },
+                      {
+                        "var": false,
+                        "name": "Wired Headsets",
+                        "leaf": true,
+                        "category_id": 159
+                      },
+                      {
+                        "var": false,
+                        "name": "Mono Headsets",
+                        "leaf": true,
+                        "category_id": 9707
+                      },
+                      {
+                        "var": false,
+                        "name": "Wireless Earbuds",
+                        "leaf": true,
+                        "category_id": 9708
+                      },
+                      {
+                        "var": false,
+                        "name": "Headphones & Headsets Accessories",
+                        "leaf": true,
+                        "category_id": 9709
+                      }
+                    ],
+                    "var": false,
+                    "name": "Headphones & Headsets",
+                    "leaf": false,
+                    "category_id": 154
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Cd Player",
+                        "leaf": true,
+                        "category_id": 161
+                      },
+                      {
+                        "var": false,
+                        "name": "Docking Stations",
+                        "leaf": true,
+                        "category_id": 162
+                      },
+                      {
+                        "var": false,
+                        "name": "FM",
+                        "leaf": true,
+                        "category_id": 163
+                      },
+                      {
+                        "var": false,
+                        "name": "Hi-Fi Systems",
+                        "leaf": true,
+                        "category_id": 164
+                      },
+                      {
+                        "var": false,
+                        "name": "Home Audio & Mp3 Players Accessories",
+                        "leaf": true,
+                        "category_id": 165
+                      },
+                      "…(+6 more)"
+                    ],
+                    "var": false,
+                    "name": "Home Audio",
+                    "leaf": false,
+                    "category_id": 160
+                  },
+                  {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "var": false,
+                            "name": "Cases and Covers",
+                            "leaf": true,
+                            "category_id": 183
+                          },
+                          {
+                            "var": false,
+                            "name": "Screen Guards",
+                            "leaf": true,
+                            "category_id": 184
+                          }
+                        ],
+                        "var": false,
+                        "name": "MP3 Player Accessories",
+                        "leaf": false,
+                        "category_id": 182
+                      },
+                      {
+                        "var": false,
+                        "name": "iPods",
+                        "leaf": true,
+                        "category_id": 185
+                      },
+                      {
+                        "var": false,
+                        "name": "MP3/MP4",
+                        "leaf": true,
+                        "category_id": 186
+                      },
+                      {
+                        "var": false,
+                        "name": "MP4  Video MP3 Players",
+                        "leaf": true,
+                        "category_id": 187
+                      },
+                      {
+                        "var": false,
+                        "name": "Radio & CD players",
+                        "leaf": true,
+                        "category_id": 9710
+                      },
+                      {
+                        "var": false,
+                        "name": "Voice Recorders",
+                        "leaf": true,
+                        "category_id": 9711
+                      },
+                      {
+                        "var": false,
+                        "name": "Portable Audio Accessories",
+                        "leaf": true,
+                        "category_id": 9712
+                      }
+                    ],
+                    "var": false,
+                    "name": "Portable Players",
+                    "leaf": false,
+                    "category_id": 181
+                  },
+                  {
+                    "var": false,
+                    "name": "Dictaphones",
+                    "leaf": true,
+                    "category_id": 5724
+                  },
+                  "…(+9 more)"
+                ],
+                "var": false,
+                "name": "Audio",
+                "leaf": false,
+                "category_id": 148
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Blu Ray & DVD Players",
+                    "leaf": true,
+                    "category_id": 189
+                  },
+                  {
+                    "var": false,
+                    "name": "Projectors",
+                    "leaf": true,
+                    "category_id": 194
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Cables",
+                        "leaf": true,
+                        "category_id": 206
+                      },
+                      {
+                        "var": false,
+                        "name": "Remote Controllers",
+                        "leaf": true,
+                        "category_id": 207
+                      },
+                      {
+                        "var": false,
+                        "name": "Video Glasses",
+                        "leaf": true,
+                        "category_id": 208
+                      },
+                      {
+                        "var": false,
+                        "name": "Voltage Stabilizers & Guards",
+                        "leaf": true,
+                        "category_id": 209
+                      },
+                      {
+                        "var": false,
+                        "name": "Internet add on for TV",
+                        "leaf": true,
+                        "category_id": 5906
+                      }
+                    ],
+                    "var": false,
+                    "name": "Video Accessories",
+                    "leaf": false,
+                    "category_id": 205
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Streaming Media Players",
+                        "leaf": true,
+                        "category_id": 9781
+                      },
+                      {
+                        "var": false,
+                        "name": "Hard Drive Media Players",
+                        "leaf": true,
+                        "category_id": 9782
+                      }
+                    ],
+                    "var": false,
+                    "name": "Media Players",
+                    "leaf": false,
+                    "category_id": 5897
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Projector Screens",
+                        "leaf": true,
+                        "category_id": 9784
+                      },
+                      {
+                        "var": false,
+                        "name": "Projector Cases & Bags",
+                        "leaf": true,
+                        "category_id": 9785
+                      },
+                      {
+                        "var": false,
+                        "name": "Projector Mounts",
+                        "leaf": true,
+                        "category_id": 9786
+                      },
+                      {
+                        "var": false,
+                        "name": "Other Projector Accessories",
+                        "leaf": true,
+                        "category_id": 9787
+                      }
+                    ],
+                    "var": false,
+                    "name": "Projector Accessories",
+                    "leaf": false,
+                    "category_id": 9783
+                  }
+                ],
+                "var": false,
+                "name": "Video",
+                "leaf": false,
+                "category_id": 188
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "3D Televisions",
+                    "leaf": true,
+                    "category_id": 199
+                  },
+                  {
+                    "var": false,
+                    "name": "CRT Televisions",
+                    "leaf": true,
+                    "category_id": 200
+                  },
+                  {
+                    "var": false,
+                    "name": "LCD Televisions",
+                    "leaf": true,
+                    "category_id": 201
+                  },
+                  {
+                    "var": false,
+                    "name": "LED Televisions",
+                    "leaf": true,
+                    "category_id": 202
+                  },
+                  {
+                    "var": false,
+                    "name": "Plasma Televisions",
+                    "leaf": true,
+                    "category_id": 203
+                  },
+                  "…(+7 more)"
+                ],
+                "var": false,
+                "name": "Televisions",
+                "leaf": false,
+                "category_id": 198
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Video Glasses",
+                    "leaf": true,
+                    "category_id": 211
+                  },
+                  {
+                    "var": false,
+                    "name": "Health & Fitness",
+                    "leaf": true,
+                    "category_id": 5871
+                  },
+                  {
+                    "var": false,
+                    "name": "Others",
+                    "leaf": true,
+                    "category_id": 5876
+                  },
+                  {
+                    "var": false,
+                    "name": "Laser pointers",
+                    "leaf": true,
+                    "category_id": 7503
+                  },
+                  {
+                    "var": false,
+                    "name": "Metal detectors",
+                    "leaf": true,
+                    "category_id": 7504
+                  },
+                  {
+                    "var": false,
+                    "name": "Dictionaries & translators",
+                    "leaf": true,
+                    "category_id": 7505
+                  },
+                  {
+                    "var": false,
+                    "name": "Universal Chargers",
+                    "leaf": true,
+                    "category_id": 9779
+                  },
+                  {
+                    "var": false,
+                    "name": "Walkie-Talkies",
+                    "leaf": true,
+                    "category_id": 9780
+                  }
+                ],
+                "var": false,
+                "name": "Gadgets",
+                "leaf": false,
+                "category_id": 210
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Soundbar Speakers",
+                        "leaf": true,
+                        "category_id": 7525
+                      },
+                      {
+                        "var": false,
+                        "name": "Subwoofers",
+                        "leaf": true,
+                        "category_id": 7526
+                      },
+                      {
+                        "var": false,
+                        "name": "Bookshelf speakers",
+                        "leaf": true,
+                        "category_id": 7527
+                      },
+                      {
+                        "var": false,
+                        "name": "Center-Channel Speakers",
+                        "leaf": true,
+                        "category_id": 7528
+                      },
+                      {
+                        "var": false,
+                        "name": "Floorstanding speakers",
+                        "leaf": true,
+                        "category_id": 7529
+                      },
+                      {
+                        "var": false,
+                        "name": "Satellite speakers",
+                        "leaf": true,
+                        "category_id": 7530
+                      }
+                    ],
+                    "var": false,
+                    "name": "Speakers",
+                    "leaf": false,
+                    "category_id": 7521
+                  }
+                ],
+                "var": false,
+                "name": "Home Audio & Theater",
+                "leaf": false,
+                "category_id": 5927
+              },
+              "…(+8 more)"
+            ],
+            "var": false,
+            "name": "TV, Audio / Video, Gaming & Wearables",
+            "leaf": false,
+            "category_id": 147
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Point & Shoot",
+                    "leaf": true,
+                    "category_id": 8207
+                  },
+                  {
+                    "var": false,
+                    "name": "Underwater Digital Cameras",
+                    "leaf": true,
+                    "category_id": 8208
+                  }
+                ],
+                "var": false,
+                "name": "Point & Shoot",
+                "leaf": false,
+                "category_id": 241
+              },
+              {
+                "var": false,
+                "name": "Bridge",
+                "leaf": true,
+                "category_id": 242
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Sets",
+                    "leaf": true,
+                    "category_id": 5883
+                  },
+                  {
+                    "var": false,
+                    "name": "Body Only",
+                    "leaf": true,
+                    "category_id": 5884
+                  }
+                ],
+                "var": false,
+                "name": "DSLR",
+                "leaf": false,
+                "category_id": 243
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Instant Cameras",
+                    "leaf": true,
+                    "category_id": 9593
+                  },
+                  {
+                    "var": false,
+                    "name": "Instant Camera Films",
+                    "leaf": true,
+                    "category_id": 9594
+                  },
+                  {
+                    "var": false,
+                    "name": "Instant Camera Accessories",
+                    "leaf": true,
+                    "category_id": 9595
+                  }
+                ],
+                "var": false,
+                "name": "Instant Camera",
+                "leaf": false,
+                "category_id": 244
+              },
+              {
+                "var": false,
+                "name": "Mirrorless",
+                "leaf": true,
+                "category_id": 245
+              },
+              "…(+7 more)"
+            ],
+            "var": false,
+            "name": "Cameras",
+            "leaf": false,
+            "category_id": 240
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Blenders",
+                        "leaf": true,
+                        "category_id": 278
+                      },
+                      {
+                        "var": false,
+                        "name": "Mixers",
+                        "leaf": true,
+                        "category_id": 280
+                      },
+                      {
+                        "var": false,
+                        "name": "Grinders",
+                        "leaf": true,
+                        "category_id": 281
+                      },
+                      {
+                        "var": false,
+                        "name": "Food Processors",
+                        "leaf": true,
+                        "category_id": 5921
+                      },
+                      {
+                        "var": false,
+                        "name": "Choppers",
+                        "leaf": true,
+                        "category_id": 20000397
+                      },
+                      {
+                        "var": false,
+                        "name": "Portable Blender",
+                        "leaf": true,
+                        "category_id": 20000396
+                      }
+                    ],
+                    "var": false,
+                    "name": "Food Preparation",
+                    "leaf": false,
+                    "category_id": 277
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Electric Kettles",
+                        "leaf": true,
+                        "category_id": 289
+                      },
+                      {
+                        "var": false,
+                        "name": "Thermo Pots",
+                        "leaf": true,
+                        "category_id": 290
+                      }
+                    ],
+                    "var": false,
+                    "name": "Electric Kettles & Thermo Pots",
+                    "leaf": false,
+                    "category_id": 288
+                  },
+                  {
+                    "var": false,
+                    "name": "Juicers & Fruit Extractors",
+                    "leaf": true,
+                    "category_id": 305
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Bread Makers",
+                        "leaf": true,
+                        "category_id": 321
+                      },
+                      {
+                        "var": false,
+                        "name": "Pasta & Noodle Makers",
+                        "leaf": true,
+                        "category_id": 324
+                      },
+                      {
+                        "var": false,
+                        "name": "Other Cookware",
+                        "leaf": true,
+                        "category_id": 326
+                      },
+                      {
+                        "var": false,
+                        "name": "Egg Boilers",
+                        "leaf": true,
+                        "category_id": 10000285
+                      },
+                      {
+                        "var": false,
+                        "name": "Pizza Maker",
+                        "leaf": true,
+                        "category_id": 10000286
+                      },
+                      "…(+20 more)"
+                    ],
+                    "var": false,
+                    "name": "Other Small Kitchen Appliances",
+                    "leaf": false,
+                    "category_id": 320
+                  },
+                  {
+                    "var": false,
+                    "name": "Electric Woks",
+                    "leaf": true,
+                    "category_id": 10000280
+                  },
+                  "…(+14 more)"
+                ],
+                "var": false,
+                "name": "Small Kitchen Appliances",
+                "leaf": false,
+                "category_id": 276
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Air Curtain",
+                        "leaf": true,
+                        "category_id": 10000304
+                      },
+                      {
+                        "var": false,
+                        "name": "Air Conditioners",
+                        "leaf": true,
+                        "category_id": 10000301
+                      },
+                      {
+                        "var": false,
+                        "name": "Air Conditioner Parts & Accessories",
+                        "leaf": true,
+                        "category_id": 10000302
+                      },
+                      {
+                        "var": false,
+                        "name": "Air Coolers",
+                        "leaf": true,
+                        "category_id": 10000303
+                      }
+                    ],
+                    "var": false,
+                    "name": "Air Conditioning",
+                    "leaf": false,
+                    "category_id": 358
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Air Purifiers",
+                        "leaf": true,
+                        "category_id": 360
+                      },
+                      {
+                        "var": false,
+                        "name": "Dehumidifiers",
+                        "leaf": true,
+                        "category_id": 361
+                      },
+                      {
+                        "var": false,
+                        "name": "Humidifiers",
+                        "leaf": true,
+                        "category_id": 362
+                      }
+                    ],
+                    "var": false,
+                    "name": "Air Treatment",
+                    "leaf": false,
+                    "category_id": 359
+                  },
+                  {
+                    "var": false,
+                    "name": "Fans",
+                    "leaf": true,
+                    "category_id": 363
+                  },
+                  {
+                    "var": false,
+                    "name": "Heaters",
+                    "leaf": true,
+                    "category_id": 370
+                  },
+                  {
+                    "var": false,
+                    "name": "Water Heaters",
+                    "leaf": true,
+                    "category_id": 371
+                  },
+                  {
+                    "var": false,
+                    "name": "Exhaust Fans",
+                    "leaf": true,
+                    "category_id": 5684
+                  },
+                  {
+                    "var": false,
+                    "name": "Portable Air Conditioning & Treatment",
+                    "leaf": true,
+                    "category_id": 20000412
+                  },
+                  {
+                    "children": [
+                      {
+                        "var": false,
+                        "name": "Table Fans",
+                        "leaf": true,
+                        "category_id": 62422216
+                      },
+                      {
+                        "var": false,
+                        "name": "Ceiling Fans",
+                        "leaf": true,
+                        "category_id": 62422212
+                      },
+                      {
+                        "var": false,
+                        "name": "Mini Fans",
+                        "leaf": true,
+                        "category_id": 62422213
+                      },
+                      {
+                        "var": false,
+                        "name": "Other Fans",
+                        "leaf": true,
+                        "category_id": 62422214
+                      },
+                      {
+                        "var": false,
+                        "name": "Stand Fans",
+                        "leaf": true,
+                        "category_id": 62422215
+                      }
+                    ],
+                    "var": false,
+                    "name": "Fan",
+                    "leaf": false,
+                    "category_id": 62422211
+                  }
+                ],
+                "var": false,
+                "name": "Cooling & Heating",
+                "leaf": false,
+                "category_id": 357
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Irons",
+                    "leaf": true,
+                    "category_id": 373
+                  },
+                  {
+                    "var": false,
+                    "name": "Garment Steamers",
+                    "leaf": true,
+                    "category_id": 376
+                  },
+                  {
+                    "var": false,
+                    "name": "Garment Presses",
+                    "leaf": true,
+                    "category_id": 10000307
+                  }
+                ],
+                "var": false,
+                "name": "Irons & Garment Steamers",
+                "leaf": false,
+                "category_id": 372
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Voltage Stabilizers",
+                    "leaf": true,
+                    "category_id": 392
+                  },
+                  {
+                    "var": false,
+                    "name": "Window Cleaners",
+                    "leaf": true,
+                    "category_id": 393
+                  },
+                  {
+                    "var": false,
+                    "name": "Steam Mops",
+                    "leaf": true,
+                    "category_id": 10000308
+                  },
+                  {
+                    "var": false,
+                    "name": "Electric Brooms",
+                    "leaf": true,
+                    "category_id": 10000309
+                  },
+                  {
+                    "var": false,
+                    "name": "Floor Polishers",
+                    "leaf": true,
+                    "category_id": 10000310
+                  },
+                  {
+                    "var": false,
+                    "name": "Vacuum Cleaners",
+                    "leaf": true,
+                    "category_id": 20000371
+                  }
+                ],
+                "var": false,
+                "name": "Vacuums & Floor Care",
+                "leaf": false,
+                "category_id": 380
+              },
+              {
+                "children": [
+                  {
+                    "var": false,
+                    "name": "Refrigerators",
+                    "leaf": true,
+                    "category_id": 10000316
+                  },
+                  {
+                    "var": false,
+                    "name": "Freezers",
+                    "leaf": true,
+                    "category_id": 10000317
+                  },
+                  {
+                    "var": false,
+                    "name": "Wine Cellars",
+                    "leaf": true,
+                    "category_id": 10000318
+                  },
+                  {
+                    "var": false,
+                    "name": "Warming Drawers",
+                    "leaf": true,
+                    "category_id": 10000320
+                  },
+                  {
+                    "var": false,
+                    "name": "Cooktops & Ranges",
+                    "leaf": true,
+                    "category_id": 10000321
+                  },
+                  "…(+8 more)"
+                ],
+                "var": false,
+                "name": "Kitchen Appliances",
+                "leaf": false,
+                "category_id": 10000272
+              },
+              "…(+4 more)"
+            ],
+            "var": false,
+            "name": "Home Appliances",
+            "leaf": false,
+            "category_id": 275
+          },
+          "…(+28 more)"
+        ],
+        "code": "0",
+        "request_id": "0baf027617895734041584404",
+        "_trace_id_": "2101297617895734041567239e9ea9"
+      }
+    },
+    {
+      "label": "GET /category/attributes/get primary_category_id=3",
+      "ok": true,
+      "code": "0",
+      "top_keys": [
+        "_trace_id_",
+        "code",
+        "data",
+        "request_id"
+      ],
+      "field_paths": [
+        "_trace_id_",
+        "code",
+        "data",
+        "data[].advanced",
+        "data[].advanced.is_key_prop",
+        "data[].attribute_type",
+        "data[].id",
+        "data[].input_type",
+        "data[].is_mandatory",
+        "data[].is_sale_prop",
+        "data[].label",
+        "data[].name",
+        "request_id"
+      ],
+      "sample": {
+        "data": [
+          {
+            "advanced": {
+              "is_key_prop": 0
+            },
+            "is_sale_prop": 0,
+            "name": "name",
+            "input_type": "text",
+            "is_mandatory": 1,
+            "attribute_type": "normal",
+            "label": "Name",
+            "id": 1
+          },
+          {
+            "advanced": {
+              "is_key_prop": 0
+            },
+            "is_sale_prop": 0,
+            "name": "short_description",
+            "input_type": "richText",
+            "is_mandatory": 1,
+            "attribute_type": "normal",
+            "label": "Highlights",
+            "id": 3
+          },
+          {
+            "advanced": {
+              "is_key_prop": 0
+            },
+            "is_sale_prop": 0,
+            "name": "description",
+            "input_type": "richText",
+            "is_mandatory": 0,
+            "attribute_type": "normal",
+            "label": "Product Description",
+            "id": 4
+          },
+          {
+            "advanced": {
+              "is_key_prop": 0
+            },
+            "is_sale_prop": 0,
+            "name": "video",
+            "input_type": "text",
+            "is_mandatory": 0,
+            "attribute_type": "normal",
+            "label": "Video URL",
+            "id": 5
+          },
+          {
+            "advanced": {
+              "is_key_prop": 0
+            },
+            "is_sale_prop": 0,
+            "name": "__images__",
+            "input_type": "img",
+            "is_mandatory": 0,
+            "attribute_type": "sku",
+            "label": "Images",
+            "id": 40000
+          },
+          "…(+67 more)"
+        ],
+        "code": "0",
+        "request_id": "0baf027617895734084644440",
+        "_trace_id_": "2101442a17895734084626802e8c74"
+      }
+    },
+    {
+      "label": "GET /category/brands/get (or /brands/get)",
+      "ok": false,
+      "error": "The specified API Path is invalid",
+      "error_code": "InvalidApiPath",
+      "http_status": 200,
+      "payload": {
+        "type": "ISV",
+        "code": "InvalidApiPath",
+        "message": "The specified API Path is invalid",
+        "request_id": "2101578317895734115232925",
+        "_trace_id_": "2140e7c617895734115215593e2297"
+      }
+    },
+    {
+      "label": "GET /brands/get",
+      "ok": false,
+      "error": "The specified API Path is invalid",
+      "error_code": "InvalidApiPath",
+      "http_status": 200,
+      "payload": {
+        "type": "ISV",
+        "code": "InvalidApiPath",
+        "message": "The specified API Path is invalid",
+        "request_id": "2140f1fa17895734137194421",
+        "_trace_id_": "2140e85217895734137178068e8723"
+      }
+    },
+    {
+      "label": "POST /images/migrate (permission probe, empty payload)",
+      "ok": false,
+      "error": "The request signature does not conform to platform standards",
+      "error_code": "IncompleteSignature",
+      "http_status": 200,
+      "payload": {
+        "type": "ISV",
+        "code": "IncompleteSignature",
+        "message": "The request signature does not conform to platform standards",
+        "request_id": "210115c517895734160873868",
+        "_trace_id_": "2101442a17895734160848234e8c28"
+      }
+    },
+    {
+      "label": "POST /image/migrate (alternate path probe)",
+      "ok": false,
+      "error": "The request signature does not conform to platform standards",
+      "error_code": "IncompleteSignature",
+      "http_status": 200,
+      "payload": {
+        "type": "ISV",
+        "code": "IncompleteSignature",
+        "message": "The request signature does not conform to platform standards",
+        "request_id": "2101578317895734182913032",
+        "_trace_id_": "2101431e17895734182891761ed2b2"
+      }
+    },
+    {
+      "label": "POST /product/create (DENIED CREATE — empty payload permission probe only)",
+      "ok": false,
+      "error": "The request signature does not conform to platform standards",
+      "error_code": "IncompleteSignature",
+      "http_status": 200,
+      "payload": {
+        "type": "ISV",
+        "code": "IncompleteSignature",
+        "message": "The request signature does not conform to platform standards",
+        "request_id": "2101055117895734205526281",
+        "_trace_id_": "2140e7b217895734205508615e497c"
+      }
+    }
+  ],
+  "first_product_ids": {
+    "item_id": 1974026524,
+    "seller_sku": "MTF-POPSICLE-Squishy",
+    "product_top_keys": [
+      "attributes",
+      "created_time",
+      "images",
+      "item_id",
+      "primary_category",
+      "skus",
+      "status",
+      "updated_time"
+    ],
+    "sku0_keys": [
+      "Available",
+      "Images",
+      "SellerSku",
+      "ShopSku",
+      "SkuId",
+      "Status",
+      "Url",
+      "channelInventories",
+      "dropshippingStock",
+      "fblWarehouseInventories",
+      "fulfilmentStock",
+      "multiWarehouseInventories",
+      "occupiedStock",
+      "package_height",
+      "package_length",
+      "package_weight",
+      "package_width",
+      "preorderStock",
+      "price",
+      "quantity",
+      "saleProp",
+      "sellableStock",
+      "special_from_date",
+      "special_from_time",
+      "special_price",
+      "special_time_format",
+      "special_to_date",
+      "special_to_time",
+      "withholdingStock"
+    ]
+  },
+  "public_url_probes": [
+    {
+      "url": "https://www.daraz.pk/products/i1974026524.html",
+      "host_ok": true,
+      "status": 200,
+      "item_id_from_url": "1974026524",
+      "signals": {
+        "has_json_ld": true,
+        "has_window_pageData": false,
+        "has_preload_state": false,
+        "has_skuInfos": true,
+        "has_video": true,
+        "title_tag": "Ice Cream Popsicle Blind Box Squishy Toy – Mystery Squishy Cube, Sensory Squeeze Fidget Toy, Stress Relief Toy for Kids &amp; Adults | Daraz.pk",
+        "og_image": true,
+        "blocked_hint": true
+      },
+      "final_url": "https://www.daraz.pk/products/i1974026524.html",
+      "final_host": "www.daraz.pk",
+      "html_bytes": 247423,
+      "json_ld_sample": {
+        "@type": "Product",
+        "@context": "https://schema.org",
+        "name": "Ice Cream Popsicle Blind Box Squishy Toy – Mystery Squishy Cube, Sensory Squeeze Fidget Toy, Stress Relief Toy for Kids & Adults",
+        "image": [
+          "https://static-01.daraz.pk/p/b35e75a2b2609e4071729383467e6f6c.png"
+        ],
+        "category": "Toys & Games > Slime & Squishy Toys",
+        "brand": {
+          "@type": "Brand",
+          "name": "No Brand",
+          "url": "https://www.daraz.pk/no-brand/?type=brand"
+        },
+        "sku": "1974026524_PK-14063587225",
+        "mpn": 1974026524,
+        "description": "🍭 Fun Popsicle Design: Cute popsicle-shaped squishy cube with a colorful, eye-catching appearance. 🎁 Mystery Blind Box: Open the box to discover a surprise popsicle design/color.  🤲 Satisfying to Squeeze: Soft, squeezable texture makes it enjoyable for repetitive squeezing and fidgeting.  🧘 Sensory & Stress Relief: Great for sensory play, relaxation, and keeping hands occupied.  🌈 Colorful & Colle…(+1329 chars)",
+        "url": "https://www.daraz.pk/products/ice-cream-popsicle-blind-box-squishy-toy-mystery-squishy-cube-sensory-squeeze-fidget-toy-stress-relief-toy-for-kids-adults-i1974026524.html",
+        "offers": {
+          "@type": "AggregateOffer",
+          "availability": "https://schema.org/InStock",
+          "url": "https://www.daraz.pk/products/ice-cream-popsicle-blind-box-squishy-toy-mystery-squishy-cube-sensory-squeeze-fidget-toy-stress-relief-toy-for-kids-adults-i1974026524.html",
+          "seller": {
+            "@type": "Organization",
+            "name": ""
+          },
+          "hasMerchantReturnPolicy": {
+            "@type": "MerchantReturnPolicy",
+            "applicableCountry": "PK",
+            "returnPolicyCategory": "https://schema.org/MerchantReturnNotPermitted"
+          }
+        }
+      }
+    },
+    {
+      "url": "https://www.daraz.pk/products/sample-product-i123456789-s123456789.html",
+      "host_ok": true,
+      "status": 404,
+      "item_id_from_url": "123456789",
+      "signals": {
+        "has_json_ld": false,
+        "has_window_pageData": false,
+        "has_preload_state": false,
+        "has_skuInfos": false,
+        "has_video": true,
+        "title_tag": "error",
+        "og_image": false,
+        "blocked_hint": true
+      },
+      "final_url": "https://www.daraz.pk/products/sample-product-i123456789-s123456789.html",
+      "final_host": "www.daraz.pk",
+      "html_bytes": 142990
+    }
+  ]
+}

@@ -9,12 +9,12 @@ import { ShippingPage } from "@/pages/ShippingPage";
 import { StoresPage } from "@/pages/StoresPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { OrdersPage } from "@/pages/OrdersPage";
+import { ProductsPage } from "@/pages/ProductsPage";
 import {
   AnalyticsPage,
   ConnectionsPage,
   FinancePage,
   InventoryPage,
-  ProductsPage,
 } from "@/pages/PlaceholderPages";
 
 export default function App() {

@@ -340,7 +340,12 @@ def sync_workspace_orders(
 
     When ``days`` is set and no explicit window is provided, uses
     ``created_after = now - days`` for a broader initial pull.
+
+    Stores sync with bounded concurrency (2) — item hydration remains the
+    dominant cost when ``include_items=True``.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     repo = get_repo()
     all_stores = repo.list_stores(workspace_id)
     if store_ids is not None:
@@ -361,10 +366,12 @@ def sync_workspace_orders(
     if days is not None and not update_after and not created_after:
         created_after = _iso_ago(int(days))
 
-    results = []
-    for store in stores:
-        results.append(
-            sync_store_orders(
+    results: list[dict[str, Any]] = []
+    workers = min(2, max(1, len(stores)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [
+            pool.submit(
+                sync_store_orders,
                 workspace_id,
                 store,
                 update_after=update_after,
@@ -372,11 +379,17 @@ def sync_workspace_orders(
                 status=status,
                 include_items=include_items,
             )
-        )
+            for store in stores
+        ]
+        for fut in as_completed(futs):
+            results.append(fut.result())
+
     ok = sum(1 for r in results if r.get("sync_status") == "ok")
     return {
         "stores": len(results),
         "ok": ok,
         "failed": len(results) - ok,
         "results": results,
+        "concurrency": workers,
+        "include_items": include_items,
     }

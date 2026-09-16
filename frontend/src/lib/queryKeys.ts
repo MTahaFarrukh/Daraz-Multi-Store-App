@@ -72,12 +72,27 @@ export const queryKeys = {
   orderDetail: (workspaceId: string, orderId: string) =>
     ["workspace", workspaceId, "order-detail", orderId] as const,
 
-  // Future Phase 3+ (not implemented):
-  // products: (workspaceId: string) => ["workspace", workspaceId, "products"] as const,
-  // inventory: (workspaceId: string) => ["workspace", workspaceId, "inventory"] as const,
-  // finance: (workspaceId: string) => ["workspace", workspaceId, "finance"] as const,
-  // communityPerformance: (communityId: string, year: number, month: number) =>
-  //   ["community", communityId, "performance", year, month] as const,
+  products: (workspaceId: string, filterKey: string) =>
+    ["workspace", workspaceId, "products", filterKey] as const,
+
+  product: (workspaceId: string, productId: string) =>
+    ["workspace", workspaceId, "product", productId] as const,
+
+  productDefaults: (workspaceId: string) =>
+    ["workspace", workspaceId, "product-defaults"] as const,
+
+  cloneDraft: (
+    workspaceId: string,
+    sourceProductId: string,
+    destinationStoreId: string
+  ) =>
+    [
+      "workspace",
+      workspaceId,
+      "clone-draft",
+      sourceProductId,
+      destinationStoreId,
+    ] as const,
 } as const;
 
 /** Clear all authenticated/workspace caches (logout / identity change). */

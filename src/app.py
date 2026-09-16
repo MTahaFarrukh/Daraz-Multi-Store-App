@@ -714,7 +714,7 @@ def api_orders_live(
     created_after: str | None = Query(None),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    """Live Daraz order fetch (Shipping / legacy compatibility). Empty stores ≠ all."""
+    """Live Daraz order fetch (legacy). Prefer POST /api/shipping/rts for Shipping."""
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
         get_one, list_all = _workspace_store_fns(ctx.workspace_id)
@@ -732,6 +732,33 @@ def api_orders_live(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DarazApiError as exc:
         raise _daraz_http_error(exc) from exc
+
+
+class ShippingRtsBody(BaseModel):
+    store_ids: list[str] = Field(..., min_length=1)
+    upsert_headers: bool = True
+
+
+@app.post("/api/shipping/rts")
+def api_shipping_rts(
+    body: ShippingRtsBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Load CURRENT ready_to_ship from Daraz for selected stores (empty ≠ all).
+
+    Live Daraz RTS is the membership source of truth. Print badges come from
+    ``order_label_prints``. Does not require a prior full order sync.
+    """
+    from src.shipping_rts import load_shipping_rts
+
+    try:
+        return load_shipping_rts(
+            ctx.workspace_id,
+            store_ids=body.store_ids,
+            upsert_headers=body.upsert_headers,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/orders/status-counts")
@@ -1198,6 +1225,282 @@ def api_store_performance_sync(
     # Return refreshed leaderboard
     board = api_store_performance(year=year, month=month, metric="orders", ctx=ctx)
     return {**summary, "leaderboard": board["leaderboard"], "last_synced_at": board["last_synced_at"]}
+
+
+# ---------------------------------------------------------------------------
+# Products (Phase 4B — local hub + clone draft; CreateProduct gated)
+# ---------------------------------------------------------------------------
+
+
+class ProductSyncBody(BaseModel):
+    store_ids: list[str] | None = None
+    fetch_details: bool = True
+
+
+class ProductDefaultsBody(BaseModel):
+    default_package_weight: float | None = None
+    default_package_length: float | None = None
+    default_package_width: float | None = None
+    default_package_height: float | None = None
+    default_initial_quantity: int | None = Field(None, ge=0, le=100000)
+    sku_prefix: str | None = Field(None, max_length=16)
+
+
+class CloneDraftBody(BaseModel):
+    destination_store_id: str = Field(..., min_length=1)
+
+
+def _product_public_view(
+    product: dict[str, Any],
+    *,
+    store: dict[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    st = store or {}
+    prices = [
+        float(v["price"])
+        for v in (variants or [])
+        if v.get("price") is not None
+    ]
+    stocks = [
+        int(v["quantity"])
+        for v in (variants or [])
+        if v.get("quantity") is not None
+    ]
+    return {
+        **product,
+        "store_slug": st.get("store_id"),
+        "store_display_name": st.get("display_name")
+        or st.get("store_name")
+        or st.get("store_id"),
+        "variant_count": len(variants)
+        if variants is not None
+        else product.get("variants_count") or product.get("variant_count"),
+        "price_min": min(prices) if prices else None,
+        "price_max": max(prices) if prices else None,
+        "stock_total": sum(stocks) if stocks else None,
+        "has_video": bool(product.get("video_ref")),
+        "primary_image": (
+            ((product.get("images_json") or [{}])[0] or {}).get("url")
+            if isinstance(product.get("images_json"), list)
+            and product.get("images_json")
+            else None
+        ),
+    }
+
+
+@app.get("/api/products")
+def api_list_products(
+    store: str | None = Query(None),
+    stores: str | None = Query(None),
+    store_ids: str | None = Query(None),
+    group_id: str | None = Query(None),
+    status: str | None = Query(None),
+    category_id: int | None = Query(None),
+    search: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    sort: str = Query("synced_at_desc"),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """List local products (no Daraz calls). Empty stores= is rejected."""
+    try:
+        store_filters = _resolve_list_store_filters(
+            ctx.workspace_id,
+            store=store,
+            stores=stores,
+            store_ids=store_ids,
+            group_id=group_id,
+        )
+        filters = {
+            **store_filters,
+            "status": status,
+            "category_id": category_id,
+            "search": search,
+            "page": page,
+            "page_size": page_size,
+            "sort": sort,
+        }
+        result = get_repo().list_daraz_products(ctx.workspace_id, filters)
+        stores_list = get_repo().list_stores(ctx.workspace_id)
+        by_uuid = {str(s["id"]): s for s in stores_list}
+        items = [
+            _product_public_view(p, store=by_uuid.get(str(p.get("store_id"))))
+            for p in result["items"]
+        ]
+        return {
+            "products": items,
+            "items": items,
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/products/{product_id}")
+def api_get_product(
+    product_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    repo = get_repo()
+    product = repo.get_daraz_product(ctx.workspace_id, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    variants = repo.list_daraz_product_variants(ctx.workspace_id, product_id)
+    store = repo.get_store_by_uuid(ctx.workspace_id, str(product["store_id"]))
+    return {
+        "product": _product_public_view(product, store=store, variants=variants),
+        "variants": variants,
+    }
+
+
+@app.post("/api/products/sync")
+def api_products_sync(
+    body: ProductSyncBody | None = None,
+    store_ids: str | None = Query(None),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.product_sync import sync_workspace_products
+
+    payload = body or ProductSyncBody()
+    sid_list = payload.store_ids
+    if store_ids is not None:
+        sid_list = [p.strip() for p in store_ids.split(",") if p.strip()]
+        if not sid_list:
+            raise HTTPException(
+                status_code=400, detail="No stores selected. Pick at least one store."
+            )
+    try:
+        return sync_workspace_products(
+            ctx.workspace_id,
+            store_ids=sid_list,
+            fetch_details=payload.fetch_details,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/product-defaults")
+def api_get_product_defaults(
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    return {"defaults": get_repo().get_product_defaults(ctx.workspace_id)}
+
+
+@app.put("/api/product-defaults")
+def api_put_product_defaults(
+    body: ProductDefaultsBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    payload = body.model_dump(exclude_none=True)
+    defaults = get_repo().upsert_product_defaults(ctx.workspace_id, payload)
+    return {"defaults": defaults}
+
+
+@app.post("/api/products/{product_id}/clone-draft")
+def api_product_clone_draft(
+    product_id: str,
+    body: CloneDraftBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    from src.product_clone import build_connected_clone_draft
+
+    try:
+        return build_connected_clone_draft(
+            ctx.workspace_id,
+            source_product_id=product_id,
+            destination_store_id=body.destination_store_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/{product_id}/create-payload-preview")
+def api_product_create_payload_preview(
+    product_id: str,
+    body: CloneDraftBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Build redacted CreateProduct preview. Never submits to Daraz."""
+    from src.product_clone import (
+        build_connected_clone_draft,
+        build_create_product_payload_preview,
+    )
+
+    try:
+        result = build_connected_clone_draft(
+            ctx.workspace_id,
+            source_product_id=product_id,
+            destination_store_id=body.destination_store_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    preview = build_create_product_payload_preview(result["draft"])
+    return {
+        "preview": preview,
+        "validation": result["draft"].get("validation"),
+        "create_probe_enabled": get_env("ALLOW_PRODUCT_CREATE_PROBE", "").lower()
+        in {"1", "true", "yes"},
+    }
+
+
+class CreateProbeBody(BaseModel):
+    destination_store_id: str = Field(..., min_length=1)
+    confirm: bool = False
+
+
+@app.post("/api/products/{product_id}/create-probe")
+def api_product_create_probe_for_id(
+    product_id: str,
+    body: CreateProbeBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    if get_env("ALLOW_PRODUCT_CREATE_PROBE", "").lower() not in {"1", "true", "yes"}:
+        raise HTTPException(
+            status_code=403,
+            detail="CreateProduct probe disabled (ALLOW_PRODUCT_CREATE_PROBE)",
+        )
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Set confirm=true to run the supervised create probe",
+        )
+    from src.product_clone import (
+        build_connected_clone_draft,
+        build_create_product_payload_preview,
+    )
+
+    try:
+        result = build_connected_clone_draft(
+            ctx.workspace_id,
+            source_product_id=product_id,
+            destination_store_id=body.destination_store_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    draft = result["draft"]
+    if draft.get("validation", {}).get("errors"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Draft has validation errors",
+                "errors": draft["validation"]["errors"],
+            },
+        )
+
+    return {
+        "status": "NOT_RUN",
+        "reason": (
+            "Supervised CreateProduct is gated until image migrate→final URL is proven "
+            "and an operator explicitly runs a dedicated create script. "
+            "Payload preview is available; live create was not executed."
+        ),
+        "preview": build_create_product_payload_preview(draft),
+        "validation": draft.get("validation"),
+    }
 
 
 # Legacy download paths — intentionally disabled (no unauthenticated PDF access).

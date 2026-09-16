@@ -1,0 +1,476 @@
+{
+  "calls": [
+    {
+      "label": "category/attributes primary_category_id=10002730",
+      "ok": true,
+      "code": "0",
+      "list_len": 38,
+      "first_item_keys": [
+        "advanced",
+        "attribute_type",
+        "id",
+        "input_type",
+        "is_mandatory",
+        "is_sale_prop",
+        "label",
+        "name"
+      ]
+    },
+    {
+      "label": "products/get filter=all limit=50 offset=0",
+      "ok": true,
+      "code": "0",
+      "data_keys": [
+        "products",
+        "total_products"
+      ],
+      "product_count": 50,
+      "total_products": 408
+    },
+    {
+      "label": "product/item/get multi item_id=594265836",
+      "ok": true,
+      "code": "0",
+      "data_keys": [
+        "attributes",
+        "created_time",
+        "images",
+        "item_id",
+        "marketImages",
+        "primary_category",
+        "skus",
+        "status",
+        "+2"
+      ]
+    },
+    {
+      "label": "GET /category/brands/query",
+      "ok": false,
+      "error": "The input parameter “startRow” that is mandatory for processing this request is not supplied",
+      "error_code": "MissingParameter",
+      "payload": {
+        "type": "ISV",
+        "code": "MissingParameter",
+        "message": "The input parameter “startRow” that is mandatory for processing this request is not supplied",
+        "request_id": "2140f1fa17895735420398951",
+        "_trace_id_": "2140e84817895735420371528e1549"
+      }
+    },
+    {
+      "label": "GET /product/brands/get",
+      "ok": false,
+      "error": "The specified API Path is invalid",
+      "error_code": "InvalidApiPath",
+      "payload": {
+        "type": "ISV",
+        "code": "InvalidApiPath",
+        "message": "The specified API Path is invalid",
+        "request_id": "2101578317895735443957521",
+        "_trace_id_": "2140cb2117895735443932077e9e7f"
+      }
+    },
+    {
+      "label": "GET /brands/get",
+      "ok": false,
+      "error": "The specified API Path is invalid",
+      "error_code": "InvalidApiPath",
+      "payload": {
+        "type": "ISV",
+        "code": "InvalidApiPath",
+        "message": "The specified API Path is invalid",
+        "request_id": "2101055117895735466502779",
+        "_trace_id_": "2101220b17895735466485929e8c64"
+      }
+    },
+    {
+      "label": "GET /category/suggestion/get",
+      "ok": false,
+      "error": "The specified API Path is invalid",
+      "error_code": "InvalidApiPath",
+      "payload": {
+        "type": "ISV",
+        "code": "InvalidApiPath",
+        "message": "The specified API Path is invalid",
+        "request_id": "2101578317895735490117680",
+        "_trace_id_": "2101597017895735490098449ea803"
+      }
+    },
+    {
+      "label": "GET /product/category/suggestion/get",
+      "ok": false,
+      "error": "The specified API Path is invalid",
+      "error_code": "InvalidApiPath",
+      "payload": {
+        "type": "ISV",
+        "code": "InvalidApiPath",
+        "message": "The specified API Path is invalid",
+        "request_id": "2140f1fa17895735513581254",
+        "_trace_id_": "21014b9a17895735513577933edf49"
+      }
+    },
+    "+4"
+  ],
+  "notes": [],
+  "category_10002730_attr_summary": [
+    {
+      "name": "name",
+      "id": 1,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "short_description",
+      "id": 3,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "description",
+      "id": 4,
+      "is_mandatory": 0,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "video",
+      "id": 5,
+      "is_mandatory": 0,
+      "attribute_type": "normal",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "package_content",
+      "id": 23,
+      "is_mandatory": 0,
+      "attribute_type": "sku",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "description_en",
+      "id": 40025,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "name_en",
+      "id": 40028,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "short_description_en",
+      "id": 40030,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    "+30"
+  ],
+  "category_10002730_mandatory": [
+    {
+      "name": "name",
+      "id": 1,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "short_description",
+      "id": 3,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "description_en",
+      "id": 40025,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "name_en",
+      "id": 40028,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "short_description_en",
+      "id": 40030,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "richText",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "warranty_type",
+      "id": 7,
+      "is_mandatory": 1,
+      "attribute_type": "normal",
+      "input_type": "singleSelect",
+      "is_sale_prop": 0,
+      "options_count": 8
+    },
+    {
+      "name": "SellerSku",
+      "id": 15,
+      "is_mandatory": 1,
+      "attribute_type": "sku",
+      "input_type": "text",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    {
+      "name": "price",
+      "id": 18,
+      "is_mandatory": 1,
+      "attribute_type": "sku",
+      "input_type": "numeric",
+      "is_sale_prop": 0,
+      "options_count": null
+    },
+    "+5"
+  ],
+  "multi_variant_hits": [
+    {
+      "item_id": 594265836,
+      "sku_count": 1,
+      "saleProps": [
+        {
+          "color_family": "Multicolor"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "MTF-Chocolate-Eraser"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 651030726,
+      "sku_count": 1,
+      "saleProps": [
+        {
+          "color_family": "Green"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "MTF-Cactus-Shaped-Dispenser"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 892204961,
+      "sku_count": 2,
+      "saleProps": [
+        {
+          "color_family": "Pink"
+        },
+        {
+          "color_family": "Blue"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "MeshDispenser-Pink",
+        "MeshDispenser-Blue"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 607228092,
+      "sku_count": 1,
+      "saleProps": [
+        {
+          "color_family": "Drill Chuck"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "MTF-DRILL-CHUCK"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 652860902,
+      "sku_count": 2,
+      "saleProps": [
+        {
+          "color_family": "Keychain"
+        },
+        {
+          "color_family": "Wallet"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "MTF-ENGRAVE-KEYCHAIN",
+        "MTF-ENGRAVE-WALLET"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 927757407,
+      "sku_count": 1,
+      "saleProps": [
+        {
+          "color_family": "Multicolor"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "MTF-Sword-Pen"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 1962226787,
+      "sku_count": 5,
+      "saleProps": [
+        {
+          "color_family": "Random 2 Pcs"
+        },
+        {
+          "color_family": "Pack of 2 Flower"
+        },
+        {
+          "color_family": "Pack of 2 Cloud"
+        },
+        {
+          "color_family": "Pack of 2 Paw 2"
+        },
+        {
+          "color_family": "Pack of 2 Paw 1"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "TumblerStoppers-Random 2 Pcs",
+        "TumblerStoppers-Pack of 2 Flower",
+        "TumblerStoppers-Pack of 2 Cloud",
+        "TumblerStoppers-Pack of 2 Paw 2",
+        "TumblerStoppers-Pack of 2 Paw 1"
+      ],
+      "has_video": false
+    },
+    {
+      "item_id": 1956915378,
+      "sku_count": 5,
+      "saleProps": [
+        {
+          "color_family": "Rose Gold"
+        },
+        {
+          "color_family": "Blue"
+        },
+        {
+          "color_family": "Pink"
+        },
+        {
+          "color_family": "Gold"
+        },
+        {
+          "color_family": "Silver"
+        }
+      ],
+      "variation": null,
+      "SellerSkus": [
+        "EggShapeTravelKit-Rose Gold",
+        "EggShapeTravelKit-Blue",
+        "EggShapeTravelKit-Pink",
+        "EggShapeTravelKit-Gold",
+        "EggShapeTravelKit-Silver"
+      ],
+      "has_video": false
+    },
+    "+2"
+  ],
+  "scan_stats": {
+    "scanned": 50,
+    "multi_variant": 38,
+    "package_content_hits": 0,
+    "video_attr_hits": 1
+  },
+  "multi_detail_summary": {
+    "item_id": 594265836,
+    "variation": {
+      "Variation1": {
+        "name": "color_family",
+        "label": "Color family",
+        "hasImage": true,
+        "customize": false,
+        "options": [
+          "Multicolor"
+        ]
+      }
+    },
+    "sku_count": 1,
+    "saleProps": [
+      [
+        "MTF-Chocolate-Eraser",
+        {
+          "color_family": "Multicolor"
+        }
+      ]
+    ],
+    "attr_keys": [
+      "Hazmat",
+      "brand",
+      "delivery_option_sof",
+      "delivery_option_standard",
+      "description",
+      "description_en",
+      "name",
+      "name_en",
+      "+3"
+    ],
+    "video": null
+  },
+  "public_deep": {
+    "status": 200,
+    "bytes": 247537,
+    "final_url": "https://www.daraz.pk/products/i1974026524.html",
+    "has_app_run": true,
+    "has_skuInfos": true,
+    "has_pdpTrackingData": true,
+    "has_moduleData": true,
+    "has_json_ld": true,
+    "mentions_package_weight": false,
+    "mentions_package_content": false,
+    "img_cdn_count": 46,
+    "video_id_hits": [],
+    "blocked_hint": false,
+    "skuInfos_anchor": true
+  }
+}

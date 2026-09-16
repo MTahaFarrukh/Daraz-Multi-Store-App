@@ -297,3 +297,117 @@ export type PerformanceSyncResponse = {
   last_synced_at: string | null;
   gross_sales_enabled?: boolean;
 };
+
+export type ProductListParams = {
+  stores?: string;
+  store_ids?: string;
+  group_id?: string;
+  status?: string;
+  category_id?: number | string;
+  search?: string;
+  page?: number;
+  page_size?: number;
+  sort?: string;
+};
+
+export type ProductRow = {
+  id: string;
+  store_id: string;
+  store_slug?: string | null;
+  store_display_name?: string | null;
+  daraz_item_id: string;
+  title?: string | null;
+  title_en?: string | null;
+  primary_category_id?: number | null;
+  primary_category_name?: string | null;
+  brand?: string | null;
+  status_raw?: string | null;
+  product_url?: string | null;
+  images_json?: Array<{ url?: string; position?: number; kind?: string }>;
+  video_ref?: string | null;
+  has_video?: boolean;
+  primary_image?: string | null;
+  variant_count?: number | null;
+  variants_count?: number | null;
+  price_min?: number | null;
+  price_max?: number | null;
+  stock_total?: number | null;
+  synced_at?: string | null;
+  package_content?: string | null;
+  description?: string | null;
+  description_en?: string | null;
+  attributes_json?: Record<string, unknown>;
+  variation_json?: Record<string, unknown>;
+};
+
+export type ProductVariant = {
+  id: string;
+  daraz_sku_id: string;
+  seller_sku?: string | null;
+  shop_sku?: string | null;
+  sale_props_json?: Record<string, string>;
+  price?: number | null;
+  special_price?: number | null;
+  quantity?: number | null;
+  package_weight?: number | null;
+  package_length?: number | null;
+  package_width?: number | null;
+  package_height?: number | null;
+  images_json?: Array<{ url?: string }>;
+  status_raw?: string | null;
+};
+
+export type ProductListResponse = {
+  products: ProductRow[];
+  items: ProductRow[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type ProductDetailResponse = {
+  product: ProductRow;
+  variants: ProductVariant[];
+};
+
+export type ProductDefaults = {
+  workspace_id: string;
+  default_package_weight?: number | null;
+  default_package_length?: number | null;
+  default_package_width?: number | null;
+  default_package_height?: number | null;
+  default_initial_quantity?: number | null;
+  sku_prefix?: string | null;
+  updated_at?: string | null;
+};
+
+export type ProductSyncResponse = {
+  stores: number;
+  ok: number;
+  failed: number;
+  results: Array<{
+    store_id?: string;
+    sync_status?: string;
+    sync_error?: string | null;
+    products_upserted?: number;
+    variants_upserted?: number;
+  }>;
+};
+
+export type ProductCloneDraftResponse = {
+  draft: Record<string, unknown>;
+  fidelity: {
+    copied?: string[];
+    changed_by_multistore?: string[];
+    not_available?: string[];
+  };
+  warnings: string[];
+  errors: string[];
+  possible_duplicates: Array<{
+    id?: string;
+    title?: string;
+    daraz_item_id?: string;
+    match_reason?: string;
+    match_score?: number;
+  }>;
+};

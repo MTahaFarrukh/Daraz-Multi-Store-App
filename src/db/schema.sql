@@ -212,3 +212,91 @@ ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS new_labels_count INT;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reprint_count INT;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS failed_count INT;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS store_ids JSONB;
+
+-- Phase 4B: local product warehouse (products + variants + per-workspace defaults)
+CREATE TABLE IF NOT EXISTS daraz_products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    daraz_item_id TEXT NOT NULL,
+    title TEXT,
+    title_en TEXT,
+    primary_category_id BIGINT,
+    primary_category_name TEXT,
+    brand TEXT,
+    description TEXT,
+    description_en TEXT,
+    short_description TEXT,
+    short_description_en TEXT,
+    package_content TEXT,
+    status_raw TEXT,
+    product_url TEXT,
+    attributes_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    variation_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- images_json entries: [{url, position, kind}]
+    images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    market_images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- opaque platform video id; informational only (cannot be re-uploaded via API)
+    video_ref TEXT,
+    raw_json JSONB,
+    synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (store_id, daraz_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_products_workspace
+    ON daraz_products (workspace_id);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_products_workspace_status
+    ON daraz_products (workspace_id, status_raw);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_products_workspace_category
+    ON daraz_products (workspace_id, primary_category_id);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_products_workspace_title_lower
+    ON daraz_products (workspace_id, lower(title));
+
+CREATE TABLE IF NOT EXISTS daraz_product_variants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    product_id UUID NOT NULL REFERENCES daraz_products(id) ON DELETE CASCADE,
+    daraz_sku_id TEXT NOT NULL,
+    seller_sku TEXT,
+    shop_sku TEXT,
+    sale_props_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    price NUMERIC(18, 2),
+    special_price NUMERIC(18, 2),
+    quantity INT,
+    package_weight NUMERIC(18, 4),
+    package_length NUMERIC(18, 4),
+    package_width NUMERIC(18, 4),
+    package_height NUMERIC(18, 4),
+    images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status_raw TEXT,
+    synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (store_id, daraz_sku_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_product_variants_product
+    ON daraz_product_variants (product_id);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_product_variants_workspace
+    ON daraz_product_variants (workspace_id);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_product_variants_store_seller_sku
+    ON daraz_product_variants (store_id, seller_sku);
+
+CREATE TABLE IF NOT EXISTS workspace_product_defaults (
+    workspace_id UUID PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    default_package_weight NUMERIC(18, 4),
+    default_package_length NUMERIC(18, 4),
+    default_package_width NUMERIC(18, 4),
+    default_package_height NUMERIC(18, 4),
+    default_initial_quantity INT NOT NULL DEFAULT 1,
+    sku_prefix TEXT NOT NULL DEFAULT 'MTF-',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

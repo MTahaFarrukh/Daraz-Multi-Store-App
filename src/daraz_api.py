@@ -258,6 +258,106 @@ class DarazClient:
         return self._request("/orders/items/get", business_params={"order_ids": f"[{ids}]"})
 
     # ------------------------------------------------------------------
+    # Products / categories / images (Phase 4B — PK live-proven paths)
+    # ------------------------------------------------------------------
+
+    def get_products(
+        self,
+        *,
+        filter: str = "all",
+        offset: int = 0,
+        limit: int = 50,
+        options: str | int = "1",
+        update_before: str | None = None,
+        create_before: str | None = None,
+        search: str | None = None,
+        sku_seller_list: str | None = None,
+    ) -> dict[str, Any]:
+        """GET /products/get — seller catalog page (own store only)."""
+        business: dict[str, str] = {
+            "filter": filter,
+            "offset": str(offset),
+            "limit": str(limit),
+            "options": str(options),
+        }
+        if update_before:
+            business["update_before"] = update_before
+        if create_before:
+            business["create_before"] = create_before
+        if search:
+            business["search"] = search
+        if sku_seller_list:
+            business["sku_seller_list"] = sku_seller_list
+        return self._request("/products/get", business_params=business)
+
+    def get_product_item(self, item_id: int | str) -> dict[str, Any]:
+        """GET /product/item/get — single owned product (item_id required)."""
+        return self._request(
+            "/product/item/get", business_params={"item_id": str(item_id)}
+        )
+
+    def get_category_tree(self) -> dict[str, Any]:
+        """GET /category/tree/get."""
+        return self._request("/category/tree/get")
+
+    def get_category_attributes(self, primary_category_id: int | str) -> dict[str, Any]:
+        """GET /category/attributes/get."""
+        return self._request(
+            "/category/attributes/get",
+            business_params={"primary_category_id": str(primary_category_id)},
+        )
+
+    def query_category_brands(
+        self,
+        *,
+        primary_category_id: int | str | None = None,
+        start_row: int = 0,
+        page_size: int = 20,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """GET /category/brands/query — requires startRow + pageSize."""
+        business: dict[str, str] = {
+            "startRow": str(start_row),
+            "pageSize": str(page_size),
+        }
+        if primary_category_id is not None:
+            business["primary_category_id"] = str(primary_category_id)
+        if name:
+            business["name"] = name
+        return self._request("/category/brands/query", business_params=business)
+
+    def migrate_images(self, image_urls: list[str]) -> dict[str, Any]:
+        """POST /images/migrate — XML payload with one or more Image/Url nodes."""
+        urls = [u.strip() for u in image_urls if u and str(u).strip()]
+        if not urls:
+            raise ValueError("image_urls required")
+        body_urls = "".join(f"<Url>{u}</Url>" for u in urls)
+        payload = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f"<Request><Image>{body_urls}</Image></Request>"
+        )
+        return self._request(
+            "/images/migrate",
+            method="POST",
+            business_params={"payload": payload},
+        )
+
+    def get_image_response(self, batch_id: str) -> dict[str, Any]:
+        """GET /image/response/get — poll migrate batch (contract still being proven)."""
+        return self._request(
+            "/image/response/get",
+            business_params={"batch_id": str(batch_id)},
+        )
+
+    def create_product(self, payload_xml: str) -> dict[str, Any]:
+        """POST /product/create — XML payload. Gated by callers; do not use casually."""
+        return self._request(
+            "/product/create",
+            method="POST",
+            business_params={"payload": payload_xml},
+        )
+
+    # ------------------------------------------------------------------
     # Finance (Lazada-mapped paths — availability on Daraz PK must be probed)
     # ------------------------------------------------------------------
 

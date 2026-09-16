@@ -1,0 +1,269 @@
+{
+  "generated_at": "2026-09-16T16:56:18.878465+00:00",
+  "stores": [
+    {
+      "store_id": "mtfdigitalemporiumofficial_gmail_com",
+      "display_name": "Mtfdigitalemporiumofficial",
+      "account": "mtfdigitalemporiumofficial@gmail.com",
+      "seller_id": "",
+      "probes": {
+        "rts_no_date": {
+          "label": "RTS no date",
+          "request": {
+            "status": "ready_to_ship",
+            "limit": 50,
+            "offset": 0
+          },
+          "ok": false,
+          "elapsed_ms": 2242,
+          "error": "E018: Either CreatedAfter or UpdatedAfter is mandatory",
+          "error_code": "18"
+        },
+        "rts_created_30d": {
+          "elapsed_ms": 3175,
+          "unique": 17,
+          "countTotal": 17,
+          "incomplete": false,
+          "warning": null,
+          "pages": [
+            {
+              "label": "page offset=0",
+              "request": {
+                "status": "ready_to_ship",
+                "limit": 50,
+                "offset": 0,
+                "sort_by": "updated_at",
+                "sort_direction": "DESC",
+                "created_after": "2026-08-17T21:56:21+05:00"
+              },
+              "ok": true,
+              "elapsed_ms": 1538,
+              "code": "0",
+              "countTotal": 17,
+              "returned": 17,
+              "min_created_at": "2026-09-16 00:46:20 +0800",
+              "max_created_at": "2026-09-16 23:30:25 +0800",
+              "min_updated_at": "2026-09-17 00:27:18 +0800",
+              "max_updated_at": "2026-09-17 00:27:28 +0800",
+              "status_samples": [
+                "ready_to_ship"
+              ],
+              "order_ids_sample": [
+                "249527938788708",
+                "248445039733871",
+                "248441082452116",
+                "249562526868594",
+                "248432042826718",
+                "248430221069509",
+                "249557933163873",
+                "248426035303213"
+              ]
+            }
+          ],
+          "returned": 17,
+          "min_created_at": "2026-09-16 00:46:20 +0800",
+          "max_created_at": "2026-09-16 23:30:25 +0800",
+          "min_updated_at": "2026-09-17 00:27:18 +0800",
+          "max_updated_at": "2026-09-17 00:27:28 +0800",
+          "status_samples": [
+            "ready_to_ship"
+          ],
+          "order_ids_sample": [
+            "249527938788708",
+            "248445039733871",
+            "248441082452116",
+            "249562526868594",
+            "248432042826718",
+            "248430221069509",
+            "249557933163873",
+            "248426035303213"
+          ]
+        },
+        "rts_created_90d": {
+          "elapsed_ms": 3092,
+          "unique": 17,
+          "countTotal": 17,
+          "incomplete": false,
+          "warning": null,
+          "pages": [
+            {
+              "label": "page offset=0",
+              "request": {
+                "status": "ready_to_ship",
+                "limit": 50,
+                "offset": 0,
+                "sort_by": "updated_at",
+                "sort_direction": "DESC",
+                "created_after": "2026-06-18T21:56:24+05:00"
+              },
+              "ok": true,
+              "elapsed_ms": 1556,
+              "code": "0",
+              "countTotal": 17,
+              "returned": 17,
+              "min_created_at": "2026-09-16 00:46:20 +0800",
+              "max_created_at": "2026-09-16 23:30:25 +0800",
+              "min_updated_at": "2026-09-17 00:27:18 +0800",
+              "max_updated_at": "2026-09-17 00:27:28 +0800",
+              "status_samples": [
+                "ready_to_ship"
+              ],
+              "order_ids_sample": [
+                "249527938788708",
+                "248445039733871",
+                "248441082452116",
+                "249562526868594",
+                "248432042826718",
+                "248430221069509",
+                "249557933163873",
+                "248426035303213"
+              ]
+            }
+          ],
+          "returned": 17,
+          "min_created_at": "2026-09-16 00:46:20 +0800",
+          "max_created_at": "2026-09-16 23:30:25 +0800",
+          "min_updated_at": "2026-09-17 00:27:18 +0800",
+          "max_updated_at": "2026-09-17 00:27:28 +0800",
+          "status_samples": [
+            "ready_to_ship"
+          ],
+          "order_ids_sample": [
+            "249527938788708",
+            "248445039733871",
+            "248441082452116",
+            "249562526868594",
+            "248432042826718",
+            "248430221069509",
+            "249557933163873",
+            "248426035303213"
+          ]
+        },
+        "rts_update_30d": {
+          "elapsed_ms": 3665,
+          "unique": 17,
+          "countTotal": 17,
+          "incomplete": false,
+          "warning": null,
+          "pages": [
+            {
+              "label": "page offset=0",
+              "request": {
+                "status": "ready_to_ship",
+                "limit": 50,
+                "offset": 0,
+                "sort_by": "updated_at",
+                "sort_direction": "DESC",
+                "update_after": "2026-08-17T21:56:27+05:00"
+              },
+              "ok": true,
+              "elapsed_ms": 1622,
+              "code": "0",
+              "countTotal": 17,
+              "returned": 17,
+              "min_created_at": "2026-09-16 00:46:20 +0800",
+              "max_created_at": "2026-09-16 23:30:25 +0800",
+              "min_updated_at": "2026-09-17 00:27:18 +0800",
+              "max_updated_at": "2026-09-17 00:27:28 +0800",
+              "status_samples": [
+                "ready_to_ship"
+              ],
+              "order_ids_sample": [
+                "249527938788708",
+                "248445039733871",
+                "248441082452116",
+                "249562526868594",
+                "248432042826718",
+                "248430221069509",
+                "249557933163873",
+                "248426035303213"
+              ]
+            }
+          ],
+          "returned": 17,
+          "min_created_at": "2026-09-16 00:46:20 +0800",
+          "max_created_at": "2026-09-16 23:30:25 +0800",
+          "min_updated_at": "2026-09-17 00:27:18 +0800",
+          "max_updated_at": "2026-09-17 00:27:28 +0800",
+          "status_samples": [
+            "ready_to_ship"
+          ],
+          "order_ids_sample": [
+            "249527938788708",
+            "248445039733871",
+            "248441082452116",
+            "249562526868594",
+            "248432042826718",
+            "248430221069509",
+            "249557933163873",
+            "248426035303213"
+          ]
+        },
+        "rts_update_7d": {
+          "elapsed_ms": 3992,
+          "unique": 17,
+          "countTotal": 17,
+          "incomplete": false,
+          "warning": null,
+          "pages": [
+            {
+              "label": "page offset=0",
+              "request": {
+                "status": "ready_to_ship",
+                "limit": 50,
+                "offset": 0,
+                "sort_by": "updated_at",
+                "sort_direction": "DESC",
+                "update_after": "2026-09-09T21:56:31+05:00"
+              },
+              "ok": true,
+              "elapsed_ms": 1960,
+              "code": "0",
+              "countTotal": 17,
+              "returned": 17,
+              "min_created_at": "2026-09-16 00:46:20 +0800",
+              "max_created_at": "2026-09-16 23:30:25 +0800",
+              "min_updated_at": "2026-09-17 00:27:18 +0800",
+              "max_updated_at": "2026-09-17 00:27:28 +0800",
+              "status_samples": [
+                "ready_to_ship"
+              ],
+              "order_ids_sample": [
+                "249527938788708",
+                "248445039733871",
+                "248441082452116",
+                "249562526868594",
+                "248432042826718",
+                "248430221069509",
+                "249557933163873",
+                "248426035303213"
+              ]
+            }
+          ],
+          "returned": 17,
+          "min_created_at": "2026-09-16 00:46:20 +0800",
+          "max_created_at": "2026-09-16 23:30:25 +0800",
+          "min_updated_at": "2026-09-17 00:27:18 +0800",
+          "max_updated_at": "2026-09-17 00:27:28 +0800",
+          "status_samples": [
+            "ready_to_ship"
+          ],
+          "order_ids_sample": [
+            "249527938788708",
+            "248445039733871",
+            "248441082452116",
+            "249562526868594",
+            "248432042826718",
+            "248430221069509",
+            "249557933163873",
+            "248426035303213"
+          ]
+        }
+      }
+    }
+  ],
+  "notes": [
+    "Shipping currently loads local daraz_orders status_group=ready_to_ship",
+    "This script queries Daraz live only"
+  ]
+}
