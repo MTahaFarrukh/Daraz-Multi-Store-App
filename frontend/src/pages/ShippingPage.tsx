@@ -288,7 +288,7 @@ export function ShippingPage() {
     <div className="stack">
       <PageHeader
         title="Shipping"
-        description="Load current ready-to-ship orders live from Daraz for selected stores. Print badges come only from MultiStore print events. Empty store selection never means all stores."
+        description="Select stores → Load RTS → Select Unprinted → Print Labels. RTS comes live from Daraz; print badges come only from MultiStore print events."
       />
 
       <div className="tabs" role="tablist">
@@ -342,10 +342,11 @@ export function ShippingPage() {
               }}
             />
             <p className="muted-line" style={{ marginTop: "0.65rem" }}>
-              Load RTS queries Daraz current ready_to_ship for the selected stores only — no full
-              warehouse sync required.{" "}
+              Load RTS queries Daraz live ready_to_ship for the selected stores and reconciles
+              UNPRINTED / Printed / Reprinted from local print events. Empty selection never means
+              all stores.{" "}
               <Link to="/app/orders" style={{ fontWeight: 700, color: "var(--teal-deep)" }}>
-                Open Orders warehouse →
+                Open Orders →
               </Link>
             </p>
             <div className="row" style={{ marginTop: "0.75rem" }}>
@@ -354,6 +355,7 @@ export function ShippingPage() {
                 className="btn btn-primary"
                 disabled={!selectedStores.length || Boolean(busy)}
                 onClick={() => loadRts()}
+                data-testid="shipping-load-rts"
               >
                 Load RTS
               </button>
@@ -413,8 +415,8 @@ export function ShippingPage() {
 
           {!rtsEnabled ? (
             <EmptyState
-              title="Load current RTS"
-              description="Select stores, then Load RTS. MultiStore queries Daraz live ready_to_ship — Sync Orders is not required for printing."
+              title="Load RTS to continue"
+              description="Select stores, then Load RTS. Workflow: Select stores → Load RTS → Select Unprinted → Print Labels."
             />
           ) : orders.length === 0 ? (
             <EmptyState

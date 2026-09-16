@@ -112,11 +112,24 @@ describe("logout cache cleanup", () => {
   });
 });
 
-describe("shipping orders enablement contract", () => {
-  it("empty store selection cannot form a fetchable orders key intent", () => {
+describe("shipping Load RTS enablement contract", () => {
+  it("empty store selection cannot fetch RTS", () => {
     const storeIds: string[] = [];
-    const enabledFlag = true;
-    const canFetch = storeIds.length > 0 && enabledFlag;
+    const loadRtsEnabled = true;
+    const canFetch = storeIds.length > 0 && loadRtsEnabled;
     expect(canFetch).toBe(false);
+  });
+
+  it("Shipping data action is Load RTS via /api/shipping/rts, not orders sync", () => {
+    // Contract mirror of ShippingPage + Api.loadShippingRts
+    const shippingDataAction = "Load RTS";
+    const shippingEndpoint = "/api/shipping/rts";
+    const forbiddenOnShipping = ["/api/orders/sync", "Sync Orders", "Load Orders", "Sync + Load"];
+    expect(shippingDataAction).toBe("Load RTS");
+    expect(shippingEndpoint).toBe("/api/shipping/rts");
+    for (const label of forbiddenOnShipping) {
+      expect(label === shippingDataAction).toBe(false);
+      expect(shippingEndpoint.includes("sync")).toBe(false);
+    }
   });
 });

@@ -48,8 +48,8 @@ export const queryKeys = {
   printJobs: (workspaceId: string) => ["workspace", workspaceId, "print-jobs"] as const,
 
   /**
-   * Live RTS orders (Shipping) — only fetched when explicitly enabled.
-   * Empty storeIds must NOT enable the query.
+   * Legacy key for warehouse RTS listing. Shipping Load RTS uses POST /api/shipping/rts
+   * directly (not this query key) and must never call /api/orders/sync.
    */
   orders: (workspaceId: string, storeIds: string[], limit: number, status = "ready_to_ship") =>
     [

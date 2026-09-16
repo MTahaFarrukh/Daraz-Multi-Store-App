@@ -8,7 +8,7 @@ const titles: Record<string, { title: string; subtitle?: string }> = {
   "/app/orders": { title: "Orders" },
   "/app/products": { title: "Products" },
   "/app/inventory": { title: "Inventory" },
-  "/app/shipping": { title: "Shipping", subtitle: "Ready-to-ship orders and labels" },
+  "/app/shipping": { title: "Shipping", subtitle: "Load RTS and print labels" },
   "/app/finance": { title: "Finance" },
   "/app/analytics": { title: "Analytics" },
   "/app/stores": { title: "Stores", subtitle: "Connected Daraz stores and groups" },
