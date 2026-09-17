@@ -50,6 +50,15 @@ def _print_fetch_workers() -> int:
         return 8
 
 
+def _prefer_bulk_getdocument() -> bool:
+    """Default ON — one GetDocument for many item ids beats N× PrintAWB."""
+    return get_env("PRINT_PREFER_BULK_GETDOCUMENT", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
 def _save_label_artifacts() -> bool:
     return get_env("SAVE_LABEL_ARTIFACTS", "").lower() in {"1", "true", "yes"}
 
@@ -58,6 +67,7 @@ LABEL_SOURCE_DISPLAY = {
     "print_awb_pdf": "Daraz PDF (PrintAWB)",
     "get_document_pdf": "Daraz PDF (GetDocument)",
     "get_document_html": "Daraz HTML",
+    "get_document_bulk": "Daraz PDF (GetDocument bulk)",
     "saved_pdf": "Saved PDF",
     "saved_html": "Saved HTML",
 }
@@ -767,6 +777,10 @@ def print_labels_for_orders(
     label_fetch_sources: list[str] = []
     label_fetch_meta: list[dict[str, Any]] = []
     pending_successes: list[dict[str, Any]] = []
+    printawb_calls = 0
+    getdocument_calls = 0
+    bulk_getdocument_ms = 0
+    fallback_fetch_ms = 0
 
     t_fetch = time.perf_counter()
     if fetch_targets:
@@ -818,8 +832,89 @@ def print_labels_for_orders(
         if not work:
             continue
 
+        fallback_work = work
+        if _prefer_bulk_getdocument() and work:
+            all_ids: list[str] = []
+            for _t, item_ids, _pkg in work:
+                all_ids.extend(str(i) for i in item_ids)
+            try:
+                progress(
+                    f"Bulk GetDocument for {len(work)} order(s) "
+                    f"({len(all_ids)} item id(s))…"
+                )
+                t_bulk = time.perf_counter()
+                try:
+                    doc_resp = client.get_shipping_label(all_ids)
+                finally:
+                    bulk_getdocument_ms += int((time.perf_counter() - t_bulk) * 1000)
+                    getdocument_calls += 1
+                if _save_label_artifacts():
+                    document = (doc_resp.get("data") or {}).get("document") or {}
+                    save_label_bytes(
+                        sid,
+                        "bulk",
+                        all_ids[0],
+                        document,
+                    )
+                bulk_label = document_from_daraz_response(
+                    doc_resp,
+                    store_id=sid,
+                    store_name=sname,
+                    order_id="bulk",
+                    order_item_ids=all_ids,
+                )
+                fetch_source = "get_document_bulk"
+                fetch_meta: dict[str, Any] = {
+                    "package_id": None,
+                    "print_awb_attempted": False,
+                    "print_awb_error": None,
+                    "fetch_source": fetch_source,
+                    "api_calls": 1,
+                    "item_ids": all_ids,
+                    "order_count": len(work),
+                }
+                raw_labels.append(bulk_label)
+                label_fetch_sources.append(fetch_source)
+                label_fetch_meta.append(fetch_meta)
+                for t, item_ids, package_id in work:
+                    oid = str(t["order_id"])
+                    pending_successes.append(
+                        {
+                            "order_id": oid,
+                            "store_id": store_uuid,
+                            "daraz_order_id": str(t["daraz_order_id"]),
+                            "order_item_ids": item_ids,
+                            "package_id": package_id,
+                            "is_reprint": oid in reprint_ids,
+                            "fetch_source": fetch_source,
+                            "entry": t,
+                            "fetch_meta": {
+                                **fetch_meta,
+                                "item_ids": list(item_ids),
+                                "package_id": package_id,
+                            },
+                        }
+                    )
+                fallback_work = []
+            except DarazApiError as exc:
+                progress(
+                    f"Bulk GetDocument failed [{exc.code or '?'}]; "
+                    f"falling back per-order for {len(work)} target(s)…"
+                )
+                fallback_work = work
+            except Exception as exc:  # noqa: BLE001
+                progress(
+                    f"Bulk GetDocument failed ({exc}); "
+                    f"falling back per-order for {len(work)} target(s)…"
+                )
+                fallback_work = work
+
+        if not fallback_work:
+            continue
+
         labels_by_order: dict[str, tuple[LabelDocument, str, dict[str, Any]]] = {}
-        workers = min(_print_fetch_workers(), len(work))
+        workers = min(_print_fetch_workers(), len(fallback_work))
+        t_fb = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -831,14 +926,14 @@ def print_labels_for_orders(
                     item_ids=item_ids,
                     package_id=package_id,
                 ): t
-                for t, item_ids, package_id in work
+                for t, item_ids, package_id in fallback_work
             }
             done = 0
             for future in as_completed(futures):
                 t = futures[future]
                 oid = str(t["order_id"])
                 done += 1
-                progress(f"Downloaded {done}/{len(work)} labels…")
+                progress(f"Downloaded {done}/{len(fallback_work)} labels…")
                 try:
                     labels_by_order[oid] = future.result()
                 except DarazApiError as exc:
@@ -859,8 +954,9 @@ def print_labels_for_orders(
                         is_reprint=oid in reprint_ids,
                         **_order_fields(oid, t),
                     )
+        fallback_fetch_ms += int((time.perf_counter() - t_fb) * 1000)
 
-        for t, item_ids, package_id in work:
+        for t, item_ids, package_id in fallback_work:
             oid = str(t["order_id"])
             if oid not in labels_by_order:
                 if oid not in outcomes_by_id:
@@ -873,6 +969,12 @@ def print_labels_for_orders(
                     )
                 continue
             label, fetch_source, fetch_meta = labels_by_order[oid]
+            if fetch_source == "print_awb_pdf":
+                printawb_calls += 1
+            else:
+                if fetch_meta.get("print_awb_attempted"):
+                    printawb_calls += 1
+                getdocument_calls += 1
             raw_labels.append(label)
             label_fetch_sources.append(fetch_source)
             label_fetch_meta.append(fetch_meta)
@@ -1028,11 +1130,15 @@ def print_labels_for_orders(
 
     total_ms = int((time.perf_counter() - t_total) * 1000)
     timings_ms = {
-        "validation_ms": validation_ms,
         "hydrate_ms": hydrate_ms,
+        "validation_ms": validation_ms,
         "document_fetch_ms": document_fetch_ms,
+        "bulk_getdocument_ms": bulk_getdocument_ms,
+        "fallback_fetch_ms": fallback_fetch_ms,
         "merge_ms": merge_ms,
         "record_ms": record_ms,
+        "printawb_calls": printawb_calls,
+        "getdocument_calls": getdocument_calls,
         "total_ms": total_ms,
     }
 

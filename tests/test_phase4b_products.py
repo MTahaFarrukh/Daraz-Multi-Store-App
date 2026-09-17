@@ -275,7 +275,13 @@ def test_api_products_list_and_create_probe_disabled(client, tenancy_env):
 
     res = client.get("/api/products", headers=headers)
     assert res.status_code == 200
-    assert res.json()["total"] >= 1
+    body = res.json()
+    assert body["total"] >= 1
+    listed = next(i for i in body["items"] if i["id"] == product["id"])
+    assert listed["detail_complete"] is True
+    assert listed.get("catalog_seen_at")
+    assert listed.get("detail_synced_at")
+    assert listed["variants_count"] == 1
 
     detail = client.get(f"/api/products/{product['id']}", headers=headers)
     assert detail.status_code == 200
@@ -295,6 +301,77 @@ def test_api_products_list_and_create_probe_disabled(client, tenancy_env):
         json={"destination_store_id": "store_b", "confirm": True},
     )
     assert probe.status_code == 403
+
+
+def test_postgres_product_row_mapping_includes_phase4d_columns():
+    """Regression: list SELECT must feed _product_row 28 cols (not 25) + variants_count."""
+    import inspect
+    from datetime import UTC, datetime
+
+    from src.db.repo import PostgresTenancyRepo
+
+    src = inspect.getsource(PostgresTenancyRepo.list_daraz_products)
+    assert "_PRODUCT_SELECT" in src
+    assert "row[:25]" not in src
+
+    select_cols = [
+        c.strip()
+        for c in PostgresTenancyRepo._PRODUCT_SELECT.replace("\n", " ").split(",")
+        if c.strip()
+    ]
+    assert select_cols[-6:] == [
+        "catalog_seen_at",
+        "detail_synced_at",
+        "detail_complete",
+        "synced_at",
+        "created_at",
+        "updated_at",
+    ]
+    assert len(select_cols) == 28
+
+    now = datetime.now(UTC)
+    repo = PostgresTenancyRepo.__new__(PostgresTenancyRepo)
+    product_row = (
+        "pid",
+        "wid",
+        "sid",
+        "item-1",
+        "Title",
+        None,
+        1000,
+        "Cat",
+        "Brand",
+        None,
+        None,
+        None,
+        None,
+        None,
+        "Active",
+        None,
+        "{}",
+        "{}",
+        "[]",
+        "[]",
+        None,
+        None,
+        now,
+        now,
+        True,
+        now,
+        now,
+        now,
+    )
+    listed_row = product_row + (3,)
+    with pytest.raises(IndexError):
+        # Old list path passed only 25 columns into a mapper that reads indices 0-27.
+        repo._product_row(listed_row[:25])
+
+    item = repo._product_row(listed_row[:-1])
+    item["variants_count"] = int(listed_row[-1] or 0)
+    assert item["detail_complete"] is True
+    assert item["catalog_seen_at"] is not None
+    assert item["detail_synced_at"] is not None
+    assert item["variants_count"] == 3
 
 
 def test_defaults_api(client, tenancy_env):

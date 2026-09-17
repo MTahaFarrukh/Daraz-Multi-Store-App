@@ -203,6 +203,10 @@ export type PrintValidateResponse = {
   already_printed: PrintTargetEntry[];
   not_eligible: PrintTargetEntry[];
   errors: PrintTargetEntry[];
+  /** Print-event partition of the original selection (independent of item hydrate). */
+  unprinted_ids?: string[];
+  printed_ids?: string[];
+  selected_count?: number;
 };
 
 export type PrintOrdersStartResponse = {

@@ -31,6 +31,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("DARAZ_APP_KEY", "appkey")
     monkeypatch.setenv("DARAZ_APP_SECRET", "appsecret")
+    # Per-order fetch path under test; bulk covered separately.
+    monkeypatch.setenv("PRINT_PREFER_BULK_GETDOCUMENT", "0")
     monkeypatch.setattr("src.crypto_tokens.TOKEN_KEY_PATH", key_path)
     return reset_repo_for_tests()
 
@@ -291,3 +293,137 @@ def test_empty_item_ids_after_hydrate_is_package_resolution_failed(
     assert result["failed_order_ids"] == [order["id"]]
     prints = repo.list_label_prints_for_orders(wid, [order["id"]])[order["id"]]
     assert prints == []
+
+
+def _bulk_pdf_resp() -> dict:
+    import base64
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return {
+        "code": "0",
+        "data": {
+            "document": {
+                "file": encoded,
+                "mime_type": "application/pdf",
+            }
+        },
+    }
+
+
+def test_bulk_getdocument_one_call_for_multiple_orders(
+    repo, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PRINT_PREFER_BULK_GETDOCUMENT", "1")
+    wid = repo.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _store(repo, wid)
+    o1 = _order_with_item(repo, wid, store, "B1")
+    o2 = _order_with_item(repo, wid, store, "B2")
+
+    mock_client = MagicMock()
+    mock_client.get_shipping_label.return_value = _bulk_pdf_resp()
+    monkeypatch.setattr("src.ops.client_for_store", lambda s: mock_client)
+
+    fetch_called = {"n": 0}
+
+    def fetch(*_a, **_k):
+        fetch_called["n"] += 1
+        raise AssertionError("fallback must not run on bulk success")
+
+    monkeypatch.setattr("src.ops._fetch_label_document", fetch)
+
+    result = print_labels_for_orders(
+        wid,
+        "u1",
+        [o1["id"], o2["id"]],
+        allow_reprint=False,
+        output=tmp_path / "bulk.pdf",
+    )
+    assert fetch_called["n"] == 0
+    assert mock_client.get_shipping_label.call_count == 1
+    ids_arg = mock_client.get_shipping_label.call_args.args[0]
+    assert set(ids_arg) == {"item-B1", "item-B2"}
+    assert result["print_status"] == "success"
+    assert result["summary"]["success_count"] == 2
+    assert result["timings_ms"]["getdocument_calls"] == 1
+    assert result["timings_ms"]["printawb_calls"] == 0
+    assert all(o["state"] == SUCCESS for o in result["outcomes"])
+    assert all(
+        d.get("fetch_source") == "get_document_bulk" for d in result["label_details"]
+    )
+    prints1 = repo.list_label_prints_for_orders(wid, [o1["id"]])[o1["id"]]
+    prints2 = repo.list_label_prints_for_orders(wid, [o2["id"]])[o2["id"]]
+    assert len(prints1) == 1
+    assert len(prints2) == 1
+    assert prints1[0].get("fetch_source") == "get_document_bulk"
+
+
+def test_bulk_fallback_isolates_failures(repo, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PRINT_PREFER_BULK_GETDOCUMENT", "1")
+    wid = repo.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _store(repo, wid)
+    o1 = _order_with_item(repo, wid, store, "F1")
+    o2 = _order_with_item(repo, wid, store, "F2")
+
+    from src.daraz_api import DarazApiError
+
+    mock_client = MagicMock()
+    mock_client.get_shipping_label.side_effect = DarazApiError("bulk fail", code="500")
+    monkeypatch.setattr("src.ops.client_for_store", lambda s: mock_client)
+
+    def fetch(_client, *, order_id, **_k):
+        if str(order_id) == "F2":
+            raise RuntimeError("per-order fail")
+        return (
+            _pdf_label(str(order_id)),
+            "get_document_pdf",
+            {"package_id": f"pkg-{order_id}", "print_awb_attempted": False},
+        )
+
+    monkeypatch.setattr("src.ops._fetch_label_document", fetch)
+
+    result = print_labels_for_orders(
+        wid,
+        "u1",
+        [o1["id"], o2["id"]],
+        allow_reprint=False,
+        output=tmp_path / "fb.pdf",
+    )
+    assert mock_client.get_shipping_label.call_count == 1
+    assert result["print_status"] == "partial_success"
+    by_id = {o["order_id"]: o for o in result["outcomes"]}
+    assert by_id[o1["id"]]["state"] == SUCCESS
+    assert by_id[o2["id"]]["state"] == DOCUMENT_FAILED
+    prints_ok = repo.list_label_prints_for_orders(wid, [o1["id"]])[o1["id"]]
+    prints_bad = repo.list_label_prints_for_orders(wid, [o2["id"]])[o2["id"]]
+    assert len(prints_ok) == 1
+    assert prints_bad == []
+    assert result["timings_ms"]["fallback_fetch_ms"] >= 0
+    assert result["timings_ms"]["getdocument_calls"] >= 1
+
+
+def test_bulk_print_events_only_on_success(repo, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PRINT_PREFER_BULK_GETDOCUMENT", "1")
+    wid = repo.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _store(repo, wid)
+    order = _order_with_item(repo, wid, store, "OK1")
+
+    mock_client = MagicMock()
+    mock_client.get_shipping_label.return_value = _bulk_pdf_resp()
+    monkeypatch.setattr("src.ops.client_for_store", lambda s: mock_client)
+
+    result = print_labels_for_orders(
+        wid,
+        "u1",
+        [order["id"]],
+        allow_reprint=False,
+        output=tmp_path / "ok.pdf",
+    )
+    assert result["outcomes"][0]["state"] == SUCCESS
+    prints = repo.list_label_prints_for_orders(wid, [order["id"]])[order["id"]]
+    assert len(prints) == 1
+    assert result["prints_recorded"] == 1

@@ -53,19 +53,33 @@ def validate_print_targets(
     workspace_id: str,
     order_uuids: list[str],
 ) -> dict[str, Any]:
-    """Classify orders into new_printable / already_printed / not_eligible / errors."""
+    """Classify orders into printable buckets; expose print-event partitions.
+
+    Hydrates missing order items first. UNPRINTED / printed is based only on
+    label print events — independent of whether items exist after hydrate.
+    Orders still missing item ids go to ``not_eligible`` (reason
+    ``no_order_item_ids``) but remain in ``unprinted_ids`` / ``printed_ids``.
+    """
+    from src.print_hydrate import hydrate_missing_order_items
+
+    hydrate = hydrate_missing_order_items(workspace_id, order_uuids)
+
     repo = get_repo()
     new_printable: list[dict[str, Any]] = []
     already_printed: list[dict[str, Any]] = []
     not_eligible: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
+    unprinted_ids: list[str] = []
+    printed_ids: list[str] = []
 
     seen: set[str] = set()
+    selected_order: list[str] = []
     for raw_id in order_uuids:
         oid = str(raw_id)
         if oid in seen:
             continue
         seen.add(oid)
+        selected_order.append(oid)
         order = repo.get_order_by_id(workspace_id, oid)
         if not order:
             errors.append({"order_id": oid, "error": "not_found"})
@@ -81,12 +95,20 @@ def validate_print_targets(
             "order_item_ids": meta["order_item_ids"],
             "package_id": meta["package_id"],
         }
-        if not eligible or not meta["order_item_ids"]:
-            not_eligible.append({**entry, "reason": "not_eligible"})
-            continue
         printed = repo.has_label_print(
             workspace_id, str(order["store_id"]), str(order["daraz_order_id"])
         )
+        if printed:
+            printed_ids.append(oid)
+        else:
+            unprinted_ids.append(oid)
+
+        if not eligible:
+            not_eligible.append({**entry, "reason": "not_eligible"})
+            continue
+        if not meta["order_item_ids"]:
+            not_eligible.append({**entry, "reason": "no_order_item_ids"})
+            continue
         if printed:
             already_printed.append(entry)
         else:
@@ -97,6 +119,10 @@ def validate_print_targets(
         "already_printed": already_printed,
         "not_eligible": not_eligible,
         "errors": errors,
+        "unprinted_ids": unprinted_ids,
+        "printed_ids": printed_ids,
+        "selected_count": len(selected_order),
+        "hydrate": hydrate,
     }
 
 

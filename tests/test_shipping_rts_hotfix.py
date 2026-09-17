@@ -251,11 +251,11 @@ def test_older_created_still_rts_included(tenancy_env, monkeypatch):
     )
     result = load_shipping_rts(wid, store_ids=["mtf"])
     assert result["orders"][0]["daraz_order_id"] == "OLD"
-    # Ensure request used created_after (wide window), not "today only"
+    # Primary uses update_after (not "today only"); older-created still returned by API
     kwargs = mock_client.get_orders.call_args.kwargs
     assert kwargs.get("status") == "ready_to_ship"
-    assert kwargs.get("created_after")
-    assert kwargs.get("update_after") is None
+    assert kwargs.get("update_after")
+    assert kwargs.get("created_after") is None
 
 
 def test_api_shipping_rts_endpoint(client, tenancy_env, monkeypatch):
@@ -314,3 +314,139 @@ def test_credential_isolation_fresh_client_per_store(tenancy_env, monkeypatch):
     )
     load_shipping_rts(wid, store_ids=["a", "b"])
     assert set(seen) == {"a", "b"}
+
+
+def test_orchestration_wall_is_not_sum_of_stores(tenancy_env, monkeypatch):
+    """Concurrent stores: wall_total ≈ slowest store, not sum of durations."""
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    _add_store(tenancy_env, wid, "fast")
+    _add_store(tenancy_env, wid, "slow")
+
+    def _fake_fetch(workspace_id, store, **_k):
+        slug = str(store.get("store_id") or "")
+        elapsed = 50 if slug == "fast" else 200
+        return {
+            "store_uuid": store.get("id"),
+            "store_id": slug,
+            "display_name": slug,
+            "ok": True,
+            "incomplete": False,
+            "error": None,
+            "countTotal": 0,
+            "unique": 0,
+            "returned": 0,
+            "elapsed_ms": elapsed,
+            "orders": [],
+            "timings_ms": {"total": elapsed, "orders_get": elapsed},
+            "request_timings": [],
+            "pages": 0,
+            "window_mode": "update_after",
+        }
+
+    monkeypatch.setattr("src.shipping_rts.fetch_store_live_rts", _fake_fetch)
+    result = load_shipping_rts(wid, store_ids=["fast", "slow"])
+    store_sum = sum(s["elapsed_ms"] for s in result["stores"])
+    assert store_sum == 250
+    assert result["timings_ms"]["slowest_store"] == 200
+    # Wall must not equal the arithmetic sum of per-store durations.
+    assert result["timings_ms"]["wall_total"] < store_sum
+    assert result["elapsed_ms"] == result["timings_ms"]["wall_total"]
+
+
+def test_pagination_stops_when_count_fits_one_page(tenancy_env, monkeypatch):
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _add_store(tenancy_env, wid, "mtf")
+    orders = [_daraz_order(str(i)) for i in range(24)]
+    mock_client = MagicMock()
+    mock_client.timeout = 45.0
+    mock_client.get_orders.return_value = {
+        "code": "0",
+        "data": {"countTotal": 24, "orders": orders},
+    }
+    monkeypatch.setattr("src.shipping_rts.client_for_store", lambda _s: mock_client)
+    monkeypatch.setattr(
+        "src.shipping_rts.access_token_expires_soon", lambda *_a, **_k: False
+    )
+    result = fetch_store_live_rts(wid, store)
+    assert mock_client.get_orders.call_count == 1
+    assert result["pages"] == 1
+    assert result["returned"] == 24
+    assert result["request_timings"][0]["returned_count"] == 24
+    assert result["request_timings"][0]["countTotal"] == 24
+    assert "api_ms" in result["request_timings"][0]
+
+
+def test_pagination_stops_when_returned_lt_page_size(tenancy_env, monkeypatch):
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _add_store(tenancy_env, wid, "mtf")
+    mock_client = MagicMock()
+    mock_client.timeout = 45.0
+    mock_client.get_orders.return_value = {
+        "code": "0",
+        "data": {
+            "countTotal": 3,
+            "orders": [_daraz_order("1"), _daraz_order("2"), _daraz_order("3")],
+        },
+    }
+    monkeypatch.setattr("src.shipping_rts.client_for_store", lambda _s: mock_client)
+    monkeypatch.setattr(
+        "src.shipping_rts.access_token_expires_soon", lambda *_a, **_k: False
+    )
+    result = fetch_store_live_rts(wid, store)
+    assert mock_client.get_orders.call_count == 1
+    assert result["pages"] == 1
+
+
+def test_update_after_primary_expand_when_empty(tenancy_env, monkeypatch):
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _add_store(tenancy_env, wid, "mtf")
+    mock_client = MagicMock()
+    mock_client.timeout = 45.0
+
+    def _get_orders(**kwargs):
+        if kwargs.get("update_after"):
+            return {"code": "0", "data": {"countTotal": 0, "orders": []}}
+        return {
+            "code": "0",
+            "data": {"countTotal": 1, "orders": [_daraz_order("EXPANDED")]},
+        }
+
+    mock_client.get_orders.side_effect = _get_orders
+    monkeypatch.setattr("src.shipping_rts.client_for_store", lambda _s: mock_client)
+    monkeypatch.setattr(
+        "src.shipping_rts.access_token_expires_soon", lambda *_a, **_k: False
+    )
+    result = fetch_store_live_rts(wid, store)
+    assert result["window_mode"] == "created_after_expand"
+    assert result["orders"][0]["daraz_order_id"] == "EXPANDED"
+    assert mock_client.get_orders.call_count == 2
+    first = mock_client.get_orders.call_args_list[0].kwargs
+    second = mock_client.get_orders.call_args_list[1].kwargs
+    assert first.get("update_after")
+    assert first.get("created_after") is None
+    assert second.get("created_after")
+    assert second.get("update_after") is None
+    assert len(result["request_timings"]) == 2
+    assert result["request_timings"][0]["mode"] == "update_after"
+    assert result["request_timings"][1]["mode"] == "created_after"
+
+
+def test_update_after_primary_used_when_nonempty(tenancy_env, monkeypatch):
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    store = _add_store(tenancy_env, wid, "mtf")
+    mock_client = MagicMock()
+    mock_client.timeout = 45.0
+    mock_client.get_orders.return_value = {
+        "code": "0",
+        "data": {"countTotal": 1, "orders": [_daraz_order("HIT")]},
+    }
+    monkeypatch.setattr("src.shipping_rts.client_for_store", lambda _s: mock_client)
+    monkeypatch.setattr(
+        "src.shipping_rts.access_token_expires_soon", lambda *_a, **_k: False
+    )
+    result = fetch_store_live_rts(wid, store)
+    assert result["window_mode"] == "update_after"
+    assert mock_client.get_orders.call_count == 1
+    kwargs = mock_client.get_orders.call_args.kwargs
+    assert kwargs.get("update_after")
+    assert kwargs.get("created_after") is None

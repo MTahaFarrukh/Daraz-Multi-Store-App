@@ -14,15 +14,17 @@ Does NOT use local status_group as the RTS membership set.
 
 Date window
 -----------
-Daraz requires CreatedAfter OR UpdatedAfter (E018). We use a wide
-``created_after`` (default 180 days) so older-created orders that became RTS
-today still appear. Status=ready_to_ship is the current-RTS filter — not
-"orders created today".
+Daraz requires CreatedAfter OR UpdatedAfter (E018). Primary fetch uses
+``update_after`` (default 90 days) — current RTS rows usually have a recent
+pack/RTS update. If primary returns zero orders, expand once with
+``created_after`` (default 180 days). Status=ready_to_ship is the current-RTS
+filter — not "orders created today".
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
@@ -41,9 +43,22 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 50
 MAX_OFFSET = 5000
-# Wide enough that older-created orders still eligible for current RTS appear.
-RTS_CREATED_AFTER_DAYS = 180
 STORE_CONCURRENCY = 3
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+# Primary: recent updates (packed / RTS'd). Fallback expand: wide created window.
+RTS_UPDATE_AFTER_DAYS = _env_int("RTS_UPDATE_AFTER_DAYS", 90)
+RTS_CREATED_AFTER_DAYS = _env_int("RTS_CREATED_AFTER_DAYS", 180)
 
 
 def _iso_ago(days: int) -> str:
@@ -59,11 +74,171 @@ def _min_max(values: list[str]) -> tuple[str | None, str | None]:
     return min(clean), max(clean)
 
 
+def _paginate_orders_get(
+    client: Any,
+    *,
+    update_after: str | None = None,
+    created_after: str | None = None,
+    token_refresh_triggered: bool = False,
+    token_refresh_ms: float = 0.0,
+    request_number_start: int = 1,
+) -> dict[str, Any]:
+    """Paginate ``/orders/get`` for ready_to_ship. Records per-page timings."""
+    seen: set[str] = set()
+    raw_orders: list[dict[str, Any]] = []
+    offset = 0
+    count_total: int | None = None
+    warning: str | None = None
+    pages = 0
+    orders_get_ms = 0.0
+    normalize_ms = 0.0
+    request_timings: list[dict[str, Any]] = []
+    request_number = request_number_start
+    last_daraz_code = "0"
+
+    while offset <= MAX_OFFSET:
+        page_token_triggered = token_refresh_triggered and request_number == request_number_start
+        page_token_ms = token_refresh_ms if page_token_triggered else 0.0
+
+        pg0 = time.perf_counter()
+        kwargs: dict[str, Any] = {
+            "status": "ready_to_ship",
+            "limit": PAGE_SIZE,
+            "offset": offset,
+            "sort_by": "updated_at",
+            "sort_direction": "DESC",
+        }
+        if update_after:
+            kwargs["update_after"] = update_after
+        if created_after:
+            kwargs["created_after"] = created_after
+        resp = client.get_orders(**kwargs)
+        api_ms = (time.perf_counter() - pg0) * 1000
+        orders_get_ms += api_ms
+        pages += 1
+
+        daraz_code = str(resp.get("code") or "0")
+        last_daraz_code = daraz_code
+        data = resp.get("data") or {}
+        ct = data.get("countTotal") or data.get("count_total") or data.get("total_count")
+        page_count_total: int | None = None
+        if ct is not None:
+            try:
+                page_count_total = int(ct)
+                count_total = page_count_total
+            except (TypeError, ValueError):
+                pass
+
+        n0 = time.perf_counter()
+        orders = extract_orders(resp)
+        page_normalize_ms = (time.perf_counter() - n0) * 1000
+        normalize_ms += page_normalize_ms
+
+        request_timings.append(
+            {
+                "request_number": request_number,
+                "offset": offset,
+                "limit": PAGE_SIZE,
+                "returned_count": len(orders),
+                "countTotal": page_count_total,
+                "api_ms": round(api_ms, 1),
+                "daraz_code": daraz_code,
+                "normalize_ms": round(page_normalize_ms, 1),
+                "token_refresh_triggered": page_token_triggered,
+                "token_refresh_ms": round(page_token_ms, 1),
+                "mode": "update_after" if update_after else "created_after",
+            }
+        )
+        request_number += 1
+
+        if not orders:
+            break
+
+        page_ids: list[str] = []
+        overlap = False
+        for order in orders:
+            oid = str(order.get("order_id") or "")
+            page_ids.append(oid)
+            if oid and oid in seen:
+                overlap = True
+                break
+            if oid:
+                seen.add(oid)
+                raw_orders.append(order)
+        if overlap:
+            warning = "pagination_overlap_detected"
+            break
+        if len(set(page_ids)) < len([x for x in page_ids if x]):
+            warning = "duplicate_ids_in_page"
+            break
+
+        # Stop when this page holds everything or is a short page.
+        if count_total is not None and count_total <= PAGE_SIZE:
+            break
+        if len(orders) < PAGE_SIZE:
+            break
+        if count_total is not None and (offset + len(orders)) >= count_total:
+            break
+
+        offset += PAGE_SIZE
+        if offset > MAX_OFFSET:
+            warning = "pagination_truncated_offset_limit"
+            break
+
+    incomplete = False
+    if count_total is not None and count_total > len(seen):
+        incomplete = True
+        warning = warning or "countTotal_mismatch"
+
+    return {
+        "raw_orders": raw_orders,
+        "seen": seen,
+        "offset": offset,
+        "pages": pages,
+        "count_total": count_total,
+        "warning": warning,
+        "incomplete": incomplete,
+        "orders_get_ms": orders_get_ms,
+        "normalize_ms": normalize_ms,
+        "request_timings": request_timings,
+        "daraz_code": last_daraz_code,
+        "next_request_number": request_number,
+    }
+
+
+def _batch_print_state(
+    repo: Any,
+    workspace_id: str,
+    store_uuid: str,
+    rows: list[tuple[str, str | None]],
+) -> dict[str, dict[str, Any]]:
+    """Batch print reconcile for (daraz_order_id, local_id) pairs."""
+    local_ids = [lid for _, lid in rows if lid]
+    by_local: dict[str, list[dict[str, Any]]] = {}
+    if local_ids:
+        by_local = repo.list_label_prints_for_orders(workspace_id, local_ids)
+
+    out: dict[str, dict[str, Any]] = {}
+    for daraz_oid, local_id in rows:
+        if local_id:
+            prints = by_local.get(str(local_id), [])
+            last = prints[0] if prints else None
+            out[daraz_oid] = {
+                "print_count": len(prints),
+                "last_printed_at": last.get("printed_at") if last else None,
+            }
+        else:
+            pc = repo.count_label_prints(workspace_id, store_uuid, daraz_oid)
+            out[daraz_oid] = {"print_count": pc, "last_printed_at": None}
+    return out
+
+
 def fetch_store_live_rts(
     workspace_id: str,
     store: dict[str, Any],
     *,
     created_after: str | None = None,
+    update_after: str | None = None,
     upsert_headers: bool = True,
 ) -> dict[str, Any]:
     """Fetch current ready_to_ship for one store. Isolated credentials."""
@@ -96,11 +271,18 @@ def fetch_store_live_rts(
             "elapsed_ms": 0,
         }
 
-    window = created_after or _iso_ago(RTS_CREATED_AFTER_DAYS)
+    update_window = update_after or _iso_ago(RTS_UPDATE_AFTER_DAYS)
+    created_window = created_after or _iso_ago(RTS_CREATED_AFTER_DAYS)
     token_refresh_ms = 0.0
+    token_refresh_triggered = False
     orders_get_ms = 0.0
     normalize_ms = 0.0
     reconcile_ms = 0.0
+    request_timings: list[dict[str, Any]] = []
+    window_mode = "update_after"
+    used_created_after: str | None = None
+    used_update_after: str | None = update_window
+
     try:
         try:
 
@@ -108,6 +290,7 @@ def fetch_store_live_rts(
                 return repo.upsert_store(workspace_id, record)
 
             if access_token_expires_soon(store, within_minutes=60):
+                token_refresh_triggered = True
                 tr0 = time.perf_counter()
                 refresh_one_store(store, upsert_fn=_upsert)
                 token_refresh_ms = (time.perf_counter() - tr0) * 1000
@@ -120,66 +303,78 @@ def fetch_store_live_rts(
         client = client_for_store(refreshed)
         client.timeout = 45.0
 
-        seen: set[str] = set()
-        raw_orders: list[dict[str, Any]] = []
-        offset = 0
-        count_total: int | None = None
-        warning: str | None = None
-        pages = 0
-
-        while offset <= MAX_OFFSET:
-            pg0 = time.perf_counter()
-            resp = client.get_orders(
-                status="ready_to_ship",
-                created_after=window,
-                limit=PAGE_SIZE,
-                offset=offset,
-                sort_by="updated_at",
-                sort_direction="DESC",
+        # Explicit created_after override (caller) skips update_after primary.
+        if created_after and not update_after:
+            window_mode = "created_after"
+            used_update_after = None
+            used_created_after = created_window
+            page_result = _paginate_orders_get(
+                client,
+                created_after=created_window,
+                token_refresh_triggered=token_refresh_triggered,
+                token_refresh_ms=token_refresh_ms,
             )
-            orders_get_ms += (time.perf_counter() - pg0) * 1000
-            pages += 1
-            data = resp.get("data") or {}
-            ct = data.get("countTotal") or data.get("count_total") or data.get("total_count")
-            if ct is not None:
-                try:
-                    count_total = int(ct)
-                except (TypeError, ValueError):
-                    pass
-            n0 = time.perf_counter()
-            orders = extract_orders(resp)
-            normalize_ms += (time.perf_counter() - n0) * 1000
-            if not orders:
-                break
+            request_timings.extend(page_result["request_timings"])
+            orders_get_ms += page_result["orders_get_ms"]
+            normalize_ms += page_result["normalize_ms"]
+            logger.info(
+                "RTS store=%s mode=created_after days=%s returned=%s",
+                slug,
+                RTS_CREATED_AFTER_DAYS,
+                len(page_result["raw_orders"]),
+            )
+        else:
+            page_result = _paginate_orders_get(
+                client,
+                update_after=update_window,
+                token_refresh_triggered=token_refresh_triggered,
+                token_refresh_ms=token_refresh_ms,
+            )
+            request_timings.extend(page_result["request_timings"])
+            orders_get_ms += page_result["orders_get_ms"]
+            normalize_ms += page_result["normalize_ms"]
 
-            page_ids: list[str] = []
-            overlap = False
-            for order in orders:
-                oid = str(order.get("order_id") or "")
-                page_ids.append(oid)
-                if oid and oid in seen:
-                    overlap = True
-                    break
-                if oid:
-                    seen.add(oid)
-                    raw_orders.append(order)
-            if overlap:
-                warning = "pagination_overlap_detected"
-                break
-            if len(set(page_ids)) < len([x for x in page_ids if x]):
-                warning = "duplicate_ids_in_page"
-                break
-            if len(orders) < PAGE_SIZE:
-                break
-            offset += PAGE_SIZE
-            if offset > MAX_OFFSET:
-                warning = "pagination_truncated_offset_limit"
-                break
+            if not page_result["raw_orders"]:
+                window_mode = "created_after_expand"
+                used_created_after = created_window
+                used_update_after = update_window  # primary was attempted
+                logger.info(
+                    "RTS store=%s primary update_after empty; expanding created_after=%sd",
+                    slug,
+                    RTS_CREATED_AFTER_DAYS,
+                )
+                page_result = _paginate_orders_get(
+                    client,
+                    created_after=created_window,
+                    token_refresh_triggered=False,
+                    token_refresh_ms=0.0,
+                    request_number_start=page_result["next_request_number"],
+                )
+                request_timings.extend(page_result["request_timings"])
+                orders_get_ms += page_result["orders_get_ms"]
+                normalize_ms += page_result["normalize_ms"]
+                logger.info(
+                    "RTS store=%s mode=created_after_expand days=%s returned=%s",
+                    slug,
+                    RTS_CREATED_AFTER_DAYS,
+                    len(page_result["raw_orders"]),
+                )
+            else:
+                logger.info(
+                    "RTS store=%s mode=update_after days=%s returned=%s",
+                    slug,
+                    RTS_UPDATE_AFTER_DAYS,
+                    len(page_result["raw_orders"]),
+                )
 
-        incomplete = False
-        if count_total is not None and count_total > len(seen):
-            incomplete = True
-            warning = warning or "countTotal_mismatch"
+        raw_orders: list[dict[str, Any]] = page_result["raw_orders"]
+        seen: set[str] = page_result["seen"]
+        offset = page_result["offset"]
+        pages = len(request_timings)
+        count_total = page_result["count_total"]
+        warning = page_result["warning"]
+        incomplete = page_result["incomplete"]
+        daraz_code = page_result["daraz_code"]
 
         created_vals = [str(o.get("created_at") or "") for o in raw_orders]
         updated_vals = [str(o.get("updated_at") or "") for o in raw_orders]
@@ -188,7 +383,7 @@ def fetch_store_live_rts(
 
         # Reconcile print events + optional header upsert (no item hydration).
         rc0 = time.perf_counter()
-        out_orders: list[dict[str, Any]] = []
+        meta_rows: list[tuple[str, str | None, dict[str, Any]]] = []
         for order in raw_orders:
             daraz_oid = str(order.get("order_id") or "")
             if not daraz_oid:
@@ -201,14 +396,22 @@ def fetch_store_live_rts(
                     payload["status_group"] = "ready_to_ship"
                     row = repo.upsert_daraz_order(payload)
                     local_id = str(row["id"])
+            meta_rows.append((daraz_oid, local_id, order))
 
-            print_count = repo.count_label_prints(workspace_id, store_uuid, daraz_oid)
-            last_printed_at = None
-            if print_count and local_id:
-                summary = repo.get_print_summary_for_order(workspace_id, local_id)
-                last_printed_at = summary.get("last_printed_at")
-                print_count = int(summary.get("print_count") or print_count)
+        print_state = _batch_print_state(
+            repo,
+            workspace_id,
+            store_uuid,
+            [(d, lid) for d, lid, _ in meta_rows],
+        )
 
+        out_orders: list[dict[str, Any]] = []
+        for daraz_oid, local_id, order in meta_rows:
+            state = print_state.get(daraz_oid) or {
+                "print_count": 0,
+                "last_printed_at": None,
+            }
+            print_count = int(state.get("print_count") or 0)
             out_orders.append(
                 {
                     "id": local_id,
@@ -227,7 +430,7 @@ def fetch_store_live_rts(
                     "updated_at_daraz": order.get("updated_at"),
                     "has_print": print_count > 0,
                     "print_count": print_count,
-                    "last_printed_at": last_printed_at,
+                    "last_printed_at": state.get("last_printed_at"),
                     "fetch_source": "live_rts",
                 }
             )
@@ -240,11 +443,12 @@ def fetch_store_live_rts(
             "ok": ok,
             "incomplete": incomplete or warning is not None,
             "error": warning,
-            "created_after": window,
-            "update_after": None,
+            "window_mode": window_mode,
+            "created_after": used_created_after,
+            "update_after": used_update_after,
             "offset_final": offset,
             "pages": pages,
-            "daraz_code": "0",
+            "daraz_code": daraz_code,
             "countTotal": count_total,
             "returned": len(raw_orders),
             "unique": len(seen),
@@ -254,12 +458,14 @@ def fetch_store_live_rts(
             "min_updated_at": min_u,
             "max_updated_at": max_u,
             "elapsed_ms": elapsed,
+            "request_timings": request_timings,
             "timings_ms": {
                 "token_refresh": round(token_refresh_ms, 1),
                 "orders_get": round(orders_get_ms, 1),
                 "normalize": round(normalize_ms, 1),
                 "print_reconcile": round(reconcile_ms, 1),
                 "total": elapsed,
+                "request_timings": request_timings,
             },
             "orders": out_orders,
         }
@@ -269,7 +475,10 @@ def fetch_store_live_rts(
             "ok": False,
             "incomplete": True,
             "error": f"daraz:{exc.code}:{str(exc)[:160]}",
-            "created_after": window,
+            "window_mode": window_mode,
+            "created_after": used_created_after,
+            "update_after": used_update_after,
+            "request_timings": request_timings,
             "elapsed_ms": int((time.perf_counter() - t0) * 1000),
             "orders": [],
             "returned": 0,
@@ -282,7 +491,10 @@ def fetch_store_live_rts(
             "ok": False,
             "incomplete": True,
             "error": f"{type(exc).__name__}:{str(exc)[:160]}",
-            "created_after": window,
+            "window_mode": window_mode,
+            "created_after": used_created_after,
+            "update_after": used_update_after,
+            "request_timings": request_timings,
             "elapsed_ms": int((time.perf_counter() - t0) * 1000),
             "orders": [],
             "returned": 0,
@@ -360,8 +572,11 @@ def load_shipping_rts(
                 "min_created_at": r.get("min_created_at"),
                 "max_created_at": r.get("max_created_at"),
                 "created_after": r.get("created_after"),
+                "update_after": r.get("update_after"),
+                "window_mode": r.get("window_mode"),
                 "pages": r.get("pages"),
                 "timings_ms": r.get("timings_ms"),
+                "request_timings": r.get("request_timings"),
             }
         )
 
@@ -379,11 +594,13 @@ def load_shipping_rts(
         "unprinted_count": sum(1 for o in merged if not o.get("has_print")),
         "elapsed_ms": total_elapsed,
         "concurrency": STORE_CONCURRENCY,
+        "rts_update_after_days": RTS_UPDATE_AFTER_DAYS,
         "rts_created_after_days": RTS_CREATED_AFTER_DAYS,
         "timings_ms": {
             "wall_total": total_elapsed,
             "slowest_store": slowest_store_ms,
             "serialize": serialize_ms,
+            # Wall clock is max(store) under concurrency — never sum store durations.
             "stores": [
                 {
                     "store_id": r.get("store_id"),

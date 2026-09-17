@@ -3018,13 +3018,7 @@ class PostgresTenancyRepo:
             ).fetchone()[0]
             rows = conn.execute(
                 f"""
-                SELECT p.id, p.workspace_id, p.store_id, p.daraz_item_id, p.title,
-                       p.title_en, p.primary_category_id, p.primary_category_name,
-                       p.brand, p.description, p.description_en, p.short_description,
-                       p.short_description_en, p.package_content, p.status_raw,
-                       p.product_url, p.attributes_json, p.variation_json,
-                       p.images_json, p.market_images_json, p.video_ref, p.raw_json,
-                       p.synced_at, p.created_at, p.updated_at,
+                SELECT {self._PRODUCT_SELECT},
                        (SELECT COUNT(*)::int FROM daraz_product_variants v
                          WHERE v.product_id = p.id)
                 FROM daraz_products p
@@ -3037,8 +3031,8 @@ class PostgresTenancyRepo:
 
         items = []
         for row in rows:
-            item = self._product_row(row[:25])
-            item["variants_count"] = int(row[25] or 0)
+            item = self._product_row(row[:-1])
+            item["variants_count"] = int(row[-1] or 0)
             items.append(item)
         return {
             "items": items,

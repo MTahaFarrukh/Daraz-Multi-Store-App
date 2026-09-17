@@ -78,3 +78,48 @@ describe("RTS selection helpers", () => {
     expect(part.printed.map((o) => o.id)).toEqual(["b"]);
   });
 });
+
+describe("HITL 28/21/7 Select All must not drop unprinted", () => {
+  /** Live bug: 28 RTS, 21 printed, 7 unprinted (possibly unhydrated) — Select All. */
+  const rts28 = Array.from({ length: 28 }, (_, i) => {
+    const isPrinted = i < 21;
+    return {
+      id: `ord-${i + 1}`,
+      status_group: "ready_to_ship" as const,
+      has_print: isPrinted,
+      print_count: isPrinted ? 1 : 0,
+      // Unprinted may lack local items; print status is still event-based.
+      items_hydrated: isPrinted,
+    };
+  });
+
+  it("Select All partitions 28 selected → Print 7 Unprinted / Reprint All 28", () => {
+    const allIds = selectAllIds(rts28);
+    expect(allIds).toHaveLength(28);
+    const part = partitionPrintSelection(rts28, allIds);
+    expect(part.selected).toHaveLength(28);
+    expect(part.printed).toHaveLength(21);
+    expect(part.unprinted).toHaveLength(7);
+    // HITL button labels
+    expect(`Print ${part.unprinted.length} Unprinted`).toBe("Print 7 Unprinted");
+    expect(`Reprint All ${part.selected.length}`).toBe("Reprint All 28");
+    // Assert selected IDs match visible order ids
+    expect(part.selected.map((o) => o.id).sort()).toEqual([...allIds].sort());
+  });
+
+  it("Select Unprinted selects exactly the 7 (print must not include the 21)", () => {
+    const unprintedIds = selectUnprintedIds(rts28);
+    expect(unprintedIds).toEqual([
+      "ord-22",
+      "ord-23",
+      "ord-24",
+      "ord-25",
+      "ord-26",
+      "ord-27",
+      "ord-28",
+    ]);
+    const part = partitionPrintSelection(rts28, unprintedIds);
+    expect(part.printed).toHaveLength(0);
+    expect(part.unprinted.map((o) => o.id)).toEqual(unprintedIds);
+  });
+});

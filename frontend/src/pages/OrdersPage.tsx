@@ -25,11 +25,12 @@ import {
 } from "@/components/ui/Primitives";
 import {
   formatPrintTime,
+  partitionPrintSelection,
   resolvePrintLabelStatus,
   selectAllIds,
   selectUnprintedIds,
 } from "@/lib/printLabelStatus";
-import type { PrintStateFilter, PrintValidateResponse, UnifiedOrder } from "@/types/api";
+import type { PrintStateFilter, UnifiedOrder } from "@/types/api";
 
 const STATUS_TABS: Array<{ key: string; label: string }> = [
   { key: "", label: "All" },
@@ -127,8 +128,8 @@ export function OrdersPage() {
   const [busy, setBusy] = useState("");
 
   const [hitlOpen, setHitlOpen] = useState(false);
-  const [hitlValidation, setHitlValidation] = useState<PrintValidateResponse | null>(null);
-  const [pendingPrintIds, setPendingPrintIds] = useState<string[]>([]);
+  const [pendingAllIds, setPendingAllIds] = useState<string[]>([]);
+  const [pendingUnprintedIds, setPendingUnprintedIds] = useState<string[]>([]);
 
   const storeFilterParams = useMemo(() => {
     if (groupId) return { group_id: groupId };
@@ -286,37 +287,31 @@ export function OrdersPage() {
       setError("Select at least one order");
       return;
     }
+    const visibleIds = new Set(orders.map((o) => o.id).filter(Boolean));
+    if (ids.some((id) => !visibleIds.has(id))) {
+      setError("Selection includes orders not on this page — adjust selection and try again");
+      return;
+    }
+    // HITL from loaded rows + selection (print events), not post-validate printable subset.
+    const part = partitionPrintSelection(orders, ids);
     setError("");
     setOk("");
     setBusy("Validating print targets…");
     try {
-      const validation = await validateMutation.mutateAsync(ids);
+      await validateMutation.mutateAsync(ids);
       setBusy("");
-      const printable = [
-        ...validation.new_printable.map((x) => x.order_id),
-        ...validation.already_printed.map((x) => x.order_id),
-      ];
-      if (!printable.length) {
-        const reasons = [
-          validation.not_eligible.length
-            ? `${validation.not_eligible.length} not eligible`
-            : "",
-          validation.errors.length ? `${validation.errors.length} not found` : "",
-        ]
-          .filter(Boolean)
-          .join(", ");
-        setError(reasons ? `Nothing to print (${reasons})` : "Nothing to print");
+      if (!part.selected.length) {
+        setError("Nothing to print");
         return;
       }
-      if (validation.already_printed.length) {
-        setHitlValidation(validation);
-        setPendingPrintIds(printable);
+      if (part.printed.length) {
+        setPendingAllIds(part.selected.map((o) => o.id));
+        setPendingUnprintedIds(part.unprinted.map((o) => o.id));
         setHitlOpen(true);
         return;
       }
-      // Prefer unprinted only when selection has no already-printed
       await runPrint(
-        validation.new_printable.map((x) => x.order_id),
+        part.unprinted.map((o) => o.id),
         false
       );
     } catch (err) {
@@ -331,17 +326,16 @@ export function OrdersPage() {
 
   async function confirmReprint(includePrinted: boolean) {
     setHitlOpen(false);
-    if (!hitlValidation) return;
-    const ids = includePrinted
-      ? pendingPrintIds
-      : hitlValidation.new_printable.map((x) => x.order_id);
+    const ids = includePrinted ? pendingAllIds : pendingUnprintedIds;
     if (!ids.length) {
-      setError("No unprinted orders in this selection");
+      setError(
+        includePrinted ? "Nothing to reprint" : "No unprinted orders in this selection"
+      );
       return;
     }
     await runPrint(ids, includePrinted);
-    setHitlValidation(null);
-    setPendingPrintIds([]);
+    setPendingAllIds([]);
+    setPendingUnprintedIds([]);
   }
 
   const allVisibleSelected =
@@ -866,22 +860,19 @@ export function OrdersPage() {
         title="Confirm label print"
         onClose={() => {
           setHitlOpen(false);
-          setHitlValidation(null);
+          setPendingAllIds([]);
+          setPendingUnprintedIds([]);
         }}
       >
-        {hitlValidation ? (
+        {pendingAllIds.length ? (
           <>
             <p style={{ margin: 0 }}>
-              <strong>
-                {(hitlValidation.new_printable.length || 0) +
-                  (hitlValidation.already_printed.length || 0)}{" "}
-                selected
-              </strong>
+              <strong>{pendingAllIds.length} selected</strong>
             </p>
             <p style={{ margin: 0 }}>
-              {hitlValidation.new_printable.length} unprinted
+              {pendingUnprintedIds.length} unprinted
               <br />
-              {hitlValidation.already_printed.length} already printed
+              {pendingAllIds.length - pendingUnprintedIds.length} already printed
             </p>
             <p style={{ margin: 0, color: "var(--muted)" }}>
               Reprinting may create duplicate physical labels. “Print Unprinted” never
@@ -895,18 +886,19 @@ export function OrdersPage() {
             className="btn btn-ghost"
             onClick={() => {
               setHitlOpen(false);
-              setHitlValidation(null);
+              setPendingAllIds([]);
+              setPendingUnprintedIds([]);
             }}
           >
             Cancel
           </button>
-          {hitlValidation?.new_printable.length ? (
+          {pendingUnprintedIds.length ? (
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => void confirmReprint(false)}
             >
-              Print {hitlValidation.new_printable.length} Unprinted
+              Print {pendingUnprintedIds.length} Unprinted
             </button>
           ) : null}
           <button
@@ -914,9 +906,7 @@ export function OrdersPage() {
             className="btn btn-accent"
             onClick={() => void confirmReprint(true)}
           >
-            Reprint All{" "}
-            {(hitlValidation?.new_printable.length || 0) +
-              (hitlValidation?.already_printed.length || 0)}
+            Reprint All {pendingAllIds.length}
           </button>
         </div>
       </Dialog>
