@@ -61,7 +61,7 @@ def begin_print_job(*, workspace_id: str, user_id: str) -> str:
         "workspace_id": workspace_id,
         "user_id": user_id,
         "status": "processing",
-        "message": "Starting print job…",
+        "message": "Print job queued…",
         "error": None,
         "result": None,
         "output_path": str(job_pdf_path(workspace_id, job_id)),

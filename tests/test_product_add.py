@@ -200,7 +200,7 @@ def test_gate_off_never_calls_create_product(tenancy_env, monkeypatch):
 
 
 def test_partial_multi_store_success(tenancy_env, monkeypatch):
-    """One dest READY (gate on, no execute), one NEEDS_ATTENTION missing price via override path."""
+    """Dry-run (execute=False) stays READY; default Add with gate on creates."""
     monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "true")
     repo = tenancy_env
     from src.auth import issue_test_token
@@ -315,21 +315,21 @@ def test_partial_multi_store_success(tenancy_env, monkeypatch):
                             "message": "ok",
                         },
                     ):
-                        # First call: execute false — READY on store-b
+                        # Explicit dry-run
                         result = add_product_from_connected(
                             wid,
                             "store-a",
                             "999",
                             [str(store_b["store_id"])],
                             execute=False,
-                            confirm=False,
                         )
 
     assert result["product_create_enabled"] is True
     assert result["destinations"][0]["status"] in {"READY", "NEEDS_ATTENTION", "POSSIBLE_DUPLICATE"}
     assert result["created_count"] == 0
+    mock_client.create_product.assert_not_called()
 
-    # Execute path creates on store-b
+    # Default SaaS Add (execute omitted) creates — no probe confirm required
     with patch("src.product_add.fetch_connected_product") as fetch_fn:
         fetch_fn.return_value = {
             "product": product,
@@ -375,10 +375,127 @@ def test_partial_multi_store_success(tenancy_env, monkeypatch):
                             "store-a",
                             "999",
                             [str(store_b["store_id"])],
-                            execute=True,
-                            confirm=True,
+                            # omit execute/confirm — SaaS default executes when gate on
                         )
 
     assert created["destinations"][0]["status"] in {"Active", "Created", "Pending QC"}
     assert created["created_count"] == 1
     mock_client.create_product.assert_called_once()
+
+
+def test_saas_add_does_not_require_probe_confirm(tenancy_env, monkeypatch):
+    """ALLOW_PRODUCT_CREATE=1 must CreateProduct without confirm=true."""
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "1")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "0")
+    repo = tenancy_env
+    from src.auth import issue_test_token
+    from fastapi.testclient import TestClient
+    from src.app import app
+
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {issue_test_token('u-saas', email='s@x.com')}"}
+    boot = client.post("/api/bootstrap", headers=headers)
+    wid = boot.json()["workspace"]["id"]
+    store_a = _add_store(repo, wid, "store-a")
+    store_b = _add_store(repo, wid, "store-b")
+    repo.upsert_product_defaults(
+        wid,
+        {
+            "default_package_weight": 0.5,
+            "default_package_length": 10,
+            "default_package_width": 10,
+            "default_package_height": 10,
+            "default_initial_quantity": 1,
+        },
+    )
+    product = repo.upsert_daraz_product(
+        {
+            "workspace_id": wid,
+            "store_id": store_a["id"],
+            "daraz_item_id": "888",
+            "title": "Src",
+            "primary_category_id": 1,
+            "brand": "No Brand",
+            "status_raw": "Active",
+            "description_en": "<p>x</p>",
+            "images_json": [{"url": "https://static-01.daraz.pk/p/x.jpg"}],
+            "detail_complete": True,
+        }
+    )
+    repo.replace_product_variants(
+        wid,
+        str(product["id"]),
+        [
+            {
+                "workspace_id": wid,
+                "store_id": store_a["id"],
+                "product_id": product["id"],
+                "daraz_sku_id": "sku8",
+                "seller_sku": "S8",
+                "price": 50,
+                "quantity": 1,
+                "sale_props_json": {},
+                "package_weight": 0.5,
+                "package_length": 10,
+                "package_width": 10,
+                "package_height": 10,
+            }
+        ],
+    )
+    product = repo.get_daraz_product(wid, str(product["id"])) or product
+
+    from src.product_add import add_product_from_connected
+
+    resolve_ok = MagicMock()
+    resolve_ok.status = "completed"
+    resolve_ok.migrated_url = "https://static-01.daraz.pk/p/x.jpg"
+    resolve_ok.strategy = "reuse_cdn"
+    resolve_ok.source_url = "https://static-01.daraz.pk/p/x.jpg"
+    resolve_ok.error = None
+
+    with patch("src.product_add.fetch_connected_product") as fetch_fn:
+        fetch_fn.return_value = {
+            "product": product,
+            "variants": [],
+            "source_store": {"store_id": "store-a"},
+            "timings_ms": {},
+            "api_calls": {},
+        }
+        with patch("src.product_add.client_for_store") as client_fn:
+            mock_client = MagicMock()
+            mock_client.create_product.return_value = {
+                "code": "0",
+                "data": {"item_id": "777"},
+            }
+            mock_client.get_product_item.return_value = {
+                "data": {"item_id": "777", "status": "Pending QC"}
+            }
+            client_fn.return_value = mock_client
+            with patch(
+                "src.product_add.DarazImageMigrationService.resolve_many",
+                return_value=[resolve_ok],
+            ):
+                with patch(
+                    "src.product_add.validate_draft_against_category",
+                    return_value={
+                        "valid": True,
+                        "missing_required": [],
+                        "invalid_values": [],
+                    },
+                ):
+                    with patch(
+                        "src.product_add.resolve_brand_for_category",
+                        return_value={"status": "NO_BRAND", "brand": "No Brand"},
+                    ):
+                        # API-style: no execute, no confirm
+                        out = add_product_from_connected(
+                            wid, "store-a", "888", [store_b["store_id"]]
+                        )
+
+    assert out["destinations"][0]["status"] == "Pending QC"
+    assert out["created_count"] == 1
+    mock_client.create_product.assert_called_once()
+    # Must not look like probe READY
+    assert out["destinations"][0].get("reason") != (
+        "Validation passed; execute/confirm required to create"
+    )

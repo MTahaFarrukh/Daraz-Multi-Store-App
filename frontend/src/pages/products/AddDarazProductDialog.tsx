@@ -157,69 +157,20 @@ export function AddDarazProductDialog({
         if (res.draft_result) {
           setDraftPreview(res.draft_result as Record<string, unknown>);
         }
-        onOk("Draft ready — review below. Create still respects the product-create gate.");
+        onOk("Draft ready — review below.");
         return;
       }
 
-      // Forced execute path (Retry Failed when gate already known on)
-      if (options?.execute && options?.confirm) {
-        setBusy("Creating products on selected stores…");
-        const res = await callApi({
-          execute: true,
-          confirm: true,
-          edit_before: false,
-          destination_store_ids: destIds,
-        });
-        setResult(res);
-        applyResultMessages(res);
-        return;
-      }
-
-      setBusy("Fetching product… Validating destinations…");
-      const analyzed = await callApi({
-        execute: false,
-        confirm: false,
-        edit_before: false,
-        destination_store_ids: destIds,
-      });
-      setResult(analyzed);
-
-      if (!analyzed.product_create_enabled) {
-        onOk(
-          `Validated ${analyzed.destinations?.length || 0} store(s) · create blocked pending supervised proof`
-        );
-        onError(
-          "Product create is disabled (ALLOW_PRODUCT_CREATE / ALLOW_PRODUCT_CREATE_PROBE). Validation results are shown below — nothing was created."
-        );
-        return;
-      }
-
-      const readyIds = (analyzed.destinations || [])
-        .filter((d) => d.status === "READY" && d.store?.store_id)
-        .map((d) => String(d.store!.store_id));
-
-      if (!readyIds.length) {
-        applyResultMessages(analyzed);
-        return;
-      }
-
-      const ok = window.confirm(
-        `Validation passed for ${readyIds.length} store(s). Create products now?`
-      );
-      if (!ok) {
-        onOk("Validation complete — create not submitted.");
-        return;
-      }
-
-      setBusy("Creating products…");
-      const created = await callApi({
+      // Single click Add Product = create when ALLOW_PRODUCT_CREATE=1 (backend default).
+      setBusy("Analyzing product… Creating on Daraz…");
+      const res = await callApi({
         execute: true,
         confirm: true,
         edit_before: false,
-        destination_store_ids: readyIds,
+        destination_store_ids: destIds,
       });
-      setResult(created);
-      applyResultMessages(created);
+      setResult(res);
+      applyResultMessages(res);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Add product failed");
     } finally {
@@ -230,7 +181,7 @@ export function AddDarazProductDialog({
   function applyResultMessages(res: AddProductResponse) {
     if (res.status === "BLOCKED_CREATE") {
       onOk(
-        `Validated ${res.destinations?.length || 0} store(s) · create blocked pending supervised proof`
+        `Validated ${res.destinations?.length || 0} store(s) · create blocked (ALLOW_PRODUCT_CREATE off)`
       );
       onError(
         "Product create is disabled. Validation results are shown below — nothing was created."
@@ -250,8 +201,10 @@ export function AddDarazProductDialog({
             ? " — set a price override and retry"
             : "")
       );
+    } else if (res.failed_count) {
+      onError(`${res.failed_count} store(s) failed — see details below`);
     } else {
-      onOk(res.status || "Analyzed");
+      onOk(res.status || "Done");
     }
   }
 

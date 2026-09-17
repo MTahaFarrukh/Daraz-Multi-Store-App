@@ -221,7 +221,15 @@ export function ShippingPage() {
       const started = await printMutation.mutateAsync({ orderIds, allowReprint });
       const jobId = started.job_id;
       if (!jobId) throw new Error("Print job did not return a job_id");
-      const status = await pollPrintJob(jobId, (msg) => setBusy(msg || "Printing…"));
+      // Job is queued — leave "Starting…" immediately (Daraz work is background)
+      setBusy("Gathering labels…");
+      const status = await pollPrintJob(jobId, (msg) => {
+        if (msg && msg !== "Starting print job…" && msg !== "Print job queued…") {
+          setBusy(msg);
+        } else {
+          setBusy("Gathering labels…");
+        }
+      });
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }

@@ -923,12 +923,29 @@ def api_print_labels_orders(
     wait: bool = Query(False, description="Block until done (local dev only)"),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    import threading
+    import time as _time
+
+    t_req = _time.perf_counter()
+    # Auth already complete via Depends(get_workspace_context)
+    auth_ms = 0.0  # measured by middleware; request enters authenticated
+
+    if not body.order_ids:
+        raise HTTPException(status_code=400, detail="No orders selected")
+
+    t_parse = _time.perf_counter()
+    # Lightweight selection parse only — no hydrate / Daraz
+    order_ids = [str(x) for x in body.order_ids if str(x).strip()]
+    if not order_ids:
+        raise HTTPException(status_code=400, detail="No orders selected")
+    selection_ms = (_time.perf_counter() - t_parse) * 1000
+
     def run_print(job_id: str) -> dict[str, Any]:
         out_path = job_pdf_path(ctx.workspace_id, job_id)
         return print_labels_for_orders(
             ctx.workspace_id,
             ctx.user.id,
-            body.order_ids,
+            order_ids,
             allow_reprint=body.allow_reprint,
             job_id=job_id,
             download_url=f"/api/print-labels/{job_id}/download",
@@ -958,13 +975,16 @@ def api_print_labels_orders(
                 raise _daraz_http_error(exc) from exc
             raise
 
+    t_begin = _time.perf_counter()
     try:
         job_id = begin_print_job(workspace_id=ctx.workspace_id, user_id=ctx.user.id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    begin_ms = (_time.perf_counter() - t_begin) * 1000
 
     def run_job() -> None:
         try:
+            # Progress updates happen inside print_labels_for_orders (immediate Gathering…)
             result = run_print(job_id)
             complete_print_job(job_id, result)
         except ValueError as exc:
@@ -979,13 +999,28 @@ def api_print_labels_orders(
             logger.exception("Unexpected print job failure")
             fail_print_job(job_id, f"{type(exc).__name__}: {exc}")
 
-    background_tasks.add_task(run_job)
+    # Start worker immediately in a daemon thread so hydrate/Daraz never delays the HTTP
+    # response. FastAPI BackgroundTasks only run after the response is sent; a thread
+    # can update "Gathering labels…" while the client still receives job_id.
+    worker = threading.Thread(target=run_job, name=f"print-{job_id[:8]}", daemon=True)
+    worker.start()
+    # Keep BackgroundTasks unused for the heavy work (thread already owns it).
+    _ = background_tasks
+
+    total_ms = (_time.perf_counter() - t_req) * 1000
     return {
         "status": "processing",
         "job_id": job_id,
         "poll_url": f"/api/print-labels/{job_id}/status",
         "download_url": f"/api/print-labels/{job_id}/download",
         "message": "Print job started",
+        "startup_timings_ms": {
+            "auth_complete": round(auth_ms, 1),
+            "selection_parse": round(selection_ms, 1),
+            "print_job_insert": round(begin_ms, 1),
+            "job_id_returned": round(total_ms, 1),
+            "background_thread_started": True,
+        },
     }
 
 
@@ -1271,8 +1306,9 @@ class AddFromUrlBody(BaseModel):
     url: str = Field(..., min_length=8)
     destination_store_ids: list[str] = Field(..., min_length=1)
     price_override: float | None = None
-    execute: bool = False
-    confirm: bool = False
+    # None/omitted = execute when ALLOW_PRODUCT_CREATE=1; False = dry-run only
+    execute: bool | None = None
+    confirm: bool = False  # ignored on SaaS add (probe-only concept)
     allow_duplicates: bool = False
     edit_before: bool = False
 
@@ -1282,7 +1318,7 @@ class AddFromConnectedBody(BaseModel):
     daraz_item_id: str = Field(..., min_length=1)
     destination_store_ids: list[str] = Field(..., min_length=1)
     price_override: float | None = None
-    execute: bool = False
+    execute: bool | None = None
     confirm: bool = False
     allow_duplicates: bool = False
     edit_before: bool = False

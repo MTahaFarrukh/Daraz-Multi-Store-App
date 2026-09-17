@@ -142,13 +142,17 @@ export async function pollPrintJob(
   maxWaitMs = 25 * 60 * 1000
 ) {
   const started = Date.now();
+  let intervalMs = 400;
   while (Date.now() - started < maxWaitMs) {
     const status = await Api.printStatus(jobId);
     if (status.message) onProgress?.(status.message);
     if (status.status === "done" || status.status === "error") {
       return { ...status, id: jobId };
     }
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, intervalMs));
+    // Back off after the first few seconds — keep startup snappy
+    if (Date.now() - started > 3000) intervalMs = 1000;
+    if (Date.now() - started > 15000) intervalMs = 2000;
   }
   throw new Error("Print timed out");
 }

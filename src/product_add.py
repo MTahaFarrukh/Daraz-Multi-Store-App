@@ -254,11 +254,14 @@ def _prepare_destination(
             "timings_ms": {"dest_total": round((time.perf_counter() - t0) * 1000, 1)},
         }
 
-    if not execute or not confirm:
+    # Normal SaaS Add Product: ALLOW_PRODUCT_CREATE=1 + Add Product click = execute.
+    # Do NOT require probe-style execute/confirm flags here.
+    # (edit_before / dry-run paths never reach CreateProduct — handled by callers.)
+    if not execute:
         return {
             "store": store_info,
             "status": "READY",
-            "reason": "Validation passed; execute/confirm required to create",
+            "reason": "Validation passed; dry-run (execute=false)",
             "validation": draft["validation"],
             "draft_preview": preview,
             "timings_ms": {"dest_total": round((time.perf_counter() - t0) * 1000, 1)},
@@ -331,18 +334,35 @@ def add_product_from_public_url(
     destination_store_ids: list[str],
     *,
     price_override: float | None = None,
-    execute: bool = False,
+    execute: bool | None = None,
     confirm: bool = False,
     allow_duplicates: bool = False,
     edit_before: bool = False,
 ) -> dict[str, Any]:
-    """Fetch public URL once → prepare / optionally create on each destination."""
+    """Fetch public URL once → prepare / create on each destination.
+
+    When ``ALLOW_PRODUCT_CREATE=1`` (or probe flag), a normal Add Product call
+    executes CreateProduct. Pass ``execute=False`` for dry-run validation only.
+    ``confirm`` is ignored here (probe-only concept).
+    """
     t0 = time.perf_counter()
     dest_ids = [str(x).strip() for x in destination_store_ids if str(x).strip()]
     if not dest_ids:
         raise ValueError("destination_store_ids is required")
 
     gate_on = product_create_enabled()
+    # SaaS contract: ALLOW_PRODUCT_CREATE=1 + Add Product = execute CreateProduct.
+    # Explicit execute=False is dry-run only; edit_before never creates.
+    # Probe/confirm flags are NOT required on this path.
+    if edit_before:
+        will_execute = False
+    elif not gate_on:
+        will_execute = False
+    elif execute is False:
+        will_execute = False
+    else:
+        will_execute = True
+
     extracted = fetch_public_product(url)
     fetch_ms = float((extracted.get("timings_ms") or {}).get("fetch_extract") or 0)
 
@@ -450,13 +470,13 @@ def add_product_from_public_url(
                 dest=dest,
                 price_override=price_override,
                 allow_duplicates=allow_duplicates,
-                execute=execute,
-                confirm=confirm,
+                execute=will_execute,
+                confirm=True,
                 gate_on=gate_on,
             )
         )
 
-    summary = _summarize(destinations, gate_on=gate_on, execute=execute)
+    summary = _summarize(destinations, gate_on=gate_on, execute=will_execute)
     # When gate off, never invent create success — promote READY to blocked top-level
     if not gate_on and summary["status"] not in {"NEEDS_ATTENTION", "FAILED"}:
         summary["status"] = "BLOCKED_CREATE"
@@ -479,18 +499,30 @@ def add_product_from_connected(
     destination_store_ids: list[str],
     *,
     price_override: float | None = None,
-    execute: bool = False,
+    execute: bool | None = None,
     confirm: bool = False,
     allow_duplicates: bool = False,
     edit_before: bool = False,
 ) -> dict[str, Any]:
-    """Fetch connected item once → prepare / optionally create on each destination."""
+    """Fetch connected item once → prepare / create on each destination.
+
+    Same SaaS execute semantics as ``add_product_from_public_url``.
+    """
     t0 = time.perf_counter()
     dest_ids = [str(x).strip() for x in destination_store_ids if str(x).strip()]
     if not dest_ids:
         raise ValueError("destination_store_ids is required")
 
     gate_on = product_create_enabled()
+    if edit_before:
+        will_execute = False
+    elif not gate_on:
+        will_execute = False
+    elif execute is False:
+        will_execute = False
+    else:
+        will_execute = True
+
     fetched = fetch_connected_product(
         workspace_id,
         source_store_id=source_store_id,
@@ -573,13 +605,13 @@ def add_product_from_connected(
                 dest=dest,
                 price_override=price_override,
                 allow_duplicates=allow_duplicates,
-                execute=execute,
-                confirm=confirm,
+                execute=will_execute,
+                confirm=True,
                 gate_on=gate_on,
             )
         )
 
-    summary = _summarize(destinations, gate_on=gate_on, execute=execute)
+    summary = _summarize(destinations, gate_on=gate_on, execute=will_execute)
     if not gate_on and summary["status"] not in {"NEEDS_ATTENTION", "FAILED"}:
         summary["status"] = "BLOCKED_CREATE"
 

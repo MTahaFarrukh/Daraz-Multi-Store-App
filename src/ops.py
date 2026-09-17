@@ -669,6 +669,8 @@ def print_labels_for_orders(
             on_progress(msg)
 
     t_total = time.perf_counter()
+    # Update UI immediately — hydrate/Daraz work must not leave "Starting print job…"
+    progress("Gathering labels…")
     repo = get_repo()
 
     # Preserve selection order; drop duplicates
