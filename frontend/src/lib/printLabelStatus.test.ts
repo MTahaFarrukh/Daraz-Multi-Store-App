@@ -93,17 +93,18 @@ describe("HITL 28/21/7 Select All must not drop unprinted", () => {
     };
   });
 
-  it("Select All partitions 28 selected → Print 7 Unprinted / Reprint All 28", () => {
+  it("Select All partitions 28 selected → Print Selected 28 primary", () => {
     const allIds = selectAllIds(rts28);
     expect(allIds).toHaveLength(28);
     const part = partitionPrintSelection(rts28, allIds);
     expect(part.selected).toHaveLength(28);
     expect(part.printed).toHaveLength(21);
     expect(part.unprinted).toHaveLength(7);
-    // HITL button labels
-    expect(`Print ${part.unprinted.length} Unprinted`).toBe("Print 7 Unprinted");
-    expect(`Reprint All ${part.selected.length}`).toBe("Reprint All 28");
-    // Assert selected IDs match visible order ids
+    // Lightweight HITL: warn about already-printed; primary prints all selected
+    expect(
+      `You selected ${part.printed.length} labels that were printed before.`
+    ).toBe("You selected 21 labels that were printed before.");
+    expect(`Print Selected ${part.selected.length}`).toBe("Print Selected 28");
     expect(part.selected.map((o) => o.id).sort()).toEqual([...allIds].sort());
   });
 
@@ -121,5 +122,7 @@ describe("HITL 28/21/7 Select All must not drop unprinted", () => {
     const part = partitionPrintSelection(rts28, unprintedIds);
     expect(part.printed).toHaveLength(0);
     expect(part.unprinted.map((o) => o.id)).toEqual(unprintedIds);
+    // No HITL when selection is unprinted-only — immediate print with allowReprint=false
+    expect(part.printed.length === 0).toBe(true);
   });
 });

@@ -341,51 +341,35 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
     return payload
 
 
-def build_public_clone_draft(
+def find_connected_owner_for_item(
+    workspace_id: str, item_id: str | None
+) -> dict[str, Any] | None:
+    """Return a connected store that already owns ``item_id``, if any."""
+    if not item_id:
+        return None
+    repo = get_repo()
+    for store in repo.list_stores(workspace_id):
+        owned = repo.get_daraz_product_by_item_id(
+            workspace_id, str(store["id"]), str(item_id)
+        )
+        if owned:
+            return store
+    return None
+
+
+def build_public_clone_draft_from_extracted(
     workspace_id: str,
     *,
-    url: str,
+    extracted: dict[str, Any],
     destination_store_id: str,
 ) -> dict[str, Any]:
-    """Public URL → clone draft. May upgrade to connected fetch if ownership proven."""
+    """Build a public-URL clone draft from an already-fetched extract (no HTTP)."""
     repo = get_repo()
     dest = repo.get_store(workspace_id, destination_store_id) or repo.get_store_by_uuid(
         workspace_id, destination_store_id
     )
     if not dest:
         raise PublicDarazError("Destination store not found", code="dest_not_found")
-
-    extracted = fetch_public_product(url)
-    item_id = extracted.get("item_id")
-
-    # Smart connected resolution: only if item exists in a connected store warehouse
-    if item_id:
-        for store in repo.list_stores(workspace_id):
-            owned = repo.get_daraz_product_by_item_id(
-                workspace_id, str(store["id"]), str(item_id)
-            )
-            if owned:
-                from src.product_fetch import clone_draft_from_connected
-
-                result = clone_draft_from_connected(
-                    workspace_id,
-                    source_store_id=str(store.get("store_id") or store["id"]),
-                    daraz_item_id=str(item_id),
-                    destination_store_id=destination_store_id,
-                )
-                draft = result.get("draft") or {}
-                draft["source_type"] = "connected_via_public_url"
-                draft["source_url"] = extracted.get("source_url")
-                result["draft"] = draft
-                result["source_resolution"] = "connected_via_public_url"
-                result["public_url"] = extracted.get("source_url")
-                warnings = list(result.get("warnings") or [])
-                warnings.insert(
-                    0,
-                    "Item found in a connected store — used seller API path via public URL",
-                )
-                result["warnings"] = warnings
-                return result
 
     defaults = repo.get_product_defaults(workspace_id)
     prefix = defaults.get("sku_prefix") or DEFAULT_SKU_PREFIX
@@ -408,6 +392,7 @@ def build_public_clone_draft(
     enhancement = enhance_description_with_images(
         extracted.get("description_html") or "", images
     )
+    item_id = extracted.get("item_id")
 
     existing_skus = list(
         repo.list_destination_seller_skus(workspace_id, str(dest["id"]))
@@ -587,6 +572,45 @@ def build_public_clone_draft(
         "timings_ms": extracted.get("timings_ms") or {},
         "create_probe_enabled": False,
     }
+
+
+def build_public_clone_draft(
+    workspace_id: str,
+    *,
+    url: str,
+    destination_store_id: str,
+) -> dict[str, Any]:
+    """Public URL → clone draft. May upgrade to connected fetch if ownership proven."""
+    extracted = fetch_public_product(url)
+    owner = find_connected_owner_for_item(workspace_id, extracted.get("item_id"))
+    if owner:
+        from src.product_fetch import clone_draft_from_connected
+
+        result = clone_draft_from_connected(
+            workspace_id,
+            source_store_id=str(owner.get("store_id") or owner["id"]),
+            daraz_item_id=str(extracted.get("item_id")),
+            destination_store_id=destination_store_id,
+        )
+        draft = result.get("draft") or {}
+        draft["source_type"] = "connected_via_public_url"
+        draft["source_url"] = extracted.get("source_url")
+        result["draft"] = draft
+        result["source_resolution"] = "connected_via_public_url"
+        result["public_url"] = extracted.get("source_url")
+        warnings = list(result.get("warnings") or [])
+        warnings.insert(
+            0,
+            "Item found in a connected store — used seller API path via public URL",
+        )
+        result["warnings"] = warnings
+        return result
+
+    return build_public_clone_draft_from_extracted(
+        workspace_id,
+        extracted=extracted,
+        destination_store_id=destination_store_id,
+    )
 
 
 def clear_public_cache_for_tests() -> None:

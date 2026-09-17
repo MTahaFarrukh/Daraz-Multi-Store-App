@@ -1267,6 +1267,27 @@ class ImportUrlDraftBody(BaseModel):
     destination_store_id: str = Field(..., min_length=1)
 
 
+class AddFromUrlBody(BaseModel):
+    url: str = Field(..., min_length=8)
+    destination_store_ids: list[str] = Field(..., min_length=1)
+    price_override: float | None = None
+    execute: bool = False
+    confirm: bool = False
+    allow_duplicates: bool = False
+    edit_before: bool = False
+
+
+class AddFromConnectedBody(BaseModel):
+    source_store_id: str = Field(..., min_length=1)
+    daraz_item_id: str = Field(..., min_length=1)
+    destination_store_ids: list[str] = Field(..., min_length=1)
+    price_override: float | None = None
+    execute: bool = False
+    confirm: bool = False
+    allow_duplicates: bool = False
+    edit_before: bool = False
+
+
 def _product_public_view(
     product: dict[str, Any],
     *,
@@ -1513,6 +1534,56 @@ def api_import_url_draft(
     except (PublicDarazError, ProductFetchError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/add-from-url")
+def api_add_product_from_url(
+    body: AddFromUrlBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """One-click add from public Daraz URL → multi-store (create gated)."""
+    from src.product_add import add_product_from_public_url
+    from src.product_fetch import ProductFetchError
+    from src.public_daraz import PublicDarazError
+
+    try:
+        return add_product_from_public_url(
+            ctx.workspace_id,
+            body.url,
+            body.destination_store_ids,
+            price_override=body.price_override,
+            execute=body.execute,
+            confirm=body.confirm,
+            allow_duplicates=body.allow_duplicates,
+            edit_before=body.edit_before,
+        )
+    except (PublicDarazError, ProductFetchError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/add-from-connected")
+def api_add_product_from_connected(
+    body: AddFromConnectedBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """One-click add from connected Item ID → multi-store (create gated)."""
+    from src.product_add import add_product_from_connected
+    from src.product_fetch import ProductFetchError
+
+    try:
+        return add_product_from_connected(
+            ctx.workspace_id,
+            body.source_store_id,
+            body.daraz_item_id,
+            body.destination_store_ids,
+            price_override=body.price_override,
+            execute=body.execute,
+            confirm=body.confirm,
+            allow_duplicates=body.allow_duplicates,
+            edit_before=body.edit_before,
+        )
+    except (ProductFetchError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

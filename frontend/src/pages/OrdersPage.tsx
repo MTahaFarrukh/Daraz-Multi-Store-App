@@ -11,7 +11,6 @@ import {
   usePrintOrdersByIds,
   useSyncOrders,
   useUnifiedOrders,
-  useValidatePrint,
 } from "@/hooks/queries/useUnifiedOrders";
 import { RtsSelectionToolbar } from "@/components/orders/RtsSelectionToolbar";
 import { Dialog } from "@/components/ui/Dialog";
@@ -130,6 +129,11 @@ export function OrdersPage() {
   const [hitlOpen, setHitlOpen] = useState(false);
   const [pendingAllIds, setPendingAllIds] = useState<string[]>([]);
   const [pendingUnprintedIds, setPendingUnprintedIds] = useState<string[]>([]);
+  const [hitlPrintedCount, setHitlPrintedCount] = useState(0);
+  const [failedPrintIds, setFailedPrintIds] = useState<string[]>([]);
+  const [printFailures, setPrintFailures] = useState<
+    Array<{ store?: string; order_number?: string; reason?: string }>
+  >([]);
 
   const storeFilterParams = useMemo(() => {
     if (groupId) return { group_id: groupId };
@@ -167,7 +171,6 @@ export function OrdersPage() {
   const countsQuery = useOrderStatusCounts(workspaceId, countStoreFilter);
   const detailQuery = useOrderDetail(workspaceId, detailId, Boolean(detailId));
   const syncMutation = useSyncOrders(workspaceId);
-  const validateMutation = useValidatePrint(workspaceId);
   const printMutation = usePrintOrdersByIds(workspaceId);
   const printJobsQuery = usePrintJobs(workspaceId, true);
 
@@ -254,9 +257,11 @@ export function OrdersPage() {
   }
 
   async function runPrint(orderIds: string[], allowReprint: boolean) {
-    setBusy(`Printing ${orderIds.length} label(s)…`);
+    setBusy("Starting print job…");
     setError("");
     setOk("");
+    setFailedPrintIds([]);
+    setPrintFailures([]);
     try {
       const started = await printMutation.mutateAsync({
         orderIds,
@@ -264,11 +269,50 @@ export function OrdersPage() {
       });
       const jobId = started.job_id;
       if (!jobId) throw new Error("Print job did not return a job_id");
-      const status = await pollPrintJob(jobId, (msg) => setBusy(msg));
+      const status = await pollPrintJob(jobId, (msg) => setBusy(msg || "Printing…"));
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }
-      setOk(`PDF ready · ${status.pages ?? "?"} page(s)`);
+      const result = (status.result || status) as Record<string, any>;
+      const summary = (result.summary || {}) as Record<string, any>;
+      const message =
+        result.message ||
+        summary.message ||
+        `PDF ready · ${status.pages ?? result.pages ?? "?"} page(s)`;
+      const failedIds: string[] = result.failed_order_ids || summary.failed_order_ids || [];
+      const printStatus = result.print_status || summary.print_status;
+      const outcomes: Array<Record<string, any>> = Array.isArray(result.outcomes)
+        ? result.outcomes
+        : Array.isArray(result.failures)
+          ? result.failures
+          : [];
+      const failureRows = outcomes
+        .filter((o) => o.state !== "SUCCESS" && o.success !== true)
+        .map((o) => ({
+          store: String(o.store_display_name || o.store_slug || o.store_id || ""),
+          order_number: String(o.order_number || o.daraz_order_id || o.order_id || ""),
+          reason: String(o.reason || o.state || "failed"),
+        }));
+      if (!failureRows.length && failedIds.length) {
+        for (const id of failedIds) {
+          const ord = orders.find((o) => o.id === id);
+          failureRows.push({
+            store: String(ord?.store_display_name || ord?.store_slug || ""),
+            order_number: String(ord?.order_number || ord?.daraz_order_id || id),
+            reason: "failed",
+          });
+        }
+      }
+      setFailedPrintIds(failedIds);
+      setPrintFailures(failureRows);
+      if (printStatus === "partial_success" || failedIds.length) {
+        setOk(message);
+        setError(
+          `${failedIds.length} label(s) need attention. Use Retry Failed to reprint only those.`
+        );
+      } else {
+        setOk(message);
+      }
       try {
         await Api.downloadPrint(jobId);
       } catch {
@@ -292,50 +336,55 @@ export function OrdersPage() {
       setError("Selection includes orders not on this page — adjust selection and try again");
       return;
     }
-    // HITL from loaded rows + selection (print events), not post-validate printable subset.
+    // Client-only HITL from loaded rows — no backend validate/hydrate.
     const part = partitionPrintSelection(orders, ids);
     setError("");
     setOk("");
-    setBusy("Validating print targets…");
-    try {
-      await validateMutation.mutateAsync(ids);
-      setBusy("");
-      if (!part.selected.length) {
-        setError("Nothing to print");
-        return;
-      }
-      if (part.printed.length) {
-        setPendingAllIds(part.selected.map((o) => o.id));
-        setPendingUnprintedIds(part.unprinted.map((o) => o.id));
-        setHitlOpen(true);
-        return;
-      }
-      await runPrint(
-        part.unprinted.map((o) => o.id),
-        false
-      );
-    } catch (err) {
-      setBusy("");
-      setError(err instanceof Error ? err.message : "Validation failed");
+    if (!part.selected.length) {
+      setError("Nothing to print");
+      return;
     }
+    if (part.printed.length) {
+      setPendingAllIds(part.selected.map((o) => o.id));
+      setPendingUnprintedIds(part.unprinted.map((o) => o.id));
+      setHitlPrintedCount(part.printed.length);
+      setHitlOpen(true);
+      return;
+    }
+    await runPrint(
+      part.selected.map((o) => o.id),
+      false
+    );
   }
 
   async function handlePrintSelected() {
     await handlePrintIds(Array.from(selectedIds));
   }
 
-  async function confirmReprint(includePrinted: boolean) {
+  async function confirmPrintSelected() {
     setHitlOpen(false);
-    const ids = includePrinted ? pendingAllIds : pendingUnprintedIds;
+    const ids = pendingAllIds;
     if (!ids.length) {
-      setError(
-        includePrinted ? "Nothing to reprint" : "No unprinted orders in this selection"
-      );
+      setError("Nothing to print");
       return;
     }
-    await runPrint(ids, includePrinted);
+    await runPrint(ids, true);
     setPendingAllIds([]);
     setPendingUnprintedIds([]);
+    setHitlPrintedCount(0);
+  }
+
+  async function confirmPrintUnprintedOnly() {
+    setHitlOpen(false);
+    const ids = pendingUnprintedIds;
+    if (!ids.length) {
+      setError("No unprinted orders in this selection");
+      return;
+    }
+    await runPrint(ids, false);
+    setPendingAllIds([]);
+    setPendingUnprintedIds([]);
+    setHitlPrintedCount(0);
   }
 
   const allVisibleSelected =
@@ -376,6 +425,17 @@ export function OrdersPage() {
       <ErrorBanner message={error} />
       <SuccessBanner message={ok} />
       {busy ? <div className="banner banner-info">{busy}</div> : null}
+      {printFailures.length ? (
+        <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
+          {printFailures.map((f, i) => (
+            <li key={`${f.order_number}-${i}`}>
+              {f.store ? `${f.store} · ` : ""}
+              {f.order_number || "—"}
+              {f.reason ? ` — ${f.reason}` : ""}
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       <section className="card orders-filters">
         <div className="toolbar orders-filter-row">
@@ -720,11 +780,21 @@ export function OrdersPage() {
             <button
               type="button"
               className="btn btn-accent"
-              disabled={Boolean(busy) || validateMutation.isPending}
+              disabled={Boolean(busy)}
               onClick={handlePrintSelected}
             >
               Print Labels
             </button>
+            {failedPrintIds.length ? (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={Boolean(busy)}
+                onClick={() => void runPrint(failedPrintIds, false)}
+              >
+                Retry Failed {failedPrintIds.length}
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -862,24 +932,13 @@ export function OrdersPage() {
           setHitlOpen(false);
           setPendingAllIds([]);
           setPendingUnprintedIds([]);
+          setHitlPrintedCount(0);
         }}
       >
-        {pendingAllIds.length ? (
-          <>
-            <p style={{ margin: 0 }}>
-              <strong>{pendingAllIds.length} selected</strong>
-            </p>
-            <p style={{ margin: 0 }}>
-              {pendingUnprintedIds.length} unprinted
-              <br />
-              {pendingAllIds.length - pendingUnprintedIds.length} already printed
-            </p>
-            <p style={{ margin: 0, color: "var(--muted)" }}>
-              Reprinting may create duplicate physical labels. “Print Unprinted” never
-              reprints. “Reprint All” requires this explicit confirmation.
-            </p>
-          </>
-        ) : null}
+        <p style={{ margin: 0 }}>
+          You selected {hitlPrintedCount} label
+          {hitlPrintedCount === 1 ? "" : "s"} that were printed before.
+        </p>
         <div className="row" style={{ justifyContent: "flex-end" }}>
           <button
             type="button"
@@ -888,6 +947,7 @@ export function OrdersPage() {
               setHitlOpen(false);
               setPendingAllIds([]);
               setPendingUnprintedIds([]);
+              setHitlPrintedCount(0);
             }}
           >
             Cancel
@@ -895,18 +955,18 @@ export function OrdersPage() {
           {pendingUnprintedIds.length ? (
             <button
               type="button"
-              className="btn btn-primary"
-              onClick={() => void confirmReprint(false)}
+              className="btn btn-ghost"
+              onClick={() => void confirmPrintUnprintedOnly()}
             >
               Print {pendingUnprintedIds.length} Unprinted
             </button>
           ) : null}
           <button
             type="button"
-            className="btn btn-accent"
-            onClick={() => void confirmReprint(true)}
+            className="btn btn-primary"
+            onClick={() => void confirmPrintSelected()}
           >
-            Reprint All {pendingAllIds.length}
+            Print Selected {pendingAllIds.length}
           </button>
         </div>
       </Dialog>

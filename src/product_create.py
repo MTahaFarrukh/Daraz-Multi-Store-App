@@ -23,6 +23,12 @@ def create_probe_enabled() -> bool:
     return os.getenv("ALLOW_PRODUCT_CREATE_PROBE", "").lower() in {"1", "true", "yes"}
 
 
+def product_create_enabled() -> bool:
+    """True when live CreateProduct is allowed (full flag or supervised probe)."""
+    full = os.getenv("ALLOW_PRODUCT_CREATE", "").lower() in {"1", "true", "yes"}
+    return full or create_probe_enabled()
+
+
 def run_supervised_create(
     workspace_id: str,
     *,

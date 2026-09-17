@@ -417,3 +417,33 @@ export type ProductCloneDraftResponse = {
     match_score?: number;
   }>;
 };
+
+export type AddProductDestinationResult = {
+  store?: {
+    store_id?: string | null;
+    display_name?: string | null;
+    id?: string | null;
+  };
+  status: string;
+  item_id?: string | null;
+  reason?: string | null;
+  daraz_status?: string | null;
+  duplicates?: Array<Record<string, unknown>>;
+  timings_ms?: Record<string, number>;
+};
+
+export type AddProductResponse = {
+  status: string;
+  source?: Record<string, unknown>;
+  destinations?: AddProductDestinationResult[];
+  created_count?: number;
+  failed_count?: number;
+  needs_attention_count?: number;
+  duplicate_count?: number;
+  ready_count?: number;
+  product_create_enabled?: boolean;
+  edit_before?: boolean;
+  draft_result?: ProductCloneDraftResponse & Record<string, unknown>;
+  destination_store_ids?: string[];
+  timings_ms?: Record<string, number>;
+};

@@ -27,6 +27,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DARAZ_APP_KEY", "appkey")
     monkeypatch.setenv("DARAZ_APP_SECRET", "appsecret")
     # Per-order fetch path under test; bulk covered separately.
+    monkeypatch.setenv("PRINT_PREFER_NATIVE_PDF", "0")
     monkeypatch.setenv("PRINT_PREFER_BULK_GETDOCUMENT", "0")
     monkeypatch.setattr("src.crypto_tokens.TOKEN_KEY_PATH", key_path)
     return reset_repo_for_tests()

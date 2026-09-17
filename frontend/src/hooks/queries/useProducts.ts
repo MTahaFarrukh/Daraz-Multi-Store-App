@@ -123,6 +123,49 @@ export function useImportUrlDraft(_workspaceId: string | undefined) {
   });
 }
 
+export function useAddProductFromUrl(workspaceId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      url: string;
+      destination_store_ids: string[];
+      price_override?: number;
+      execute?: boolean;
+      confirm?: boolean;
+      allow_duplicates?: boolean;
+      edit_before?: boolean;
+    }) => Api.addProductFromUrl(body),
+    onSuccess: async () => {
+      if (!workspaceId) return;
+      await qc.invalidateQueries({
+        queryKey: ["workspace", workspaceId, "products"],
+      });
+    },
+  });
+}
+
+export function useAddProductFromConnected(workspaceId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      source_store_id: string;
+      daraz_item_id: string;
+      destination_store_ids: string[];
+      price_override?: number;
+      execute?: boolean;
+      confirm?: boolean;
+      allow_duplicates?: boolean;
+      edit_before?: boolean;
+    }) => Api.addProductFromConnected(body),
+    onSuccess: async () => {
+      if (!workspaceId) return;
+      await qc.invalidateQueries({
+        queryKey: ["workspace", workspaceId, "products"],
+      });
+    },
+  });
+}
+
 export function useEnsureProductDetail(workspaceId: string | undefined) {
   const qc = useQueryClient();
   return useMutation({

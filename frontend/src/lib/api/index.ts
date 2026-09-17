@@ -15,6 +15,7 @@ import type {
   PrintJobStatus,
   PrintOrdersStartResponse,
   PrintValidateResponse,
+  AddProductResponse,
   ProductCloneDraftResponse,
   ProductDefaults,
   ProductDetailResponse,
@@ -249,6 +250,35 @@ export const Api = {
 
   importUrlDraft: (body: { url: string; destination_store_id: string }) =>
     api<ProductCloneDraftResponse>("/api/products/import-url/draft", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  addProductFromUrl: (body: {
+    url: string;
+    destination_store_ids: string[];
+    price_override?: number;
+    execute?: boolean;
+    confirm?: boolean;
+    allow_duplicates?: boolean;
+    edit_before?: boolean;
+  }) =>
+    api<AddProductResponse>("/api/products/add-from-url", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  addProductFromConnected: (body: {
+    source_store_id: string;
+    daraz_item_id: string;
+    destination_store_ids: string[];
+    price_override?: number;
+    execute?: boolean;
+    confirm?: boolean;
+    allow_duplicates?: boolean;
+    edit_before?: boolean;
+  }) =>
+    api<AddProductResponse>("/api/products/add-from-connected", {
       method: "POST",
       body: JSON.stringify(body),
     }),

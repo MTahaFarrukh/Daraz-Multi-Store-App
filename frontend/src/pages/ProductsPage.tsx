@@ -19,6 +19,7 @@ import {
 import type { ProductCloneDraftResponse, ProductRow } from "@/types/api";
 import { sanitizeProductHtml } from "@/lib/sanitizeHtml";
 import { CopyProductDialog } from "@/pages/products/CopyProductDialog";
+import { AddDarazProductDialog } from "@/pages/products/AddDarazProductDialog";
 import { CloneDraftPreview } from "@/pages/products/CloneDraftPreview";
 
 const PAGE_SIZE = 40;
@@ -52,6 +53,7 @@ export function ProductsPage() {
   const [ok, setOk] = useState("");
   const [detailId, setDetailId] = useState<string | null>(null);
   const [copyOpen, setCopyOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [hubCopyProduct, setHubCopyProduct] = useState<ProductRow | null>(null);
   const [destStore, setDestStore] = useState("");
   const [draftResult, setDraftResult] = useState<ProductCloneDraftResponse | null>(null);
@@ -149,7 +151,7 @@ export function ProductsPage() {
     <div className="stack">
       <PageHeader
         title="Products"
-        description="Multi-store Product Hub from your connected Daraz catalogs. Sync the catalog, then copy by Item ID or Daraz link."
+        description="Add a Daraz product to multiple stores from a public link or connected Item ID. Sync keeps the local catalog fresh."
         actions={
           <div className="row" style={{ gap: "0.5rem" }}>
             <button
@@ -159,10 +161,10 @@ export function ProductsPage() {
               onClick={() => {
                 setError("");
                 setOk("");
-                setCopyOpen(true);
+                setAddOpen(true);
               }}
             >
-              + Copy Product
+              + Add Daraz Product
             </button>
             <button
               type="button"
@@ -171,6 +173,18 @@ export function ProductsPage() {
               onClick={handleSync}
             >
               Sync Products
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={Boolean(busy)}
+              onClick={() => {
+                setError("");
+                setOk("");
+                setCopyOpen(true);
+              }}
+            >
+              Copy Product
             </button>
           </div>
         }
@@ -436,6 +450,17 @@ export function ProductsPage() {
           </div>
         ) : null}
       </Dialog>
+
+      <AddDarazProductDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        stores={stores}
+        workspaceId={workspaceId}
+        onError={setError}
+        onOk={setOk}
+        busy={busy}
+        setBusy={setBusy}
+      />
 
       <CopyProductDialog
         open={copyOpen}

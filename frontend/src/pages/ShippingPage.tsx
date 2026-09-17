@@ -8,7 +8,6 @@ import { usePrintJobs } from "@/hooks/queries/usePrintAndOrders";
 import {
   pollPrintJob,
   usePrintOrdersByIds,
-  useValidatePrint,
 } from "@/hooks/queries/useUnifiedOrders";
 import { RtsSelectionToolbar } from "@/components/orders/RtsSelectionToolbar";
 import { StoreSelector } from "@/components/stores/StoreSelector";
@@ -68,9 +67,12 @@ export function ShippingPage() {
   const [loadElapsedMs, setLoadElapsedMs] = useState<number | null>(null);
 
   const [failedPrintIds, setFailedPrintIds] = useState<string[]>([]);
+  const [printFailures, setPrintFailures] = useState<
+    Array<{ store?: string; order_number?: string; reason?: string }>
+  >([]);
   const [lastPrintSummary, setLastPrintSummary] = useState("");
+  const [hitlPrintedCount, setHitlPrintedCount] = useState(0);
 
-  const validateMutation = useValidatePrint(workspaceId);
   const printMutation = usePrintOrdersByIds(workspaceId);
   const printJobsQuery = usePrintJobs(workspaceId, true);
 
@@ -209,28 +211,53 @@ export function ShippingPage() {
   }
 
   async function runPrint(orderIds: string[], allowReprint: boolean) {
-    setBusy(`Validating ${orderIds.length} labels… Resolving packages… Fetching labels…`);
+    setBusy("Starting print job…");
     setError("");
     setOk("");
     setFailedPrintIds([]);
+    setPrintFailures([]);
     setLastPrintSummary("");
     try {
       const started = await printMutation.mutateAsync({ orderIds, allowReprint });
       const jobId = started.job_id;
       if (!jobId) throw new Error("Print job did not return a job_id");
-      const status = await pollPrintJob(jobId, (msg) => setBusy(msg));
+      const status = await pollPrintJob(jobId, (msg) => setBusy(msg || "Printing…"));
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }
       const result = (status.result || status) as Record<string, any>;
+      const summary = (result.summary || {}) as Record<string, any>;
       const message =
         result.message ||
-        result.summary?.message ||
+        summary.message ||
         `PDF ready · ${status.pages ?? result.pages ?? "?"} page(s)`;
-      const failedIds: string[] = result.failed_order_ids || [];
-      const printStatus = result.print_status || result.summary?.print_status;
+      const failedIds: string[] = result.failed_order_ids || summary.failed_order_ids || [];
+      const printStatus = result.print_status || summary.print_status;
+      const outcomes: Array<Record<string, any>> = Array.isArray(result.outcomes)
+        ? result.outcomes
+        : Array.isArray(result.failures)
+          ? result.failures
+          : [];
+      const failureRows = outcomes
+        .filter((o) => o.state !== "SUCCESS" && o.success !== true)
+        .map((o) => ({
+          store: String(o.store_display_name || o.store_slug || o.store_id || ""),
+          order_number: String(o.order_number || o.daraz_order_id || o.order_id || ""),
+          reason: String(o.reason || o.state || "failed"),
+        }));
+      if (!failureRows.length && failedIds.length) {
+        for (const id of failedIds) {
+          const ord = orders.find((o) => o.id === id);
+          failureRows.push({
+            store: String(ord?.store_display_name || ord?.store_slug || ""),
+            order_number: String(ord?.order_number || ord?.daraz_order_id || id),
+            reason: "failed",
+          });
+        }
+      }
       setLastPrintSummary(message);
       setFailedPrintIds(failedIds);
+      setPrintFailures(failureRows);
       if (printStatus === "partial_success" || failedIds.length) {
         setOk(message);
         setError(
@@ -268,44 +295,49 @@ export function ShippingPage() {
       setError("Selection includes orders not in the loaded RTS list — reload RTS");
       return;
     }
-    // HITL counts/buttons come from loaded RTS + selection (print events), not validate buckets.
+    // Client-only HITL from loaded RTS print events — no backend validate/hydrate.
     const part = partitionPrintSelection(orders, ids);
-    setBusy("Validating print targets…");
-    try {
-      await validateMutation.mutateAsync(ids);
-      setBusy("");
-      if (!part.selected.length) {
-        setError("Nothing to print");
-        return;
-      }
-      if (part.printed.length) {
-        setPendingAllIds(part.selected.map((o) => o.id));
-        setPendingUnprintedIds(part.unprinted.map((o) => o.id));
-        setHitlOpen(true);
-        return;
-      }
-      await runPrint(
-        part.unprinted.map((o) => o.id),
-        false
-      );
-    } catch (err) {
-      setBusy("");
-      setError(err instanceof Error ? err.message : "Validation failed");
-    }
-  }
-
-  async function confirmReprint(includePrinted: boolean) {
-    setHitlOpen(false);
-    const ids = includePrinted ? pendingAllIds : pendingUnprintedIds;
-    if (!ids.length) {
-      setError(
-        includePrinted ? "Nothing to reprint" : "No unprinted orders in this selection"
-      );
+    if (!part.selected.length) {
+      setError("Nothing to print");
       return;
     }
-    await runPrint(ids, includePrinted);
+    if (part.printed.length) {
+      setPendingAllIds(part.selected.map((o) => o.id));
+      setPendingUnprintedIds(part.unprinted.map((o) => o.id));
+      setHitlPrintedCount(part.printed.length);
+      setHitlOpen(true);
+      return;
+    }
+    await runPrint(
+      part.selected.map((o) => o.id),
+      false
+    );
+  }
+
+  async function confirmPrintSelected() {
+    setHitlOpen(false);
+    const ids = pendingAllIds;
+    if (!ids.length) {
+      setError("Nothing to print");
+      return;
+    }
+    await runPrint(ids, true);
     setPendingAllIds([]);
     setPendingUnprintedIds([]);
+    setHitlPrintedCount(0);
+  }
+
+  async function confirmPrintUnprintedOnly() {
+    setHitlOpen(false);
+    const ids = pendingUnprintedIds;
+    if (!ids.length) {
+      setError("No unprinted orders in this selection");
+      return;
+    }
+    await runPrint(ids, false);
+    setPendingAllIds([]);
+    setPendingUnprintedIds([]);
+    setHitlPrintedCount(0);
   }
 
   return (
@@ -406,6 +438,17 @@ export function ShippingPage() {
               <p className="muted-line" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
                 Last print: {lastPrintSummary}
               </p>
+            ) : null}
+            {printFailures.length ? (
+              <ul style={{ marginTop: "0.5rem", marginBottom: 0, paddingLeft: "1.1rem" }}>
+                {printFailures.map((f, i) => (
+                  <li key={`${f.order_number}-${i}`}>
+                    {f.store ? `${f.store} · ` : ""}
+                    {f.order_number || "—"}
+                    {f.reason ? ` — ${f.reason}` : ""}
+                  </li>
+                ))}
+              </ul>
             ) : null}
           </section>
 
@@ -545,21 +588,48 @@ export function ShippingPage() {
         </section>
       )}
 
-      <Dialog open={hitlOpen} title="Print confirmation" onClose={() => setHitlOpen(false)}>
+      <Dialog
+        open={hitlOpen}
+        title="Print confirmation"
+        onClose={() => {
+          setHitlOpen(false);
+          setPendingAllIds([]);
+          setPendingUnprintedIds([]);
+          setHitlPrintedCount(0);
+        }}
+      >
         <p>
-          {pendingAllIds.length} selected ·{" "}
-          {pendingAllIds.length - pendingUnprintedIds.length} already printed ·{" "}
-          {pendingUnprintedIds.length} unprinted
+          You selected {hitlPrintedCount} label
+          {hitlPrintedCount === 1 ? "" : "s"} that were printed before.
         </p>
         <div className="row">
-          <button type="button" className="btn btn-ghost" onClick={() => setHitlOpen(false)}>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              setHitlOpen(false);
+              setPendingAllIds([]);
+              setPendingUnprintedIds([]);
+              setHitlPrintedCount(0);
+            }}
+          >
             Cancel
           </button>
-          <button type="button" className="btn btn-primary" onClick={() => confirmReprint(false)}>
-            Print {pendingUnprintedIds.length} Unprinted
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={() => confirmReprint(true)}>
-            Reprint All {pendingAllIds.length}
+          {pendingUnprintedIds.length ? (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => void confirmPrintUnprintedOnly()}
+            >
+              Print {pendingUnprintedIds.length} Unprinted
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => void confirmPrintSelected()}
+          >
+            Print Selected {pendingAllIds.length}
           </button>
         </div>
       </Dialog>
