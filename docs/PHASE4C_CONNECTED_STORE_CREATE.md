@@ -218,3 +218,4 @@ Coverage includes image poll success/processing/failure/timeout, CDN reuse, exte
    **Yes for pre-submit gating** (mandatory attrs + exact brand match). Live QC after create still unproven.
 
 **STOP.** Do not enable general Create Copy without review. Do not implement public URL import or Communities in this phase.
+done
