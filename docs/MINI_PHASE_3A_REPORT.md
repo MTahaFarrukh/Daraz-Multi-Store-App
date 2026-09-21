@@ -1,7 +1,7 @@
-# Mini Phase 3A Report — Label Processing Engine
+# Mini Phase 3A Report ï¿½ Label Processing Engine
 
 **Date:** 2026-08-19  
-**Scope:** Local document processing only (no Daraz API, no dashboard)
+**Scope:** Local document processing only (no Daraz API,no dashboard)
 
 ---
 
@@ -18,7 +18,6 @@ Built a small shipping-label document processing engine that:
 - Exposes a pluggable `html_to_pdf()` abstraction with clear Windows limitations
 
 No Daraz credentials, OAuth changes, or production API calls were made.
-
 ---
 
 ## Files Added
@@ -148,7 +147,7 @@ Existing `DarazClient.get_shipping_label()` and `save_document()` remain unchang
 - HTML?PDF not enabled by default on Windows (WeasyPrint dependency chain)
 - No user-defined print ordering UI (only programmatic custom sort key hook)
 - No automatic OS printing (by design)
-- Test labels are synthetic — not Daraz-format AWB layouts
+- Test labels are synthetic ï¿½ not Daraz-format AWB layouts
 - Multi-page per-order labels merge all pages but were not tested with real Daraz documents
 - `reportlab` used only for test generation, not production label rendering
 
