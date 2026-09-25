@@ -11,7 +11,8 @@ The label processor prepares shipping-label documents from multiple stores for c
 - Merges multiple single- or multi-page labels into one PDF
 - Preserves original page dimensions and content without resizing or rotation
 
-This phase uses **synthetic local test files only**. No Daraz API calls are made.
+This phase uses **synthetic local test files only**. No Daraz API calls are made
+
 
 ## Input
 
