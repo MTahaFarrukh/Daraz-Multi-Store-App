@@ -52,8 +52,7 @@ Added to `requirements.txt`:
 | `pytest>=8.0.0` | Automated tests |
 
 **Not added:** `weasyprint` (optional; HTML?PDF requires extra system deps on Windows)
-
----
+\\\\\\\---
 
 ## Tests
 
