@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import logging
@@ -10,7 +11,7 @@ import socket
 import time
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
@@ -18,19 +19,29 @@ from src.db.repo import get_repo
 from src.description_enhance import enhance_description_with_images
 from src.image_migrate import is_daraz_product_cdn_url
 from src.package_resolve import resolve_variant_package
+from src.product_fidelity import parse_money
 from src.seller_sku import DEFAULT_SKU_PREFIX, generate_seller_sku
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_HOST_SUFFIXES = (".daraz.pk",)
-ALLOWED_HOSTS = frozenset({"daraz.pk", "www.daraz.pk"})
+ALLOWED_HOSTS = frozenset({"daraz.pk", "www.daraz.pk", "acs-m.daraz.pk", "my.daraz.pk"})
 MAX_BYTES = 2 * 1024 * 1024
 TIMEOUT_S = 15.0
 CACHE_TTL_S = 30 * 60
 MAX_REDIRECTS = 5
+PDP_DETAIL_API = "mtop.global.detail.web.getDetailInfo"
+PDP_DETAIL_APP_KEY = "24677475"
+PDP_DETAIL_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 _ITEM_RE = re.compile(r"(?:-i|/products/i)(\d{6,})", re.I)
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
+# Short-lived cache for getDetailInfo module payloads (item_id → fields).
+_detail_price_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+DETAIL_CACHE_TTL_S = 30 * 60
 
 
 class PublicDarazError(Exception):
@@ -549,6 +560,333 @@ def _apply_price_fallbacks(
     return variants
 
 
+def _mtop_sign(token: str, t: str, data: str) -> str:
+    return hashlib.md5(
+        f"{token}&{t}&{PDP_DETAIL_APP_KEY}&{data}".encode("utf-8")
+    ).hexdigest()
+
+
+def _cookie_h5_token(client: httpx.Client) -> str:
+    val = client.cookies.get("_m_h5_tk") or ""
+    return val.split("_", 1)[0] if "_" in val else ""
+
+
+def _normalize_detail_price_obj(price_obj: Any) -> dict[str, Any]:
+    """Map getDetailInfo skuInfos[].price → regular/current semantics.
+
+    Live PDP returns::
+
+        price.originalPrice.value  (list / struck-through)
+        price.salePrice.value      (current displayed)
+
+    ``salePrice`` may include campaigns/vouchers — do NOT treat it as seller
+    Special Price. Prefer ``originalPrice`` as regular when present; otherwise
+    fall back to ``salePrice`` as the SKU's best-known regular price.
+    """
+    out: dict[str, Any] = {
+        "regular_price": None,
+        "current_price": None,
+        "original_price": None,
+        "special_price": None,  # intentionally unused for public detail
+        "price_source": "mtop.getDetailInfo",
+        "price_confidence": "missing",
+    }
+    if not isinstance(price_obj, dict):
+        return out
+
+    original = None
+    sale = None
+    op = price_obj.get("originalPrice")
+    if isinstance(op, dict):
+        original = parse_money(op.get("value") if op.get("value") is not None else op.get("text"))
+    else:
+        original = parse_money(op)
+    sp = price_obj.get("salePrice")
+    if isinstance(sp, dict):
+        sale = parse_money(sp.get("value") if sp.get("value") is not None else sp.get("text"))
+    else:
+        sale = parse_money(sp)
+    # Some payloads use flat price/priceText
+    if original is None and sale is None:
+        original = parse_money(price_obj.get("price") or price_obj.get("value"))
+
+    out["original_price"] = original
+    out["current_price"] = sale
+    if original is not None:
+        out["regular_price"] = original
+        out["price_confidence"] = "high"
+    elif sale is not None:
+        out["regular_price"] = sale
+        out["price_confidence"] = "medium"
+        out["price_source"] = "mtop.getDetailInfo.salePrice"
+    return out
+
+
+def sku_prices_from_detail_fields(fields: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Extract sku_id → price info from getDetailInfo module fields."""
+    sku_infos = fields.get("skuInfos")
+    if not isinstance(sku_infos, dict):
+        root = fields.get("root")
+        if isinstance(root, dict):
+            inner = root.get("fields") if isinstance(root.get("fields"), dict) else root
+            sku_infos = inner.get("skuInfos") if isinstance(inner, dict) else None
+    if not isinstance(sku_infos, dict):
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for key, sku in sku_infos.items():
+        if not isinstance(sku, dict):
+            continue
+        if str(key) == "0" and not sku.get("skuId") and len(sku_infos) > 1:
+            continue
+        sku_id = str(sku.get("skuId") or key)
+        if not sku_id or sku_id == "0":
+            # Skip aggregate default slot when real SKUs exist
+            if any(str(k) != "0" for k in sku_infos.keys()):
+                continue
+        priced = _normalize_detail_price_obj(sku.get("price"))
+        if priced.get("regular_price") is None:
+            continue
+        out[sku_id] = {
+            **priced,
+            "category_id": sku.get("categoryId") or sku.get("category_id"),
+            "image": sku.get("image"),
+            "seller_id": sku.get("sellerId"),
+        }
+    return out
+
+
+def merge_detail_prices_into_variants(
+    variants: list[dict[str, Any]],
+    price_by_sku: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge getDetailInfo prices onto variants by Daraz SKU ID (never by index)."""
+    if not variants or not price_by_sku:
+        return variants
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        if v.get("price") is not None:
+            continue
+        sku_id = str(v.get("daraz_sku_id") or v.get("skuId") or "")
+        hit = price_by_sku.get(sku_id)
+        if not hit:
+            continue
+        v["price"] = hit.get("regular_price")
+        v["price_confidence"] = hit.get("price_confidence") or "high"
+        v["price_source"] = hit.get("price_source") or "mtop.getDetailInfo"
+        v["current_price"] = hit.get("current_price")
+        v["original_price"] = hit.get("original_price")
+        # Do NOT copy salePrice into special_price (campaign contamination).
+        if not v.get("category_id") and hit.get("category_id"):
+            v["category_id"] = hit["category_id"]
+        if not v.get("image") and hit.get("image"):
+            v["image"] = hit["image"]
+    return variants
+
+
+def _fetch_pdp_detail_sku_prices(
+    product_url: str,
+    *,
+    item_id: str | None = None,
+) -> dict[str, Any]:
+    """Fetch hydrated PDP module via mtop.global.detail.web.getDetailInfo.
+
+    This is the same API the live Daraz PDP uses after SSR to populate
+    ``skuInfos[].price`` (originalPrice / salePrice) for every SKU in one call.
+    """
+    t0 = time.perf_counter()
+    result: dict[str, Any] = {
+        "prices_by_sku": {},
+        "ok": False,
+        "error": None,
+        "source": PDP_DETAIL_API,
+        "timings_ms": {},
+    }
+    cache_key = str(item_id or product_url)
+    now = time.time()
+    if cache_key in _detail_price_cache:
+        ts, cached = _detail_price_cache[cache_key]
+        if now - ts < DETAIL_CACHE_TTL_S:
+            result.update(cached)
+            result["cache_hit"] = True
+            result["timings_ms"] = {
+                "price_resolution_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "fallback_fetch_ms": 0.0,
+            }
+            return result
+
+    host = "acs-m.daraz.pk"
+    try:
+        _resolve_public(host)
+    except PublicDarazError as exc:
+        result["error"] = str(exc)
+        result["timings_ms"]["price_resolution_ms"] = round(
+            (time.perf_counter() - t0) * 1000, 1
+        )
+        return result
+
+    parsed = urlparse(product_url)
+    path = parsed.path or "/"
+    uri = path
+
+    headers = {
+        "User-Agent": PDP_DETAIL_UA,
+        "Referer": product_url,
+        "Accept": "application/json",
+    }
+
+    try:
+        with httpx.Client(
+            timeout=min(TIMEOUT_S, 12.0),
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            # Warm cookies / token (same flow as PDP JS).
+            warm_data = json.dumps(
+                {
+                    "deviceType": "pc",
+                    "path": product_url,
+                    "uri": uri,
+                    "headerParams": json.dumps(
+                        {"user-agent": PDP_DETAIL_UA}, separators=(",", ":")
+                    ),
+                    "cookieParams": "{}",
+                    "requestParams": "{}",
+                },
+                separators=(",", ":"),
+            )
+            client.get(
+                f"https://{host}/h5/{PDP_DETAIL_API}/1.0/"
+                f"?jsv=2.7.0&appKey={PDP_DETAIL_APP_KEY}&api={PDP_DETAIL_API}&v=1.0"
+                f"&type=originaljson&dataType=json&data={quote(warm_data)}",
+            )
+            token = _cookie_h5_token(client)
+            if not token:
+                result["error"] = "mtop_token_missing"
+                result["timings_ms"]["price_resolution_ms"] = round(
+                    (time.perf_counter() - t0) * 1000, 1
+                )
+                return result
+
+            cookie_params = {c.name: c.value for c in client.cookies.jar}
+            data_obj = {
+                "deviceType": "pc",
+                "path": product_url,
+                "uri": uri,
+                "headerParams": json.dumps(
+                    {"user-agent": PDP_DETAIL_UA}, separators=(",", ":")
+                ),
+                "cookieParams": json.dumps(cookie_params, separators=(",", ":")),
+                "requestParams": "{}",
+            }
+            data = json.dumps(data_obj, separators=(",", ":"))
+            t_ms = str(int(time.time() * 1000))
+            sign = _mtop_sign(token, t_ms, data)
+            t_fetch = time.perf_counter()
+            resp = client.post(
+                f"https://{host}/h5/{PDP_DETAIL_API}/1.0/",
+                params={
+                    "jsv": "2.7.0",
+                    "appKey": PDP_DETAIL_APP_KEY,
+                    "t": t_ms,
+                    "sign": sign,
+                    "api": PDP_DETAIL_API,
+                    "v": "1.0",
+                    "type": "originaljson",
+                    "dataType": "json",
+                },
+                data={"data": data},
+                headers={
+                    **headers,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            fallback_ms = round((time.perf_counter() - t_fetch) * 1000, 1)
+            body = resp.json()
+            ret = " ".join(body.get("ret") or [])
+            # One token-retry (matches PDP JS behaviour).
+            if "TOKEN" in ret.upper() or "ILLEGAL_ACCESS" in ret.upper():
+                token = _cookie_h5_token(client) or token
+                cookie_params = {c.name: c.value for c in client.cookies.jar}
+                data_obj["cookieParams"] = json.dumps(
+                    cookie_params, separators=(",", ":")
+                )
+                data = json.dumps(data_obj, separators=(",", ":"))
+                t_ms = str(int(time.time() * 1000))
+                sign = _mtop_sign(token, t_ms, data)
+                t_fetch = time.perf_counter()
+                resp = client.post(
+                    f"https://{host}/h5/{PDP_DETAIL_API}/1.0/",
+                    params={
+                        "jsv": "2.7.0",
+                        "appKey": PDP_DETAIL_APP_KEY,
+                        "t": t_ms,
+                        "sign": sign,
+                        "api": PDP_DETAIL_API,
+                        "v": "1.0",
+                        "type": "originaljson",
+                        "dataType": "json",
+                    },
+                    data={"data": data},
+                    headers={
+                        **headers,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                fallback_ms += round((time.perf_counter() - t_fetch) * 1000, 1)
+                body = resp.json()
+                ret = " ".join(body.get("ret") or [])
+
+            if "SUCCESS" not in ret.upper():
+                result["error"] = ret or f"http_{resp.status_code}"
+                result["timings_ms"] = {
+                    "price_resolution_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "fallback_fetch_ms": fallback_ms,
+                }
+                return result
+
+            module = (body.get("data") or {}).get("module")
+            if isinstance(module, str):
+                fields = json.loads(module)
+            elif isinstance(module, dict):
+                fields = module
+            else:
+                result["error"] = "module_missing"
+                result["timings_ms"] = {
+                    "price_resolution_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "fallback_fetch_ms": fallback_ms,
+                }
+                return result
+
+            prices = sku_prices_from_detail_fields(fields)
+            result["prices_by_sku"] = prices
+            result["ok"] = bool(prices)
+            result["sku_count"] = len(prices)
+            result["timings_ms"] = {
+                "price_resolution_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "fallback_fetch_ms": fallback_ms,
+            }
+            _detail_price_cache[cache_key] = (
+                now,
+                {
+                    "prices_by_sku": prices,
+                    "ok": result["ok"],
+                    "error": None,
+                    "source": PDP_DETAIL_API,
+                    "sku_count": len(prices),
+                },
+            )
+            return result
+    except Exception as exc:  # noqa: BLE001
+        logger.info("getDetailInfo price resolution failed: %s", exc)
+        result["error"] = str(exc)
+        result["timings_ms"]["price_resolution_ms"] = round(
+            (time.perf_counter() - t0) * 1000, 1
+        )
+        return result
+
+
 def _extract_sku_infos_best_effort(html: str) -> list[dict[str, Any]]:
     """Backward-compatible alias used by tests / callers."""
     return _extract_variants_structured(html)
@@ -596,6 +934,7 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
             break
         else:
             raise PublicDarazError("Too many redirects", code="redirect_limit")
+    ssr_fetch_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     t_parse = time.perf_counter()
     ld = _parse_json_ld(html)
@@ -625,6 +964,19 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
 
     host = urlparse(clean).hostname or "www.daraz.pk"
     catalog = _fetch_catalog_enrichment(str(item_id or ""), host=host)
+
+    # Phase 4D.5.1: hydrate missing SSR prices via getDetailInfo (all SKUs, one call)
+    # BEFORE catalog cheapest hints — catalog must never flatten across variants.
+    detail_meta: dict[str, Any] = {"ok": False, "skipped": True}
+    missing_before_detail = sum(1 for v in variants if v.get("price") is None)
+    if missing_before_detail and variants:
+        detail_meta = _fetch_pdp_detail_sku_prices(clean, item_id=str(item_id or ""))
+        detail_meta["skipped"] = False
+        if detail_meta.get("ok"):
+            variants = merge_detail_prices_into_variants(
+                variants, detail_meta.get("prices_by_sku") or {}
+            )
+
     variants = _apply_price_fallbacks(
         variants,
         pdt_price=pdt_price,
@@ -674,12 +1026,27 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         1 for v in variants if v.get("special_price") is not None
     )
 
+    price_source_label = "unavailable"
+    if any(
+        str(v.get("price_source") or "").startswith("mtop.getDetailInfo")
+        for v in variants
+    ):
+        price_source_label = "mtop.getDetailInfo"
+    elif any(v.get("price_source") == "skuInfos" or str(v.get("price_source") or "").startswith("skuInfos") for v in variants):
+        price_source_label = "skuInfos"
+    elif product_price is not None:
+        price_source_label = "catalog/pdt"
+
     timings = {
+        "ssr_fetch_ms": ssr_fetch_ms,
+        "structured_parse_ms": parse_ms,
         "public_fetch_ms": round((time.perf_counter() - t0) * 1000, 1),
         "parse_ms": parse_ms,
         "fetch_extract": round((time.perf_counter() - t0) * 1000, 1),
+        "total_source_extract_ms": round((time.perf_counter() - t0) * 1000, 1),
     }
     timings.update(catalog.get("timings_ms") or {})
+    timings.update(detail_meta.get("timings_ms") or {})
 
     payload = {
         "source_type": "public_daraz_url",
@@ -708,17 +1075,16 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
             "pdt_price": pdt_price,
             "catalog_original_price": catalog.get("original_price"),
             "catalog_display_price_ignored_as_special": catalog.get("display_price"),
+            "price_resolution_source": price_source_label,
+            "detail_api": detail_meta.get("source") if not detail_meta.get("skipped") else None,
+            "detail_ok": bool(detail_meta.get("ok")),
+            "detail_error": detail_meta.get("error"),
+            "detail_sku_count": detail_meta.get("sku_count"),
         },
         "provenance": {
             "title": "json-ld" if ld.get("name") else ("catalog" if title else "unavailable"),
             "images": "json-ld" if images else "unavailable",
-            "price": (
-                "skuInfos"
-                if any(v.get("price_source") == "skuInfos" for v in variants)
-                else "catalog/pdt"
-                if product_price is not None
-                else "unavailable"
-            ),
+            "price": price_source_label,
             "description": "json-ld" if description else "unavailable",
             "brand": "json-ld" if ld.get("brand") else ("catalog" if brand else "unavailable"),
             "category": category_source or ("json-ld" if category_hint else "unavailable"),
@@ -737,12 +1103,17 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         )
     if missing_variant_prices:
         payload["warnings"].append(
-            f"{missing_variant_prices} variant(s) missing reliable regular price "
-            "(public PDP often omits per-SKU prices from SSR)"
+            f"{missing_variant_prices} variant(s) still missing regular price after "
+            "SSR + getDetailInfo resolution"
         )
     if catalog.get("display_price") is not None:
         payload["warnings"].append(
             "Catalog display price ignored for Special Price (may include campaigns/vouchers)"
+        )
+    if detail_meta.get("ok"):
+        payload["warnings"].append(
+            "Variant prices hydrated via mtop.global.detail.web.getDetailInfo "
+            "(salePrice not treated as seller Special Price)"
         )
     _cache[clean] = (now, payload)
     return payload
@@ -1085,3 +1456,4 @@ def build_public_clone_draft(
 
 def clear_public_cache_for_tests() -> None:
     _cache.clear()
+    _detail_price_cache.clear()
