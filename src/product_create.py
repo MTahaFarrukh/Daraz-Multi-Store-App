@@ -6,6 +6,10 @@ import os
 from typing import Any
 
 from src.brand_resolve import resolve_brand_for_category
+from src.category_attr_resolve import (
+    get_cached_category_attributes,
+    resolve_required_category_attributes,
+)
 from src.category_validate import validate_draft_against_category
 from src.daraz_api import DarazApiError, DarazClient
 from src.db.repo import get_repo
@@ -85,7 +89,11 @@ def run_supervised_create(
     primary = (draft.get("product") or {}).get("primary_category_id")
 
     try:
-        cat_payload = client.get_category_attributes(primary)
+        cat_payload = get_cached_category_attributes(
+            primary,
+            client.get_category_attributes,
+            marketplace=str(dest.get("country") or "pk"),
+        )
     except DarazApiError as exc:
         return {
             "status": "FAILED",
@@ -104,6 +112,12 @@ def run_supervised_create(
         attrs["brand"] = brand_resolution.get("brand")
         draft["product"]["attributes"] = attrs
     draft["brand_resolution"] = brand_resolution
+
+    attr_report = resolve_required_category_attributes(draft, cat_payload)
+    draft.setdefault("validation", {})["attribute_resolution"] = {
+        "resolved_count": attr_report.get("resolved_count"),
+        "unresolved_count": attr_report.get("unresolved_count"),
+    }
 
     category_result = validate_draft_against_category(draft, cat_payload)
     draft["validation"]["category"] = category_result

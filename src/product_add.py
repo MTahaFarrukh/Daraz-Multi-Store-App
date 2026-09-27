@@ -6,6 +6,10 @@ import time
 from typing import Any
 
 from src.brand_resolve import resolve_brand_for_category
+from src.category_attr_resolve import (
+    get_cached_category_attributes,
+    resolve_required_category_attributes,
+)
 from src.category_validate import validate_draft_against_category
 from src.daraz_api import DarazApiError, DarazClient
 from src.db.repo import get_repo
@@ -433,10 +437,15 @@ def _prepare_destination(
     if primary:
         t_cat = time.perf_counter()
         try:
-            cat_payload = client.get_category_attributes(primary)
-            timings["category_resolution_ms"] = round(
+            cat_payload = get_cached_category_attributes(
+                primary,
+                client.get_category_attributes,
+                marketplace=str(dest.get("country") or "pk"),
+            )
+            timings["category_attributes_ms"] = round(
                 (time.perf_counter() - t_cat) * 1000, 1
             )
+            timings["category_resolution_ms"] = timings["category_attributes_ms"]
             t_brand = time.perf_counter()
             brand_resolution = resolve_brand_for_category(
                 source_brand=(draft.get("product") or {}).get("brand"),
@@ -455,6 +464,20 @@ def _prepare_destination(
                 attrs["brand"] = brand_resolution.get("brand")
                 draft["product"]["attributes"] = attrs
             draft["brand_resolution"] = brand_resolution
+
+            t_attr = time.perf_counter()
+            attr_report = resolve_required_category_attributes(draft, cat_payload)
+            timings["attribute_resolution_ms"] = float(
+                (attr_report.get("timings_ms") or {}).get("attribute_resolution_ms")
+                or round((time.perf_counter() - t_attr) * 1000, 1)
+            )
+            draft.setdefault("validation", {})["attribute_resolution"] = {
+                "resolved_count": attr_report.get("resolved_count"),
+                "unresolved_count": attr_report.get("unresolved_count"),
+                "resolved": (attr_report.get("resolved") or [])[:20],
+                "unresolved": (attr_report.get("unresolved") or [])[:20],
+            }
+
             category_result = validate_draft_against_category(draft, cat_payload)
             draft.setdefault("validation", {})["category"] = category_result
             if brand_resolution.get("status") == "UNRESOLVED":
@@ -471,8 +494,12 @@ def _prepare_destination(
         except DarazApiError as exc:
             errors.append(f"category_attributes:{exc.code}:{exc}")
             timings.setdefault(
-                "category_resolution_ms",
+                "category_attributes_ms",
                 round((time.perf_counter() - t_cat) * 1000, 1),
+            )
+            timings.setdefault(
+                "category_resolution_ms",
+                timings.get("category_attributes_ms", 0),
             )
     else:
         errors.append("category:PrimaryCategory unresolved")

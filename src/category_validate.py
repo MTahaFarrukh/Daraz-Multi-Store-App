@@ -91,6 +91,11 @@ def _draft_sku_values(draft: dict[str, Any], name: str) -> list[Any]:
     key = name.lower()
     canonical = _SKU_FIELD_ALIASES.get(key, name)
     out: list[Any] = []
+
+    def _norm(s: str) -> str:
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+
+    want = _norm(name)
     for v in variants:
         if canonical == "SellerSku":
             out.append(v.get("seller_sku"))
@@ -105,15 +110,15 @@ def _draft_sku_values(draft: dict[str, Any], name: str) -> list[Any]:
         }:
             out.append(v.get(canonical))
         else:
-            # sale props / custom sku attrs
             props = v.get("sale_props") or {}
             if isinstance(props, dict):
+                hit = None
                 for pk, pv in props.items():
-                    if str(pk).lower() == key:
-                        out.append(pv)
+                    pks = str(pk)
+                    if pks.lower() == key or _norm(pks) == want:
+                        hit = pv
                         break
-                else:
-                    out.append(None)
+                out.append(hit)
             else:
                 out.append(None)
     return out
