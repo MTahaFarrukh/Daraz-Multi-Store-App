@@ -425,10 +425,25 @@ export type AddProductDestinationResult = {
     id?: string | null;
   };
   status: string;
+  creation_status?: string | null;
   item_id?: string | null;
   reason?: string | null;
   daraz_status?: string | null;
   duplicates?: Array<Record<string, unknown>>;
+  unresolved_variants?: Array<{
+    key?: string;
+    label?: string;
+    sale_props?: Record<string, unknown>;
+    price?: number | null;
+  }>;
+  used_no_brand?: boolean;
+  variant_count?: number;
+  pricing?: Record<string, unknown>;
+  fidelity?: Record<string, unknown>;
+  warnings?: string[];
+  retry_safe?: { item_id?: string; step?: string } | null;
+  existing_product_id?: string | null;
+  existing_daraz_item_id?: string | null;
   timings_ms?: Record<string, number>;
 };
 

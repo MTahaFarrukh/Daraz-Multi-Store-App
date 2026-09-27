@@ -1306,11 +1306,14 @@ class AddFromUrlBody(BaseModel):
     url: str = Field(..., min_length=8)
     destination_store_ids: list[str] = Field(..., min_length=1)
     price_override: float | None = None
+    variant_price_overrides: dict[str, float] | None = None
     # None/omitted = execute when ALLOW_PRODUCT_CREATE=1; False = dry-run only
     execute: bool | None = None
     confirm: bool = False  # ignored on SaaS add (probe-only concept)
     allow_duplicates: bool = False
     edit_before: bool = False
+    # store_id → existing destination item_id (retry Special Price only)
+    resume_by_store: dict[str, str] | None = None
 
 
 class AddFromConnectedBody(BaseModel):
@@ -1318,10 +1321,12 @@ class AddFromConnectedBody(BaseModel):
     daraz_item_id: str = Field(..., min_length=1)
     destination_store_ids: list[str] = Field(..., min_length=1)
     price_override: float | None = None
+    variant_price_overrides: dict[str, float] | None = None
     execute: bool | None = None
     confirm: bool = False
     allow_duplicates: bool = False
     edit_before: bool = False
+    resume_by_store: dict[str, str] | None = None
 
 
 def _product_public_view(
@@ -1589,10 +1594,12 @@ def api_add_product_from_url(
             body.url,
             body.destination_store_ids,
             price_override=body.price_override,
+            variant_price_overrides=body.variant_price_overrides,
             execute=body.execute,
             confirm=body.confirm,
             allow_duplicates=body.allow_duplicates,
             edit_before=body.edit_before,
+            resume_by_store=body.resume_by_store,
         )
     except (PublicDarazError, ProductFetchError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1614,10 +1621,12 @@ def api_add_product_from_connected(
             body.daraz_item_id,
             body.destination_store_ids,
             price_override=body.price_override,
+            variant_price_overrides=body.variant_price_overrides,
             execute=body.execute,
             confirm=body.confirm,
             allow_duplicates=body.allow_duplicates,
             edit_before=body.edit_before,
+            resume_by_store=body.resume_by_store,
         )
     except (ProductFetchError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

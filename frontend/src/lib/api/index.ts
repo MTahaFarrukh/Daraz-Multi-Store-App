@@ -258,10 +258,12 @@ export const Api = {
     url: string;
     destination_store_ids: string[];
     price_override?: number;
+    variant_price_overrides?: Record<string, number>;
     execute?: boolean;
     confirm?: boolean;
     allow_duplicates?: boolean;
     edit_before?: boolean;
+    resume_by_store?: Record<string, string>;
   }) =>
     api<AddProductResponse>("/api/products/add-from-url", {
       method: "POST",
@@ -273,10 +275,12 @@ export const Api = {
     daraz_item_id: string;
     destination_store_ids: string[];
     price_override?: number;
+    variant_price_overrides?: Record<string, number>;
     execute?: boolean;
     confirm?: boolean;
     allow_duplicates?: boolean;
     edit_before?: boolean;
+    resume_by_store?: Record<string, string>;
   }) =>
     api<AddProductResponse>("/api/products/add-from-connected", {
       method: "POST",

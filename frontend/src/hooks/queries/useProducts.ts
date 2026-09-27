@@ -130,10 +130,12 @@ export function useAddProductFromUrl(workspaceId: string | undefined) {
       url: string;
       destination_store_ids: string[];
       price_override?: number;
+      variant_price_overrides?: Record<string, number>;
       execute?: boolean;
       confirm?: boolean;
       allow_duplicates?: boolean;
       edit_before?: boolean;
+      resume_by_store?: Record<string, string>;
     }) => Api.addProductFromUrl(body),
     onSuccess: async () => {
       if (!workspaceId) return;
@@ -152,10 +154,12 @@ export function useAddProductFromConnected(workspaceId: string | undefined) {
       daraz_item_id: string;
       destination_store_ids: string[];
       price_override?: number;
+      variant_price_overrides?: Record<string, number>;
       execute?: boolean;
       confirm?: boolean;
       allow_duplicates?: boolean;
       edit_before?: boolean;
+      resume_by_store?: Record<string, string>;
     }) => Api.addProductFromConnected(body),
     onSuccess: async () => {
       if (!workspaceId) return;

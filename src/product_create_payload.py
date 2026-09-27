@@ -98,9 +98,22 @@ def build_create_product_xml(draft: dict[str, Any]) -> str:
             f"<package_length>{_esc(v.get('package_length'))}</package_length>",
             f"<package_width>{_esc(v.get('package_width'))}</package_width>",
             f"<package_height>{_esc(v.get('package_height'))}</package_height>",
-            sale_xml,
-            sku_img_xml,
         ]
+        # Seller-configured SKU Special Price (not vouchers/campaigns).
+        special = v.get("special_price")
+        if special is not None and special != "":
+            parts.append(f"<special_price>{_esc(special)}</special_price>")
+            from_t = v.get("special_from_time") or v.get("special_from_date")
+            to_t = v.get("special_to_time") or v.get("special_to_date")
+            if not from_t or not to_t:
+                from src.product_fidelity import default_special_window
+
+                d_from, d_to = default_special_window()
+                from_t = from_t or d_from
+                to_t = to_t or d_to
+            parts.append(f"<special_from_time>{_esc(from_t)}</special_from_time>")
+            parts.append(f"<special_to_time>{_esc(to_t)}</special_to_time>")
+        parts.extend([sale_xml, sku_img_xml])
         sku_nodes.append("<Sku>" + "".join(p for p in parts if p) + "</Sku>")
 
     primary = product.get("primary_category_id")
@@ -131,6 +144,7 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
             {
                 "SellerSku": v.get("seller_sku"),
                 "price": v.get("price"),
+                "special_price": v.get("special_price"),
                 "quantity": v.get("quantity"),
                 "package_weight": v.get("package_weight"),
                 "package_length": v.get("package_length"),

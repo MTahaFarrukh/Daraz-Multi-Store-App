@@ -175,70 +175,383 @@ def _extract_images(product_ld: dict[str, Any]) -> list[str]:
 
 
 def _extract_price(product_ld: dict[str, Any]) -> float | None:
+    from src.product_fidelity import parse_money
+
     offers = product_ld.get("offers")
     if isinstance(offers, list) and offers:
         offers = offers[0]
     if not isinstance(offers, dict):
         return None
-    price = offers.get("price") or offers.get("lowPrice")
-    try:
-        return float(price) if price is not None else None
-    except (TypeError, ValueError):
+    return parse_money(offers.get("price") or offers.get("lowPrice"))
+
+
+def _balanced_json(html: str, start: int, *, limit: int = 800_000) -> Any | None:
+    if start < 0 or start >= len(html):
         return None
-
-
-def _extract_sku_infos_best_effort(html: str) -> list[dict[str, Any]]:
-    """Best-effort variants from embedded skuInfos — never invent sale props."""
-    m = re.search(r'"skuInfos"\s*:\s*(\{)', html or "")
-    if not m:
-        return []
-    start = m.start(1)
+    opener = html[start]
+    if opener not in "{[":
+        return None
+    closer = "}" if opener == "{" else "]"
     depth = 0
     end = None
-    for i, ch in enumerate(html[start : start + 200_000], start=start):
-        if ch == "{":
+    for i, ch in enumerate(html[start : start + limit], start=start):
+        if ch == opener:
             depth += 1
-        elif ch == "}":
+        elif ch == closer:
             depth -= 1
             if depth == 0:
                 end = i + 1
                 break
     if end is None:
-        return []
+        return None
     try:
-        data = json.loads(html[start:end])
+        return json.loads(html[start:end])
     except json.JSONDecodeError:
-        return []
-    if not isinstance(data, dict):
-        return []
+        return None
+
+
+def _find_json_after(html: str, pattern: str) -> Any | None:
+    m = re.search(pattern, html or "")
+    if not m:
+        return None
+    return _balanced_json(html, m.start(1))
+
+
+def _sku_price_fields(sku: dict[str, Any]) -> tuple[float | None, float | None, str | None]:
+    """Return (regular, special, source) from a skuInfos-like object.
+
+    Seller special_price is only accepted from explicit seller fields — never from
+    voucher/campaign display prices.
+    """
+    from src.product_fidelity import parse_money
+
+    regular = None
+    special = None
+    source = None
+
+    raw_price = sku.get("price")
+    if isinstance(raw_price, dict):
+        regular = parse_money(
+            raw_price.get("originalPrice")
+            or raw_price.get("price")
+            or raw_price.get("salePrice")
+        )
+        special = parse_money(
+            raw_price.get("specialPrice")
+            or raw_price.get("special_price")
+            or raw_price.get("salePrice")
+        )
+        # If only one numeric present under price.price, treat as regular.
+        if regular is None:
+            regular = parse_money(raw_price.get("price"))
+        if (
+            special is not None
+            and regular is not None
+            and special >= regular
+        ):
+            special = None
+        source = "skuInfos.price"
+    else:
+        regular = parse_money(raw_price)
+
+    if special is None:
+        special = parse_money(sku.get("special_price") or sku.get("specialPrice"))
+        if special is not None:
+            source = source or "skuInfos.special_price"
+
+    if regular is not None and source is None:
+        source = "skuInfos"
+
+    return regular, special, source
+
+
+def _prop_path_to_sale_props(
+    prop_path: str | None, properties: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    if not prop_path or not isinstance(properties, list):
+        return {"propPath": prop_path} if prop_path else {}
+    pid_to_name: dict[str, str] = {}
+    vid_to_name: dict[str, dict[str, str]] = {}
+    for prop in properties:
+        if not isinstance(prop, dict):
+            continue
+        pid = str(prop.get("pid") or "")
+        pname = str(prop.get("name") or pid)
+        if pid:
+            pid_to_name[pid] = pname
+            vid_to_name[pid] = {}
+            for val in prop.get("values") or []:
+                if not isinstance(val, dict):
+                    continue
+                vid = str(val.get("vid") if val.get("vid") is not None else "")
+                vname = str(val.get("name") or vid)
+                if vid:
+                    vid_to_name[pid][vid] = vname
+    sale: dict[str, Any] = {}
+    for part in str(prop_path).split(";"):
+        if ":" not in part:
+            continue
+        pid, vid = part.split(":", 1)
+        name = pid_to_name.get(pid) or pid
+        label = vid_to_name.get(pid, {}).get(vid) or vid
+        sale[name] = label
+    return sale or ({"propPath": prop_path} if prop_path else {})
+
+
+def _extract_variants_structured(html: str) -> list[dict[str, Any]]:
+    """Extract per-SKU identity + prices from skuBase + skuInfos (best effort)."""
+    sku_base = _find_json_after(html, r'"skuBase"\s*:\s*(\{)')
+    sku_infos = _find_json_after(html, r'"skuInfos"\s*:\s*(\{)')
+    properties = None
+    base_skus: list[dict[str, Any]] = []
+    if isinstance(sku_base, dict):
+        properties = sku_base.get("properties")
+        raw_skus = sku_base.get("skus")
+        if isinstance(raw_skus, list):
+            base_skus = [s for s in raw_skus if isinstance(s, dict)]
+
+    infos: dict[str, dict[str, Any]] = {}
+    if isinstance(sku_infos, dict):
+        for key, sku in sku_infos.items():
+            if not isinstance(sku, dict):
+                continue
+            if str(key) == "0" and not sku.get("skuId") and len(sku_infos) > 1:
+                continue
+            sid = str(sku.get("skuId") or key)
+            infos[sid] = sku
+
     out: list[dict[str, Any]] = []
-    for key, sku in data.items():
-        if not isinstance(sku, dict):
-            continue
-        if str(key) == "0" and not sku.get("skuId") and len(data) > 1:
-            continue
-        price = sku.get("price")
-        if isinstance(price, dict):
-            price = price.get("price")
-        try:
-            price_f = float(price) if price is not None else None
-        except (TypeError, ValueError):
-            price_f = None
-        sale: dict[str, Any] = {}
-        props = sku.get("saleProp") or sku.get("properties")
-        if isinstance(props, dict):
-            sale = {str(k): v for k, v in props.items()}
-        elif isinstance(sku.get("propPath"), str) and sku.get("propPath"):
-            sale = {"propPath": sku["propPath"]}
+    seen: set[str] = set()
+
+    def _append(
+        *,
+        sku_id: str,
+        sale_props: dict[str, Any],
+        info: dict[str, Any] | None,
+        prop_path: str | None = None,
+    ) -> None:
+        if sku_id in seen:
+            return
+        seen.add(sku_id)
+        info = info or {}
+        regular, special, price_source = _sku_price_fields(info)
+        qty = None
+        q = info.get("quantity")
+        if isinstance(q, dict):
+            lim = q.get("limit") if isinstance(q.get("limit"), dict) else {}
+            qty = lim.get("max")
         out.append(
             {
-                "daraz_sku_id": str(sku.get("skuId") or key),
-                "seller_sku": sku.get("sellerSku") or sku.get("SellerSku"),
-                "price": price_f,
-                "sale_props": sale,
+                "daraz_sku_id": sku_id,
+                "seller_sku": info.get("sellerSku") or info.get("SellerSku"),
+                "sale_props": sale_props,
+                "prop_path": prop_path,
+                "price": regular,
+                "special_price": special,
+                "special_from_time": info.get("special_from_time")
+                or info.get("specialFromTime"),
+                "special_to_time": info.get("special_to_time")
+                or info.get("specialToTime"),
+                "price_confidence": (
+                    "high"
+                    if regular is not None and price_source
+                    else "missing"
+                ),
+                "price_source": price_source,
+                "category_id": info.get("categoryId") or info.get("category_id"),
+                "image": info.get("image"),
+                "quantity_hint": qty,
             }
         )
+
+    if base_skus:
+        for sku in base_skus:
+            sku_id = str(sku.get("skuId") or sku.get("cartSkuId") or "")
+            if not sku_id:
+                continue
+            prop_path = sku.get("propPath")
+            sale = _prop_path_to_sale_props(
+                str(prop_path) if prop_path else None,
+                properties if isinstance(properties, list) else None,
+            )
+            _append(
+                sku_id=sku_id,
+                sale_props=sale,
+                info=infos.get(sku_id),
+                prop_path=str(prop_path) if prop_path else None,
+            )
+    else:
+        for sku_id, info in infos.items():
+            sale: dict[str, Any] = {}
+            props = info.get("saleProp") or info.get("properties")
+            if isinstance(props, dict):
+                sale = {str(k): v for k, v in props.items()}
+            elif isinstance(info.get("propPath"), str) and info.get("propPath"):
+                sale = _prop_path_to_sale_props(info.get("propPath"), None)
+            _append(sku_id=sku_id, sale_props=sale, info=info)
+
     return out
+
+
+def _extract_pdt_price(html: str) -> float | None:
+    from src.product_fidelity import parse_money
+
+    for pat in (
+        r'"pdt_price"\s*:\s*"([^"]+)"',
+        r'\\"pdt_price\\"\s*:\s*\\"([^\\"]+)\\"',
+    ):
+        m = re.search(pat, html or "")
+        if m:
+            return parse_money(m.group(1))
+    return None
+
+
+def _extract_reg_category_id(html: str) -> str | None:
+    m = re.search(r'"regCategoryId"\s*:\s*"(\d+)"', html or "")
+    if m:
+        return m.group(1)
+    m = re.search(r'\\"regCategoryId\\"\s*:\s*\\"(\d+)\\"', html or "")
+    return m.group(1) if m else None
+
+
+def _fetch_catalog_enrichment(item_id: str, *, host: str = "www.daraz.pk") -> dict[str, Any]:
+    """Cheap catalog ajax enrichment (category path, brand, listing prices).
+
+    Listing ``price`` may include campaigns/vouchers — never treat as seller
+    Special Price. ``originalPrice`` is used only as a regular-price hint when
+    per-SKU structured prices are missing.
+    """
+    from src.product_fidelity import parse_money
+
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {"timings_ms": {}}
+    if not item_id or not _host_allowed(host):
+        return out
+    try:
+        _resolve_public(host)
+        url = f"https://{host}/catalog/?_keyori=ss&from=input&q={item_id}&ajax=true"
+        with httpx.Client(
+            timeout=min(TIMEOUT_S, 8.0),
+            follow_redirects=True,
+            headers={
+                "User-Agent": "MultiStoreProductImport/1.0",
+                "Accept": "application/json",
+            },
+        ) as client:
+            resp = client.get(url)
+        if resp.status_code >= 400:
+            out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
+            return out
+        data = resp.json()
+        mods = data.get("mods") if isinstance(data, dict) else None
+        items = mods.get("listItems") if isinstance(mods, dict) else None
+        if not isinstance(items, list) or not items:
+            out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
+            return out
+        hit = None
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("itemId") or row.get("nid") or "") == str(item_id):
+                hit = row
+                break
+        if hit is None and isinstance(items[0], dict):
+            hit = items[0]
+        if not isinstance(hit, dict):
+            out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
+            return out
+        cats = hit.get("categories")
+        category_ids = [str(c) for c in cats] if isinstance(cats, list) else []
+        out.update(
+            {
+                "brand": hit.get("brandName"),
+                "brand_id": hit.get("brandId"),
+                "category_ids": category_ids,
+                "category_id": category_ids[-1] if category_ids else None,
+                "original_price": parse_money(hit.get("originalPrice")),
+                "display_price": parse_money(hit.get("price")),
+                "cheapest_sku_id": (
+                    str(hit.get("skuId")) if hit.get("skuId") is not None else None
+                ),
+                "title": hit.get("name"),
+                # Explicitly NOT seller special — catalog price is often promo.
+                "display_price_is_not_special": True,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("catalog enrichment skipped: %s", exc)
+    out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
+    return out
+
+
+def _apply_price_fallbacks(
+    variants: list[dict[str, Any]],
+    *,
+    pdt_price: float | None,
+    catalog: dict[str, Any],
+    json_ld_price: float | None,
+) -> list[dict[str, Any]]:
+    """Fill missing regular prices carefully — never invent special prices."""
+    if not variants:
+        return variants
+
+    known = [v for v in variants if v.get("price") is not None]
+    if len(known) == len(variants):
+        return variants
+
+    # Prefer catalog originalPrice / pdt_price / json-ld as product-level regular.
+    product_regular = (
+        catalog.get("original_price")
+        if catalog.get("original_price") is not None
+        else pdt_price
+        if pdt_price is not None
+        else json_ld_price
+    )
+
+    if product_regular is None:
+        return variants
+
+    # Single SKU — safe to apply product-level price.
+    if len(variants) == 1:
+        if variants[0].get("price") is None:
+            variants[0]["price"] = product_regular
+            variants[0]["price_confidence"] = "medium"
+            variants[0]["price_source"] = (
+                "catalog.originalPrice"
+                if catalog.get("original_price") is not None
+                else "pdt_price"
+                if pdt_price is not None
+                else "json-ld"
+            )
+        return variants
+
+    # Multi-SKU: only apply product-level price when EVERY variant is missing
+    # AND we have no evidence they differ — still mark medium confidence and
+    # leave special untouched. Callers must NOT treat this as verified per-SKU
+    # fidelity when prices were absent from skuInfos.
+    if not known:
+        cheapest = catalog.get("cheapest_sku_id")
+        for v in variants:
+            # Prefer attaching listing original to cheapest SKU only when ids match;
+            # otherwise leave unresolved so UI can collect per-variant prices.
+            if cheapest and str(v.get("daraz_sku_id")) == str(cheapest):
+                v["price"] = product_regular
+                v["price_confidence"] = "medium"
+                v["price_source"] = "catalog.originalPrice"
+            # Do not flatten product_regular onto every SKU.
+        # If still all missing (no cheapest match), attach to none — Needs Attention.
+        still_missing = [v for v in variants if v.get("price") is None]
+        if len(still_missing) == len(variants) and len(variants) > 1:
+            # Keep unresolved — better than flattening.
+            pass
+        return variants
+
+    return variants
+
+
+def _extract_sku_infos_best_effort(html: str) -> list[dict[str, Any]]:
+    """Backward-compatible alias used by tests / callers."""
+    return _extract_variants_structured(html)
 
 
 def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
@@ -284,6 +597,7 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         else:
             raise PublicDarazError("Too many redirects", code="redirect_limit")
 
+    t_parse = time.perf_counter()
     ld = _parse_json_ld(html)
     title = str(ld.get("name") or "").strip() or None
     description = str(ld.get("description") or "").strip() or ""
@@ -304,7 +618,68 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
     elif isinstance(cat, dict):
         category_hint = cat.get("name")
 
-    variants = _extract_sku_infos_best_effort(html)
+    variants = _extract_variants_structured(html)
+    pdt_price = _extract_pdt_price(html)
+    reg_cat = _extract_reg_category_id(html)
+    parse_ms = round((time.perf_counter() - t_parse) * 1000, 1)
+
+    host = urlparse(clean).hostname or "www.daraz.pk"
+    catalog = _fetch_catalog_enrichment(str(item_id or ""), host=host)
+    variants = _apply_price_fallbacks(
+        variants,
+        pdt_price=pdt_price,
+        catalog=catalog,
+        json_ld_price=price,
+    )
+
+    # Category: prefer leaf from catalog categories, else skuInfos categoryId.
+    category_id = catalog.get("category_id")
+    category_confidence = "high" if category_id else None
+    category_source = "catalog.categories" if category_id else None
+    if not category_id:
+        for v in variants:
+            if v.get("category_id"):
+                category_id = str(v["category_id"])
+                category_confidence = "high"
+                category_source = "skuInfos.categoryId"
+                break
+    if not category_id and reg_cat:
+        category_id = str(reg_cat)
+        category_confidence = "medium"
+        category_source = "regCategoryId"
+
+    if not brand and catalog.get("brand"):
+        brand = catalog.get("brand")
+    if not title and catalog.get("title"):
+        title = catalog.get("title")
+
+    # Product-level price hint (never used to flatten multi-SKU silently).
+    product_price = None
+    priced = [v.get("price") for v in variants if v.get("price") is not None]
+    if len(priced) == 1 and len(variants) == 1:
+        product_price = priced[0]
+    elif len(set(round(float(p), 4) for p in priced)) == 1 and priced:
+        product_price = priced[0]
+    else:
+        product_price = (
+            catalog.get("original_price")
+            if catalog.get("original_price") is not None
+            else pdt_price
+            if pdt_price is not None
+            else price
+        )
+
+    missing_variant_prices = sum(1 for v in variants if v.get("price") is None)
+    special_detected = sum(
+        1 for v in variants if v.get("special_price") is not None
+    )
+
+    timings = {
+        "public_fetch_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "parse_ms": parse_ms,
+        "fetch_extract": round((time.perf_counter() - t0) * 1000, 1),
+    }
+    timings.update(catalog.get("timings_ms") or {})
 
     payload = {
         "source_type": "public_daraz_url",
@@ -314,19 +689,42 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         "brand": brand,
         "description_html": description,
         "images": images,
-        "price": price,
+        "price": product_price,
         "category_hint": category_hint,
-        "variants": variants,
-        "provenance": {
-            "title": "json-ld" if title else "unavailable",
-            "images": "json-ld" if images else "unavailable",
-            "price": "json-ld" if price is not None else "unavailable",
-            "description": "json-ld" if description else "unavailable",
-            "brand": "json-ld" if brand else "unavailable",
-            "category": "json-ld" if category_hint else "unavailable",
-            "variants": "skuInfos/moduleData" if variants else "unavailable",
+        "category_id": category_id,
+        "category_ids": catalog.get("category_ids") or [],
+        "category_resolution": {
+            "category_id": category_id,
+            "category_name": category_hint,
+            "source": category_source,
+            "confidence": category_confidence,
         },
-        "timings_ms": {"fetch_extract": round((time.perf_counter() - t0) * 1000, 1)},
+        "variants": variants,
+        "pricing_summary": {
+            "variant_count": len(variants),
+            "regular_prices_complete": missing_variant_prices == 0 and bool(variants),
+            "missing_variant_prices": missing_variant_prices,
+            "special_prices_detected": special_detected,
+            "pdt_price": pdt_price,
+            "catalog_original_price": catalog.get("original_price"),
+            "catalog_display_price_ignored_as_special": catalog.get("display_price"),
+        },
+        "provenance": {
+            "title": "json-ld" if ld.get("name") else ("catalog" if title else "unavailable"),
+            "images": "json-ld" if images else "unavailable",
+            "price": (
+                "skuInfos"
+                if any(v.get("price_source") == "skuInfos" for v in variants)
+                else "catalog/pdt"
+                if product_price is not None
+                else "unavailable"
+            ),
+            "description": "json-ld" if description else "unavailable",
+            "brand": "json-ld" if ld.get("brand") else ("catalog" if brand else "unavailable"),
+            "category": category_source or ("json-ld" if category_hint else "unavailable"),
+            "variants": "skuBase+skuInfos" if variants else "unavailable",
+        },
+        "timings_ms": timings,
         "warnings": [],
     }
     if not title:
@@ -336,6 +734,15 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
     if not payload["variants"]:
         payload["warnings"].append(
             "Public page did not expose reliable variants — draft uses a single SKU"
+        )
+    if missing_variant_prices:
+        payload["warnings"].append(
+            f"{missing_variant_prices} variant(s) missing reliable regular price "
+            "(public PDP often omits per-SKU prices from SSR)"
+        )
+    if catalog.get("display_price") is not None:
+        payload["warnings"].append(
+            "Catalog display price ignored for Special Price (may include campaigns/vouchers)"
         )
     _cache[clean] = (now, payload)
     return payload
@@ -436,7 +843,15 @@ def build_public_clone_draft_from_extracted(
                 "sale_props": sale_props,
                 "price": raw_v.get("price")
                 if raw_v.get("price") is not None
-                else extracted.get("price"),
+                else (
+                    extracted.get("price") if len(src_variants) == 1 else None
+                ),
+                "special_price": raw_v.get("special_price"),
+                "special_from_time": raw_v.get("special_from_time"),
+                "special_to_time": raw_v.get("special_to_time"),
+                "price_confidence": raw_v.get("price_confidence")
+                or ("medium" if raw_v.get("price") is not None else "missing"),
+                "price_source": raw_v.get("price_source"),
                 "quantity": initial_qty,
                 "seller_sku": sku,
                 "package_weight": pkg["values"].get("package_weight"),
@@ -452,7 +867,11 @@ def build_public_clone_draft_from_extracted(
                         "package_height",
                     )
                 },
-                "images": [{"url": u, "kind": "product"} for u in images[:8]],
+                "images": (
+                    [{"url": raw_v["image"], "kind": "variant"}]
+                    if raw_v.get("image")
+                    else [{"url": u, "kind": "product"} for u in images[:8]]
+                ),
             }
         )
     if not draft_variants:
@@ -465,21 +884,53 @@ def build_public_clone_draft_from_extracted(
         "resolved_images": images,
     }
 
+    cat_res = extracted.get("category_resolution") or {}
+    primary_category_id = None
+    cat_confidence = cat_res.get("confidence")
+    if extracted.get("category_id") and cat_confidence in {"high", "medium"}:
+        try:
+            primary_category_id = int(str(extracted["category_id"]))
+        except (TypeError, ValueError):
+            primary_category_id = None
+
     brand = extracted.get("brand")
     brand_resolution = {
         "status": "PENDING" if brand else "NO_BRAND",
         "brand": brand or "No Brand",
-        "message": "Public brand text — resolve against destination category before create",
+        "message": (
+            "Public brand text — resolve against destination category before create"
+            if brand
+            else "No public brand — will use destination No Brand when supported"
+        ),
+        "used_no_brand": not bool(brand),
     }
 
     duplicates = repo.find_possible_product_duplicates(
         workspace_id,
         str(dest["id"]),
         title=title,
-        category_id=None,
+        category_id=primary_category_id,
     )
     if duplicates:
         warnings.append(f"Possible duplicate(s) on destination: {len(duplicates)}")
+
+    unresolved_prices = [
+        {
+            "key": str(v.get("source_daraz_sku_id") or v.get("seller_sku")),
+            "label": " / ".join(
+                f"{k}: {val}" for k, val in (v.get("sale_props") or {}).items()
+            )
+            or "Default",
+            "sale_props": v.get("sale_props") or {},
+        }
+        for v in draft_variants
+        if v.get("price") is None
+    ]
+    if unresolved_prices:
+        errors.append("missing_variant_prices")
+        warnings.append(
+            f"Price required for {len(unresolved_prices)} variant(s) before create"
+        )
 
     can_create = (
         len(errors) == 0
@@ -487,6 +938,8 @@ def build_public_clone_draft_from_extracted(
         and bool(title)
         and bool(draft_variants)
         and not duplicates
+        and primary_category_id is not None
+        and not unresolved_prices
     )
 
     draft = {
@@ -501,7 +954,7 @@ def build_public_clone_draft_from_extracted(
         "product": {
             "title": title,
             "title_en": title,
-            "primary_category_id": None,
+            "primary_category_id": primary_category_id,
             "primary_category_name": extracted.get("category_hint"),
             "brand": brand_resolution.get("brand"),
             "attributes": {"brand": brand_resolution.get("brand")},
@@ -510,6 +963,12 @@ def build_public_clone_draft_from_extracted(
             "short_description_html": None,
             "package_content": None,
             "warranty_type": None,
+        },
+        "category_resolution": {
+            "category_id": primary_category_id,
+            "category_name": extracted.get("category_hint"),
+            "source": cat_res.get("source"),
+            "confidence": cat_confidence,
         },
         "media": {
             "product_images": images,
@@ -530,33 +989,44 @@ def build_public_clone_draft_from_extracted(
                 "title": d.get("title"),
                 "daraz_item_id": d.get("daraz_item_id"),
                 "match_reason": d.get("match_reason"),
+                "match_score": d.get("match_score"),
             }
             for d in duplicates[:8]
         ],
+        "unresolved_variants": unresolved_prices,
+        "pricing_summary": extracted.get("pricing_summary") or {},
         "validation": {
             "missing_mandatory": list(errors),
             "warnings": list(dict.fromkeys(warnings)),
             "errors": list(dict.fromkeys(errors)),
-            "can_create": False,  # Create remains gated; also category unresolved
+            "can_create": False,
             "create_gated": True,
             "preview_ready": can_create,
             "category": {
-                "valid": False,
-                "missing_required": ["PrimaryCategory unresolved from public page"],
+                "valid": primary_category_id is not None,
+                "missing_required": (
+                    []
+                    if primary_category_id is not None
+                    else ["PrimaryCategory unresolved from public page"]
+                ),
             },
         },
         "fidelity": {
-            "copied": ["Title", "Images", "Description", "Price (starting)"],
+            "copied": ["Title", "Images", "Description", "Per-variant prices (when available)"],
             "changed_by_multistore": [
                 "SellerSku → MTF-…",
                 f"Quantity → workspace initial ({initial_qty})",
                 "Package weight/dimensions → workspace defaults",
             ],
             "not_available": [
-                "Exact destination category (requires mapping)",
+                *(
+                    []
+                    if primary_category_id is not None
+                    else ["Exact destination category (requires mapping)"]
+                ),
                 "Seller-only attributes",
                 "Video",
-                "Reliable public variants (unless extracted)",
+                "Campaign/voucher prices (intentionally ignored)",
             ],
         },
         "extraction_provenance": extracted.get("provenance"),

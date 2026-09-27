@@ -469,6 +469,19 @@ class DarazClient:
             transport="form",
         )
 
+    def update_price(self, payload_xml: str) -> dict[str, Any]:
+        """POST /product/price/update — per-SKU Price / SalePrice (special).
+
+        Used when CreateProduct succeeds but seller Special Price still needs
+        a dedicated write, or for retry-safe special-price-only updates.
+        """
+        return self._request(
+            "/product/price/update",
+            method="POST",
+            business_params={"payload": payload_xml},
+            transport="form",
+        )
+
     # ------------------------------------------------------------------
     # Finance (Lazada-mapped paths — availability on Daraz PK must be probed)
     # ------------------------------------------------------------------

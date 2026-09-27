@@ -37,6 +37,7 @@ export function AddDarazProductDialog({
   const [destSelected, setDestSelected] = useState<Set<string>>(new Set());
   const [editBefore, setEditBefore] = useState(false);
   const [priceOverride, setPriceOverride] = useState("");
+  const [variantPrices, setVariantPrices] = useState<Record<string, string>>({});
   const [result, setResult] = useState<AddProductResponse | null>(null);
   const [draftPreview, setDraftPreview] = useState<Record<string, unknown> | null>(
     null
@@ -50,6 +51,18 @@ export function AddDarazProductDialog({
       stores.filter((s) => (mode === "connected" ? s.store_id !== sourceStore : true)),
     [stores, sourceStore, mode]
   );
+
+  const unresolvedVariants = useMemo(() => {
+    const seen = new Map<string, { key: string; label: string }>();
+    for (const d of result?.destinations || []) {
+      for (const v of d.unresolved_variants || []) {
+        const key = String(v.key || "");
+        if (!key || seen.has(key)) continue;
+        seen.set(key, { key, label: String(v.label || key) });
+      }
+    }
+    return Array.from(seen.values());
+  }, [result]);
 
   function toggleDest(id: string) {
     setDestSelected((prev) => {
@@ -76,6 +89,7 @@ export function AddDarazProductDialog({
     setDestSelected(new Set());
     setEditBefore(false);
     setPriceOverride("");
+    setVariantPrices({});
     setResult(null);
     setDraftPreview(null);
     onClose();
@@ -89,11 +103,24 @@ export function AddDarazProductDialog({
     return n;
   }
 
+  function parseVariantOverrides(): Record<string, number> | undefined {
+    const out: Record<string, number> = {};
+    for (const [key, raw] of Object.entries(variantPrices)) {
+      const t = raw.trim();
+      if (!t) continue;
+      const n = Number(t);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      out[key] = n;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+
   async function runAdd(options?: {
     destIds?: string[];
     execute?: boolean;
     confirm?: boolean;
     edit?: boolean;
+    resumeByStore?: Record<string, string>;
   }) {
     const destIds = options?.destIds ?? Array.from(destSelected);
     if (!destIds.length) {
@@ -107,6 +134,7 @@ export function AddDarazProductDialog({
 
     const wantEdit = options?.edit ?? editBefore;
     const price = parsePrice();
+    const variantOverrides = parseVariantOverrides();
 
     if (mode === "url" && !productUrl.trim()) {
       onError("Product URL is required");
@@ -122,15 +150,18 @@ export function AddDarazProductDialog({
       confirm: boolean;
       edit_before: boolean;
       destination_store_ids: string[];
+      resume_by_store?: Record<string, string>;
     }) {
       if (mode === "url") {
         return addUrlMutation.mutateAsync({
           url: productUrl.trim(),
           destination_store_ids: body.destination_store_ids,
           price_override: price,
+          variant_price_overrides: variantOverrides,
           execute: body.execute,
           confirm: body.confirm,
           edit_before: body.edit_before,
+          resume_by_store: body.resume_by_store,
         });
       }
       return addConnectedMutation.mutateAsync({
@@ -138,9 +169,11 @@ export function AddDarazProductDialog({
         daraz_item_id: itemId.trim(),
         destination_store_ids: body.destination_store_ids,
         price_override: price,
+        variant_price_overrides: variantOverrides,
         execute: body.execute,
         confirm: body.confirm,
         edit_before: body.edit_before,
+        resume_by_store: body.resume_by_store,
       });
     }
 
@@ -161,13 +194,13 @@ export function AddDarazProductDialog({
         return;
       }
 
-      // Single click Add Product = create when ALLOW_PRODUCT_CREATE=1 (backend default).
       setBusy("Analyzing product… Creating on Daraz…");
       const res = await callApi({
         execute: true,
         confirm: true,
         edit_before: false,
         destination_store_ids: destIds,
+        resume_by_store: options?.resumeByStore,
       });
       setResult(res);
       applyResultMessages(res);
@@ -194,11 +227,14 @@ export function AddDarazProductDialog({
             ? ` · ${res.needs_attention_count} need attention`
             : "")
       );
+    } else if (res.status === "ALREADY_EXISTS") {
+      onOk("Product already exists on destination — skipped create");
     } else if (res.needs_attention_count) {
+      const missing = res.destinations?.some((d) => d.reason === "missing_price");
       onError(
         `${res.needs_attention_count} store(s) need attention` +
-          (res.destinations?.some((d) => d.reason === "missing_price")
-            ? " — set a price override and retry"
+          (missing
+            ? " — enter prices for unresolved variants (or a single override when all SKUs share one price)"
             : "")
       );
     } else if (res.failed_count) {
@@ -208,8 +244,10 @@ export function AddDarazProductDialog({
     }
   }
 
-  const failedStores = (result?.destinations || []).filter((d) =>
-    ["Failed", "FAILED", "NEEDS_ATTENTION"].includes(String(d.status))
+  const retryable = (result?.destinations || []).filter((d) =>
+    ["Failed", "FAILED", "NEEDS_ATTENTION", "CREATED_WITH_WARNING"].includes(
+      String(d.status)
+    )
   );
 
   const draftVariants =
@@ -306,14 +344,55 @@ export function AddDarazProductDialog({
       </label>
 
       <label style={{ display: "block", marginBottom: "0.75rem" }}>
-        Price override (optional)
+        Price override (optional — single SKU / same-price variants only)
         <input
           value={priceOverride}
           onChange={(e) => setPriceOverride(e.target.value)}
-          placeholder="Required when price is missing"
+          placeholder="Will not flatten differently priced variants"
           inputMode="decimal"
         />
       </label>
+
+      {unresolvedVariants.length ? (
+        <fieldset
+          style={{
+            border: "1px solid var(--border, #ddd)",
+            borderRadius: 6,
+            padding: "0.75rem",
+            marginBottom: "0.75rem",
+          }}
+        >
+          <legend style={{ padding: "0 0.35rem" }}>Price information required</legend>
+          <p className="muted-line" style={{ marginTop: 0 }}>
+            Enter regular price only for unresolved variants, then Continue Adding.
+          </p>
+          <div className="stack" style={{ gap: "0.5rem" }}>
+            {unresolvedVariants.map((v) => (
+              <label key={v.key} style={{ display: "block" }}>
+                {v.label}
+                <input
+                  value={variantPrices[v.key] || ""}
+                  onChange={(e) =>
+                    setVariantPrices((prev) => ({ ...prev, [v.key]: e.target.value }))
+                  }
+                  placeholder="Rs."
+                  inputMode="decimal"
+                />
+              </label>
+            ))}
+          </div>
+          <div className="row" style={{ marginTop: "0.75rem" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={Boolean(busy) || !destSelected.size}
+              onClick={() => void runAdd()}
+            >
+              Continue Adding
+            </button>
+          </div>
+        </fieldset>
+      ) : null}
 
       <div className="row" style={{ gap: "0.5rem" }}>
         <button
@@ -345,27 +424,41 @@ export function AddDarazProductDialog({
                 <strong>{d.store?.display_name || d.store?.store_id || "Store"}</strong> —{" "}
                 {d.status}
                 {d.item_id ? ` · item ${d.item_id}` : ""}
+                {d.existing_daraz_item_id
+                  ? ` · existing ${d.existing_daraz_item_id}`
+                  : ""}
+                {d.used_no_brand ? " · No Brand" : ""}
                 {d.reason ? ` · ${d.reason}` : ""}
               </li>
             ))}
           </ul>
-          {failedStores.length ? (
+          {retryable.length ? (
             <div className="row" style={{ marginTop: "0.75rem" }}>
               <button
                 type="button"
                 className="btn btn-ghost"
                 disabled={Boolean(busy)}
-                onClick={() =>
+                onClick={() => {
+                  const resume: Record<string, string> = {};
+                  const destIds: string[] = [];
+                  for (const d of retryable) {
+                    const sid = d.store?.store_id;
+                    if (!sid) continue;
+                    destIds.push(sid);
+                    const item =
+                      d.retry_safe?.item_id ||
+                      (d.status === "CREATED_WITH_WARNING" ? d.item_id : null);
+                    if (item) resume[sid] = String(item);
+                  }
                   void runAdd({
-                    destIds: failedStores
-                      .map((d) => d.store?.store_id)
-                      .filter(Boolean) as string[],
+                    destIds,
                     execute: Boolean(result.product_create_enabled),
                     confirm: Boolean(result.product_create_enabled),
-                  })
-                }
+                    resumeByStore: Object.keys(resume).length ? resume : undefined,
+                  });
+                }}
               >
-                Retry Failed {failedStores.length}
+                Retry Failed {retryable.length}
               </button>
             </div>
           ) : null}
@@ -374,6 +467,9 @@ export function AddDarazProductDialog({
               {Math.round(result.timings_ms.total)}ms
               {result.timings_ms.fetch_extract != null
                 ? ` · fetch ${Math.round(result.timings_ms.fetch_extract)}ms`
+                : ""}
+              {result.timings_ms.duplicate_check_ms != null
+                ? ` · dup ${Math.round(result.timings_ms.duplicate_check_ms)}ms`
                 : ""}
             </p>
           ) : null}
