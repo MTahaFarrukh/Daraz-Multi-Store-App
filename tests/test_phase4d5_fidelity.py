@@ -327,14 +327,14 @@ def test_unresolved_variant_price_needs_attention(tenancy_env):
 
 
 def test_unresolved_brand_falls_back_to_no_brand():
+    from src.brand_resolve import clear_no_brand_cache_for_tests
+
+    clear_no_brand_cache_for_tests()
     calls = []
 
     def query_brands(**kwargs):
         calls.append(kwargs.get("name"))
-        name = (kwargs.get("name") or "").lower()
-        if "no brand" in name:
-            return {"data": {"module": [{"name": "No Brand", "brand_id": 1}]}}
-        return {"data": {"module": [{"name": "Other", "brand_id": 2}]}}
+        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}]}}
 
     res = resolve_brand_for_category(
         source_brand="Bag Street Unknown XYZ",
@@ -345,6 +345,8 @@ def test_unresolved_brand_falls_back_to_no_brand():
     assert res["used_no_brand"] is True
     assert res["brand"] == "No Brand"
     assert "Bag Street" in (res.get("source_brand") or "")
+    # Policy: never query for source brand name
+    assert calls == ["No Brand"]
 
 
 def test_missing_brand_uses_no_brand():

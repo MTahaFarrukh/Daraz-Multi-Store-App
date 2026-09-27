@@ -279,34 +279,20 @@ def _sku_price_fields(sku: dict[str, Any]) -> tuple[float | None, float | None, 
 def _prop_path_to_sale_props(
     prop_path: str | None, properties: list[dict[str, Any]] | None
 ) -> dict[str, Any]:
-    if not prop_path or not isinstance(properties, list):
-        return {"propPath": prop_path} if prop_path else {}
-    pid_to_name: dict[str, str] = {}
-    vid_to_name: dict[str, dict[str, str]] = {}
-    for prop in properties:
-        if not isinstance(prop, dict):
-            continue
-        pid = str(prop.get("pid") or "")
-        pname = str(prop.get("name") or pid)
-        if pid:
-            pid_to_name[pid] = pname
-            vid_to_name[pid] = {}
-            for val in prop.get("values") or []:
-                if not isinstance(val, dict):
-                    continue
-                vid = str(val.get("vid") if val.get("vid") is not None else "")
-                vname = str(val.get("name") or vid)
-                if vid:
-                    vid_to_name[pid][vid] = vname
-    sale: dict[str, Any] = {}
-    for part in str(prop_path).split(";"):
-        if ":" not in part:
-            continue
-        pid, vid = part.split(":", 1)
-        name = pid_to_name.get(pid) or pid
-        label = vid_to_name.get(pid, {}).get(vid) or vid
-        sale[name] = label
-    return sale or ({"propPath": prop_path} if prop_path else {})
+    """Flat sale_props map (backward compatible). Prefer dimensions on variants."""
+    from src.variant_semantics import dimensions_from_prop_path
+
+    sale, _dims = dimensions_from_prop_path(prop_path, properties)
+    return sale
+
+
+def _prop_path_to_variant_identity(
+    prop_path: str | None, properties: list[dict[str, Any]] | None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return (sale_props, dimensions[]) preserving property/value IDs + names."""
+    from src.variant_semantics import dimensions_from_prop_path
+
+    return dimensions_from_prop_path(prop_path, properties)
 
 
 def _extract_variants_structured(html: str) -> list[dict[str, Any]]:
@@ -338,6 +324,7 @@ def _extract_variants_structured(html: str) -> list[dict[str, Any]]:
         *,
         sku_id: str,
         sale_props: dict[str, Any],
+        dimensions: list[dict[str, Any]] | None,
         info: dict[str, Any] | None,
         prop_path: str | None = None,
     ) -> None:
@@ -351,11 +338,17 @@ def _extract_variants_structured(html: str) -> list[dict[str, Any]]:
         if isinstance(q, dict):
             lim = q.get("limit") if isinstance(q.get("limit"), dict) else {}
             qty = lim.get("max")
+        dims = list(dimensions or [])
+        if not dims and isinstance(sale_props, dict) and sale_props:
+            from src.variant_semantics import dimensions_from_sale_props
+
+            dims = dimensions_from_sale_props(sale_props)
         out.append(
             {
                 "daraz_sku_id": sku_id,
                 "seller_sku": info.get("sellerSku") or info.get("SellerSku"),
                 "sale_props": sale_props,
+                "dimensions": dims,
                 "prop_path": prop_path,
                 "price": regular,
                 "special_price": special,
@@ -381,25 +374,27 @@ def _extract_variants_structured(html: str) -> list[dict[str, Any]]:
             if not sku_id:
                 continue
             prop_path = sku.get("propPath")
-            sale = _prop_path_to_sale_props(
+            sale, dims = _prop_path_to_variant_identity(
                 str(prop_path) if prop_path else None,
                 properties if isinstance(properties, list) else None,
             )
             _append(
                 sku_id=sku_id,
                 sale_props=sale,
+                dimensions=dims,
                 info=infos.get(sku_id),
                 prop_path=str(prop_path) if prop_path else None,
             )
     else:
         for sku_id, info in infos.items():
-            sale: dict[str, Any] = {}
+            sale = {}
+            dims: list[dict[str, Any]] = []
             props = info.get("saleProp") or info.get("properties")
             if isinstance(props, dict):
                 sale = {str(k): v for k, v in props.items()}
             elif isinstance(info.get("propPath"), str) and info.get("propPath"):
-                sale = _prop_path_to_sale_props(info.get("propPath"), None)
-            _append(sku_id=sku_id, sale_props=sale, info=info)
+                sale, dims = _prop_path_to_variant_identity(info.get("propPath"), None)
+            _append(sku_id=sku_id, sale_props=sale, dimensions=dims, info=info)
 
     return out
 
@@ -1211,7 +1206,10 @@ def build_public_clone_draft_from_extracted(
                 "source_variant_id": None,
                 "source_seller_sku": src_seller,
                 "source_daraz_sku_id": raw_v.get("daraz_sku_id"),
+                "daraz_sku_id": raw_v.get("daraz_sku_id"),
                 "sale_props": sale_props,
+                "dimensions": list(raw_v.get("dimensions") or []),
+                "prop_path": raw_v.get("prop_path"),
                 "price": raw_v.get("price")
                 if raw_v.get("price") is not None
                 else (
@@ -1266,14 +1264,15 @@ def build_public_clone_draft_from_extracted(
 
     brand = extracted.get("brand")
     brand_resolution = {
-        "status": "PENDING" if brand else "NO_BRAND",
-        "brand": brand or "No Brand",
+        "status": "PENDING",
+        "brand": "No Brand",
+        "source_brand": brand,
+        "source_brand_ignored": True,
         "message": (
-            "Public brand text — resolve against destination category before create"
-            if brand
-            else "No public brand — will use destination No Brand when supported"
+            "Destination brand always No Brand "
+            "(resolved against category brands before create)"
         ),
-        "used_no_brand": not bool(brand),
+        "used_no_brand": True,
     }
 
     duplicates = repo.find_possible_product_duplicates(
@@ -1293,6 +1292,7 @@ def build_public_clone_draft_from_extracted(
             )
             or "Default",
             "sale_props": v.get("sale_props") or {},
+            "dimensions": v.get("dimensions") or [],
         }
         for v in draft_variants
         if v.get("price") is None
@@ -1328,6 +1328,7 @@ def build_public_clone_draft_from_extracted(
             "primary_category_id": primary_category_id,
             "primary_category_name": extracted.get("category_hint"),
             "brand": brand_resolution.get("brand"),
+            "source_brand": brand,
             "attributes": {"brand": brand_resolution.get("brand")},
             "variation": {},
             "description_html": enhancement["html"],

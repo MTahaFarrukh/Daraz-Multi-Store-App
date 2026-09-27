@@ -196,13 +196,42 @@ def default_special_window() -> tuple[str, str]:
 
 def classify_duplicate_matches(
     duplicates: list[dict[str, Any]],
+    *,
+    source_dimensions: list[dict[str, Any]] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Return (ALREADY_EXISTS|POSSIBLE_DUPLICATE|None, best_match)."""
+    """Return (ALREADY_EXISTS|POSSIBLE_DUPLICATE|None, best_match).
+
+    When source has meaningful variant dimensions (e.g. Pack of 1 vs Pack of 2),
+    demote title-only exact matches that clearly differ on those dimensions.
+    """
     if not duplicates:
         return None, None
     best = duplicates[0]
     reason = str(best.get("match_reason") or "")
     score = float(best.get("match_score") or 0)
+
+    # Soft demotion: if source dimensions are present and candidate title encodes
+    # a conflicting pack/size token, don't treat as ALREADY_EXISTS.
+    if source_dimensions and reason == "title_exact":
+        src_vals = {
+            str(d.get("source_value") or "").strip().lower()
+            for d in source_dimensions
+            if d.get("source_value")
+        }
+        cand_title = str(best.get("title") or best.get("title_en") or "").lower()
+        # If source has multiple distinct dimension values across products of same
+        # family, exact title match alone is still OK; demote only when candidate
+        # title contains a *different* pack/size token than all source values.
+        conflicting = False
+        for tok in ("pack of 1", "pack of 2", "pack of 3", "small", "medium", "large"):
+            if tok in cand_title and src_vals and tok not in src_vals:
+                # candidate mentions a variant the source SKUs don't use
+                if not any(tok in s for s in src_vals):
+                    conflicting = True
+                    break
+        if conflicting:
+            return "POSSIBLE_DUPLICATE", best
+
     if reason == "title_exact" or score >= 0.95:
         return "ALREADY_EXISTS", best
     if reason in {"title_similar", "category_title_partial"} or score >= 0.6:

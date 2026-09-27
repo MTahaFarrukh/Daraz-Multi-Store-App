@@ -1,11 +1,23 @@
-"""Resolve source brand string into a destination-category-valid brand."""
+"""Resolve destination brand — ALWAYS No Brand for CreateProduct.
+
+Source brand may be stored as provenance only; never used as destination brand.
+"""
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 
 BrandLookup = Callable[..., dict[str, Any]]
+
+# marketplace/category_id → (ts, resolution dict)
+_NO_BRAND_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_NO_BRAND_TTL_S = 60 * 60
+
+
+def clear_no_brand_cache_for_tests() -> None:
+    _NO_BRAND_CACHE.clear()
 
 
 def _normalize(name: str | None) -> str:
@@ -27,104 +39,39 @@ def _module_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [m for m in module if isinstance(m, dict)]
 
 
-def resolve_brand_for_category(
-    *,
-    source_brand: str | None,
-    primary_category_id: int | str | None,
-    query_brands: BrandLookup,
-    page_size: int = 50,
-) -> dict[str, Any]:
-    """Exact-match brand resolution against /category/brands/query.
-
-    Outcomes:
-      EXACT_MATCH — use destination brand name (and brand_id if present)
-      NO_BRAND — source empty/No Brand and destination has No Brand
-      UNRESOLVED — require operator correction (never invent brand_id)
-    """
-    raw = (source_brand or "").strip()
-    norm = _normalize(raw)
-
-    if not norm or norm in {"no brand", "nobrand", "n/a", "na", "-"}:
-        # Try to confirm "No Brand" exists for the category
-        try:
-            payload = query_brands(
-                primary_category_id=primary_category_id,
-                start_row=0,
-                page_size=page_size,
-                name="No Brand",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "status": "UNRESOLVED",
-                "brand": None,
-                "brand_id": None,
-                "message": f"Unable to query brands for No Brand: {exc}",
-            }
-        for row in _module_rows(payload):
-            names = [
-                row.get("name"),
-                row.get("name_en"),
-                row.get("global_identifier"),
-            ]
-            if any(_normalize(str(n)) == "no brand" for n in names if n):
-                return {
-                    "status": "NO_BRAND",
-                    "brand": row.get("name") or "No Brand",
-                    "brand_id": row.get("brand_id"),
-                    "message": "Using destination No Brand",
-                    "used_no_brand": True,
-                }
-        # Still acceptable representation many categories use as string
-        return {
-            "status": "NO_BRAND",
-            "brand": "No Brand",
-            "brand_id": None,
-            "message": "Using literal No Brand (exact module row not confirmed)",
-            "used_no_brand": True,
-        }
-
-    # Exact search by name
-    try:
-        payload = query_brands(
-            primary_category_id=primary_category_id,
-            start_row=0,
-            page_size=page_size,
-            name=raw,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "UNRESOLVED",
-            "brand": None,
-            "brand_id": None,
-            "message": f"Brand query failed: {exc}",
-        }
-
-    rows = _module_rows(payload)
-    exact: dict[str, Any] | None = None
-    for row in rows:
-        candidates = [
+def _find_no_brand_row(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for row in _module_rows(payload):
+        names = [
             row.get("name"),
             row.get("name_en"),
             row.get("global_identifier"),
         ]
-        if any(_normalize(str(c)) == norm for c in candidates if c is not None):
-            exact = row
-            break
+        if any(_normalize(str(n)) == "no brand" for n in names if n):
+            return row
+    return None
 
-    if exact:
-        return {
-            "status": "EXACT_MATCH",
-            "brand": exact.get("name") or exact.get("name_en") or raw,
-            "brand_id": exact.get("brand_id"),
-            "message": "Exact brand match on destination category",
-            "used_no_brand": False,
-        }
 
-    # Source brand present but not found — fall back to destination No Brand
-    # (Phase 4D.5). Do not fail the whole create merely because public brand
-    # text cannot be mapped.
+def resolve_destination_no_brand(
+    *,
+    primary_category_id: int | str | None,
+    query_brands: BrandLookup,
+    marketplace: str | None = None,
+    page_size: int = 50,
+) -> dict[str, Any]:
+    """Resolve Daraz's valid No Brand for marketplace + category (cached)."""
+    mp = (marketplace or "pk").strip().lower() or "pk"
+    cache_key = f"{mp}/{primary_category_id}"
+    now = time.time()
+    if cache_key in _NO_BRAND_CACHE:
+        ts, cached = _NO_BRAND_CACHE[cache_key]
+        if now - ts < _NO_BRAND_TTL_S:
+            out = dict(cached)
+            out["cache_hit"] = True
+            return out
+
+    t0 = time.perf_counter()
     try:
-        nb_payload = query_brands(
+        payload = query_brands(
             primary_category_id=primary_category_id,
             start_row=0,
             page_size=page_size,
@@ -135,46 +82,88 @@ def resolve_brand_for_category(
             "status": "UNRESOLVED",
             "brand": None,
             "brand_id": None,
-            "source_brand": raw,
-            "message": (
-                f"Brand '{raw}' not found and No Brand lookup failed: {exc}"
-            ),
+            "message": f"Unable to query brands for No Brand: {exc}",
             "used_no_brand": False,
+            "reason": "no_brand_unavailable",
+            "timings_ms": {"brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)},
         }
 
-    for row in _module_rows(nb_payload):
-        names = [
-            row.get("name"),
-            row.get("name_en"),
-            row.get("global_identifier"),
-        ]
-        if any(_normalize(str(n)) == "no brand" for n in names if n):
-            return {
-                "status": "NO_BRAND",
-                "brand": row.get("name") or "No Brand",
-                "brand_id": row.get("brand_id"),
-                "source_brand": raw,
-                "message": (
-                    f"Source brand '{raw}' unresolved — using destination No Brand"
-                ),
-                "used_no_brand": True,
-            }
+    row = _find_no_brand_row(payload)
+    if row:
+        result = {
+            "status": "NO_BRAND",
+            "brand": row.get("name") or "No Brand",
+            "brand_id": row.get("brand_id"),
+            "message": "Using destination No Brand",
+            "used_no_brand": True,
+            "cache_hit": False,
+            "timings_ms": {
+                "brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)
+            },
+        }
+        _NO_BRAND_CACHE[cache_key] = (now, {k: v for k, v in result.items() if k != "timings_ms"})
+        return result
+
+    # Category brand query returned rows but no No Brand — do not invent.
+    # Some categories still accept the literal string; only use it when the
+    # module is empty (query returned nothing useful).
+    rows = _module_rows(payload)
+    if not rows:
+        result = {
+            "status": "NO_BRAND",
+            "brand": "No Brand",
+            "brand_id": None,
+            "message": "Using literal No Brand (exact module row not confirmed)",
+            "used_no_brand": True,
+            "cache_hit": False,
+            "timings_ms": {
+                "brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)
+            },
+        }
+        _NO_BRAND_CACHE[cache_key] = (now, {k: v for k, v in result.items() if k != "timings_ms"})
+        return result
 
     return {
         "status": "UNRESOLVED",
         "brand": None,
         "brand_id": None,
-        "source_brand": raw,
-        "message": (
-            f"Brand '{raw}' not found and category has no valid No Brand fallback; "
-            "operator correction required"
-        ),
+        "message": "Category has no valid No Brand option",
         "used_no_brand": False,
+        "reason": "no_brand_unavailable",
+        "timings_ms": {"brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)},
         "candidates_sample": [
-            {
-                "name": r.get("name"),
-                "brand_id": r.get("brand_id"),
-            }
-            for r in rows[:5]
+            {"name": r.get("name"), "brand_id": r.get("brand_id")} for r in rows[:5]
         ],
     }
+
+
+def resolve_brand_for_category(
+    *,
+    source_brand: str | None,
+    primary_category_id: int | str | None,
+    query_brands: BrandLookup,
+    page_size: int = 50,
+    marketplace: str | None = None,
+) -> dict[str, Any]:
+    """ALWAYS resolve destination No Brand. Source brand is provenance only.
+
+    Phase 4D.5.2B brand policy: never preserve or match source brand for
+    CreateProduct.
+    """
+    result = resolve_destination_no_brand(
+        primary_category_id=primary_category_id,
+        query_brands=query_brands,
+        marketplace=marketplace,
+        page_size=page_size,
+    )
+    raw = (source_brand or "").strip()
+    if raw:
+        result["source_brand"] = raw
+        result["source_brand_ignored"] = True
+        if result.get("status") == "NO_BRAND":
+            result["message"] = (
+                f"Source brand '{raw}' ignored — destination always No Brand"
+            )
+    else:
+        result["source_brand_ignored"] = True
+    return result

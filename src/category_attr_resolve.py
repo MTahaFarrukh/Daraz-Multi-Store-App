@@ -24,20 +24,6 @@ from src.description_enhance import sanitize_description_html
 _CATEGORY_ATTR_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CATEGORY_ATTR_TTL_S = 60 * 60
 
-_COLOR_KEY_ALIASES = frozenset(
-    {
-        "color_family",
-        "colorfamily",
-        "color",
-        "colour",
-        "colour_family",
-        "color family",
-        "colour family",
-    }
-)
-
-_GREY_SYNONYMS = {"grey": "gray", "gray": "grey"}
-
 # Product-level attribute aliases → draft lookup keys
 _NORMAL_SOURCE_ALIASES: dict[str, tuple[str, ...]] = {
     "short_description": ("short_description", "short_description_en", "short_description_html"),
@@ -216,94 +202,11 @@ def build_short_description(
     return {"value": None, "source": None, "ok": False}
 
 
-def _sale_prop_color_candidate(
-    sale_props: dict[str, Any],
-    *,
-    variant: dict[str, Any] | None = None,
-) -> tuple[str | None, str | None]:
-    """Return (source_key, color_value) from variant sale_props / label / name."""
-    if isinstance(sale_props, dict):
-        # Prefer explicit color-ish keys
-        for k, v in sale_props.items():
-            if v is None or str(v).strip() == "":
-                continue
-            nk = _norm_key(str(k))
-            spaced = _norm_token(str(k))
-            if nk in _COLOR_KEY_ALIASES or spaced in _COLOR_KEY_ALIASES:
-                return str(k), str(v).strip()
-        # Fallback: single sale prop often IS the color on single-dimension variants
-        usable = [
-            (str(k), str(v).strip())
-            for k, v in sale_props.items()
-            if v is not None
-            and str(v).strip()
-            and _norm_key(str(k)) not in {"proppath", "size", "size_family"}
-        ]
-        if len(usable) == 1:
-            return usable[0]
-
-    # Structured variant label / name (not title guessing)
-    if isinstance(variant, dict):
-        for key in ("variant_label", "label", "variant_name", "name"):
-            raw = variant.get(key)
-            if raw and str(raw).strip() and _norm_key(str(key)) != "title":
-                text = str(raw).strip()
-                # "Color: Black" or bare "Black"
-                if ":" in text:
-                    left, right = text.split(":", 1)
-                    if _norm_key(left) in _COLOR_KEY_ALIASES and right.strip():
-                        return key, right.strip()
-                if " " not in text and len(text) <= 40:
-                    return key, text
-    return None, None
-
-
-def _strip_non_sale_keys(sale: dict[str, Any]) -> None:
-    """Drop internal keys that must not appear inside CreateProduct saleProp XML."""
-    for pk in list(sale.keys()):
-        if _norm_key(str(pk)) in {"proppath"}:
-            del sale[pk]
-
-
 def match_option_value(source: str, options: list[str]) -> str | None:
-    """Map source color/text to a destination option when safely deterministic."""
-    raw = (source or "").strip()
-    if not raw:
-        return None
-    if not options:
-        return raw
+    """Map source text to a destination option when safely deterministic."""
+    from src.variant_semantics import match_option_value as _match
 
-    sn = _norm_token(raw)
-    # Exact (case-insensitive)
-    for o in options:
-        if _norm_token(o) == sn:
-            return o
-
-    # grey ↔ gray
-    alt = _GREY_SYNONYMS.get(sn)
-    if alt:
-        for o in options:
-            if _norm_token(o) == alt:
-                return o
-
-    # Unique containment: "Light Purple" → "Purple" when only one option matches
-    contained = [
-        o
-        for o in options
-        if _norm_token(o) and _norm_token(o) in sn and _norm_token(o) != sn
-    ]
-    # Prefer longest unique match
-    if contained:
-        contained.sort(key=lambda x: len(_norm_token(x)), reverse=True)
-        best = contained[0]
-        best_n = _norm_token(best)
-        peers = [o for o in contained if _norm_token(o) == best_n]
-        if len(peers) == 1 and best_n not in {"a", "an", "the"}:
-            # Avoid matching tiny tokens; require option length >= 3
-            if len(best_n) >= 3:
-                return best
-
-    return None
+    return _match(source, options)
 
 
 def _set_product_attr(draft: dict[str, Any], name: str, value: Any) -> None:
@@ -332,9 +235,14 @@ def resolve_required_category_attributes(
 ) -> dict[str, Any]:
     """Fill required attributes in-place; return resolution report.
 
-    Classifications reflected in report:
-      resolved / unresolved / skipped_existing
+    SKU sale attributes are resolved via generic semantic mapping
+    (Color→color_family, Pack→pack_size, …) — never cross-semantic.
     """
+    from src.variant_semantics import (
+        classify_destination_attr,
+        resolve_all_variant_sale_props,
+    )
+
     t0 = time.perf_counter()
     attrs = parse_category_attributes(category_attributes_payload)
     resolved: list[dict[str, Any]] = []
@@ -345,8 +253,58 @@ def resolve_required_category_attributes(
     product_attrs = product.setdefault("attributes", {})
     variants = [v for v in (draft.get("variants") or []) if isinstance(v, dict)]
 
-    # Index attributes by name
-    by_name = { _attr_name(a): a for a in attrs if _attr_name(a) }
+    # Generic variant dimension → destination saleProp mapping (all dims)
+    variant_map = resolve_all_variant_sale_props(draft, attrs)
+    draft.setdefault("validation", {})["variant_semantics"] = {
+        "compatibility": variant_map.get("compatibility"),
+        "timings_ms": variant_map.get("timings_ms"),
+    }
+    compat = variant_map.get("compatibility") or {}
+    for miss in compat.get("required_unsatisfied") or []:
+        unresolved.append(
+            {
+                "attribute": miss.get("attribute"),
+                "scope": "sku",
+                "reason": "semantic_mismatch",
+                "message": miss.get("message"),
+                "source_semantics": miss.get("source_semantics"),
+            }
+        )
+
+    by_name = {_attr_name(a): a for a in attrs if _attr_name(a)}
+
+    # Record per-SKU mapped sale props as resolved (when value present)
+    for idx, variant in enumerate(variants):
+        sale = variant.get("sale_props") or {}
+        mapping = (variant.get("dimension_mapping") or {}).get("mapped") or []
+        for m in mapping:
+            dest_key = m.get("destination_attribute_key")
+            if dest_key and sale.get(dest_key) not in (None, ""):
+                resolved.append(
+                    {
+                        "attribute": dest_key,
+                        "scope": "sku",
+                        "variant_index": idx,
+                        "value": sale.get(dest_key),
+                        "source": (
+                            f"dimension:{m.get('source_property_name')}"
+                            f"/{m.get('semantic_type')}"
+                        ),
+                        "semantic_type": m.get("semantic_type"),
+                    }
+                )
+        for u in (variant.get("dimension_mapping") or {}).get("unmapped") or []:
+            unresolved.append(
+                {
+                    "attribute": u.get("destination_attribute")
+                    or u.get("source_property_name"),
+                    "scope": "sku",
+                    "variant_index": idx,
+                    "source_value": u.get("source_value"),
+                    "reason": u.get("reason") or "unmapped_dimension",
+                    "semantic_type": u.get("semantic_type"),
+                }
+            )
 
     for attr in attrs:
         if not _truthy_mandatory(attr):
@@ -368,7 +326,6 @@ def resolve_required_category_attributes(
             "package_height",
             "quantity",
         }:
-            # SKU core fields are filled elsewhere (MTF sku, package defaults, prices)
             if lname in {
                 "sellersku",
                 "seller_sku",
@@ -382,16 +339,13 @@ def resolve_required_category_attributes(
                 skipped.append(f"sku:{name}")
                 continue
 
-            # Sale-prop style SKU attributes (e.g. color_family)
-            is_color = _norm_key(name) in _COLOR_KEY_ALIASES or lname == "color_family"
-            per_sku_ok = True
+            # Sale-prop attribute: only accept values when already mapped
+            # under this exact destination key (semantic mapper ran above).
+            dest_sem = classify_destination_attr(name)
             for idx, variant in enumerate(variants):
-                sale = variant.setdefault("sale_props", {})
+                sale = variant.get("sale_props") or {}
                 if not isinstance(sale, dict):
-                    sale = {}
-                    variant["sale_props"] = sale
-
-                # Already present under exact schema name?
+                    continue
                 existing = None
                 for pk, pv in sale.items():
                     if _norm_key(str(pk)) == _norm_key(name) and pv not in (None, ""):
@@ -399,9 +353,16 @@ def resolve_required_category_attributes(
                         break
 
                 if existing is not None:
-                    matched = match_option_value(str(existing), options) if options else str(existing)
+                    matched = (
+                        match_option_value(str(existing), options)
+                        if options
+                        else str(existing)
+                    )
                     if matched is None and options:
-                        per_sku_ok = False
+                        # Invalid value under this key — remove pollution
+                        for pk in list(sale.keys()):
+                            if _norm_key(str(pk)) == _norm_key(name):
+                                del sale[pk]
                         unresolved.append(
                             {
                                 "attribute": name,
@@ -409,99 +370,46 @@ def resolve_required_category_attributes(
                                 "variant_index": idx,
                                 "source_value": existing,
                                 "reason": "value_not_in_options",
+                                "semantic_type": dest_sem,
                             }
                         )
                         continue
-                    # Normalize key to schema name for CreateProduct XML
                     sale[name] = matched if matched is not None else existing
-                    # Drop spaced / alias keys that would emit invalid XML
                     for pk in list(sale.keys()):
                         if pk != name and _norm_key(str(pk)) == _norm_key(name):
                             del sale[pk]
-                        elif is_color and pk != name and _norm_key(str(pk)) in {
-                            _norm_key(a) for a in _COLOR_KEY_ALIASES
-                        }:
-                            # Keep source color under schema key only
-                            del sale[pk]
-                    _strip_non_sale_keys(sale)
-                    resolved.append(
-                        {
-                            "attribute": name,
-                            "scope": "sku",
-                            "variant_index": idx,
-                            "value": sale[name],
-                            "source": "existing_sale_prop",
-                        }
-                    )
                     continue
 
-                src_key, src_val = (None, None)
-                if is_color:
-                    src_key, src_val = _sale_prop_color_candidate(sale, variant=variant)
-                else:
-                    # Generic: look for alias / normalized key in sale_props
-                    for pk, pv in sale.items():
-                        if _norm_key(str(pk)) == _norm_key(name) and pv not in (None, ""):
-                            src_key, src_val = str(pk), str(pv)
-                            break
-
-                if not src_val:
-                    per_sku_ok = False
-                    unresolved.append(
-                        {
-                            "attribute": name,
-                            "scope": "sku",
-                            "variant_index": idx,
-                            "reason": "missing_source_value",
-                        }
-                    )
-                    continue
-
-                matched = match_option_value(src_val, options) if options else src_val
-                if matched is None:
-                    per_sku_ok = False
-                    unresolved.append(
-                        {
-                            "attribute": name,
-                            "scope": "sku",
-                            "variant_index": idx,
-                            "source_value": src_val,
-                            "reason": "ambiguous_or_unmapped_option",
-                        }
-                    )
-                    continue
-
-                sale[name] = matched
-                if src_key and src_key != name and src_key in sale:
-                    sale.pop(src_key, None)
-                # Clean other color aliases
-                if is_color:
-                    for pk in list(sale.keys()):
-                        if pk != name and _norm_key(str(pk)) in {
-                            _norm_key(a) for a in _COLOR_KEY_ALIASES
-                        }:
-                            del sale[pk]
-                _strip_non_sale_keys(sale)
-                resolved.append(
-                    {
-                        "attribute": name,
-                        "scope": "sku",
-                        "variant_index": idx,
-                        "value": matched,
-                        "source": f"sale_props:{src_key}" if src_key else "sale_props",
-                    }
+                # Missing — only report if not already covered by semantic_mismatch
+                already = any(
+                    u.get("attribute") == name
+                    and u.get("reason") == "semantic_mismatch"
+                    for u in unresolved
                 )
+                if not already:
+                    # Check if any source dim has matching semantic (map failed on value)
+                    from src.variant_semantics import ensure_variant_dimensions
 
-            if not per_sku_ok:
-                # keep unresolved entries already appended
-                pass
+                    dims = ensure_variant_dimensions(variant)
+                    has_sem = any(
+                        str(d.get("semantic_type")) == dest_sem for d in dims
+                    )
+                    if has_sem:
+                        unresolved.append(
+                            {
+                                "attribute": name,
+                                "scope": "sku",
+                                "variant_index": idx,
+                                "reason": "value_not_mapped",
+                                "semantic_type": dest_sem,
+                            }
+                        )
+                    # else: semantic_mismatch already recorded at category level
             continue
 
         # ---- normal (product-level) attributes ----
-        # Already present?
         current = product_attrs.get(name)
         if current in (None, ""):
-            # check known product fields
             if lname in {"short_description", "short_description_en"}:
                 current = product.get("short_description_html")
             elif lname in {"description", "description_en"}:
@@ -517,12 +425,10 @@ def resolve_required_category_attributes(
             skipped.append(f"normal:{name}")
             continue
 
-        # Special handlers
         if lname in {"short_description", "short_description_en"}:
             built = build_short_description(draft, attr=attr)
             if built.get("ok") and built.get("value"):
                 _set_product_attr(draft, name, built["value"])
-                # If the other short field is also mandatory and empty, fill both
                 other = (
                     "short_description_en"
                     if lname == "short_description"
@@ -560,7 +466,6 @@ def resolve_required_category_attributes(
             )
             continue
 
-        # Generic: pull from product / attributes via aliases
         aliases = _NORMAL_SOURCE_ALIASES.get(lname, (lname,))
         found = None
         found_from = None
@@ -601,7 +506,6 @@ def resolve_required_category_attributes(
             )
             continue
 
-        # Explicit category default (rare)
         default = attr.get("default_value") or attr.get("default")
         if default not in (None, ""):
             if options:
@@ -635,13 +539,17 @@ def resolve_required_category_attributes(
             }
         )
 
+    timings = {
+        "attribute_resolution_ms": round((time.perf_counter() - t0) * 1000, 1),
+    }
+    timings.update(variant_map.get("timings_ms") or {})
+
     return {
         "resolved": resolved,
         "unresolved": unresolved,
         "skipped_existing": skipped,
         "resolved_count": len(resolved),
         "unresolved_count": len(unresolved),
-        "timings_ms": {
-            "attribute_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)
-        },
+        "compatibility": compat,
+        "timings_ms": timings,
     }

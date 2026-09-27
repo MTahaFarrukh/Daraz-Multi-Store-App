@@ -102,11 +102,15 @@ def run_supervised_create(
         }
 
     brand_resolution = resolve_brand_for_category(
-        source_brand=(draft.get("product") or {}).get("brand"),
+        source_brand=(
+            (draft.get("brand_resolution") or {}).get("source_brand")
+            or (draft.get("product") or {}).get("source_brand")
+        ),
         primary_category_id=primary,
         query_brands=client.query_category_brands,
+        marketplace=str(dest.get("country") or "pk"),
     )
-    if brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}:
+    if brand_resolution.get("status") == "NO_BRAND":
         draft["product"]["brand"] = brand_resolution.get("brand")
         attrs = draft["product"].get("attributes") or {}
         attrs["brand"] = brand_resolution.get("brand")
@@ -117,6 +121,7 @@ def run_supervised_create(
     draft.setdefault("validation", {})["attribute_resolution"] = {
         "resolved_count": attr_report.get("resolved_count"),
         "unresolved_count": attr_report.get("unresolved_count"),
+        "compatibility": attr_report.get("compatibility"),
     }
 
     category_result = validate_draft_against_category(draft, cat_payload)
@@ -174,7 +179,7 @@ def run_supervised_create(
     draft["validation"]["can_create"] = (
         not draft["validation"]["errors"]
         and category_result.get("valid")
-        and brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}
+        and brand_resolution.get("status") == "NO_BRAND"
         and bool(final_urls)
     )
 

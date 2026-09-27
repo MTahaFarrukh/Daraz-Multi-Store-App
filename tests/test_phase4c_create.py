@@ -322,29 +322,36 @@ def test_category_validation_passes_complete_draft(tenancy_env):
 
 
 def test_brand_exact_and_unresolved():
-    def exact(**kwargs):
+    """Phase 4D.5.2B: destination brand is always No Brand; source ignored."""
+    from src.brand_resolve import clear_no_brand_cache_for_tests
+
+    clear_no_brand_cache_for_tests()
+
+    def has_no_brand(**kwargs):
         return {
             "module": [
+                {"name": "No Brand", "brand_id": 1},
                 {"name": "Acme", "name_en": "Acme", "brand_id": 99},
-                {"name": "Other", "brand_id": 1},
             ]
         }
 
     ok = resolve_brand_for_category(
-        source_brand="Acme", primary_category_id=1, query_brands=exact
+        source_brand="Acme", primary_category_id=9001, query_brands=has_no_brand
     )
-    assert ok["status"] == "EXACT_MATCH"
-    assert ok["brand_id"] == 99
+    assert ok["status"] == "NO_BRAND"
+    assert ok["brand"] == "No Brand"
+    assert ok["source_brand"] == "Acme"
+    assert ok["source_brand_ignored"] is True
 
     def empty(**kwargs):
         return {"module": [{"name": "Zed", "brand_id": 2}]}
 
     bad = resolve_brand_for_category(
-        source_brand="UnknownBrandXYZ", primary_category_id=1, query_brands=empty
+        source_brand="UnknownBrandXYZ", primary_category_id=9002, query_brands=empty
     )
     assert bad["status"] == "UNRESOLVED"
     assert bad["brand_id"] is None
-
+    assert bad.get("reason") == "no_brand_unavailable"
 
 def test_html_sanitization_strips_js_and_handlers():
     dirty = (

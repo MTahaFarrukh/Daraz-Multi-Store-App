@@ -215,7 +215,7 @@ def build_connected_clone_draft(
             primary_category_id=product.get("primary_category_id"),
             query_brands=brand_query_fn,
         )
-        if brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}:
+        if brand_resolution.get("status") == "NO_BRAND":
             resolved_brand = brand_resolution.get("brand")
         elif brand_resolution.get("status") == "UNRESOLVED":
             errors.append(f"brand:{brand_resolution.get('message')}")
@@ -316,7 +316,7 @@ def build_connected_clone_draft(
         and bool(image_urls)
         and (category_result is None or category_result.get("valid"))
         and not duplicates
-        and brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}
+        and brand_resolution.get("status") == "NO_BRAND"
     )
     # PENDING brand OK for preview; create requires resolved brand
     if brand_resolution.get("status") == "PENDING" and category_result is None and not duplicates:

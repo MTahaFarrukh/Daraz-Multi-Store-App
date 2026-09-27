@@ -325,7 +325,16 @@ def _prepare_destination(
             for d in found[:8]
         ]
         draft["possible_duplicates"] = duplicates
-    dup_kind, dup_best = classify_duplicate_matches(duplicates)
+    # Collect source dimensions for soft duplicate demotion (Pack of 1 vs 2, etc.)
+    src_dims: list[dict[str, Any]] = []
+    for v in draft.get("variants") or []:
+        if isinstance(v, dict):
+            for d in v.get("dimensions") or []:
+                if isinstance(d, dict):
+                    src_dims.append(d)
+    dup_kind, dup_best = classify_duplicate_matches(
+        duplicates, source_dimensions=src_dims or None
+    )
     timings["duplicate_check_ms"] = round((time.perf_counter() - t_dup) * 1000, 1)
 
     if dup_kind == "ALREADY_EXISTS" and not allow_duplicates:
@@ -447,10 +456,18 @@ def _prepare_destination(
             )
             timings["category_resolution_ms"] = timings["category_attributes_ms"]
             t_brand = time.perf_counter()
+            prior_brand_meta = draft.get("brand_resolution") or {}
+            source_brand_provenance = (
+                prior_brand_meta.get("source_brand")
+                or (draft.get("product") or {}).get("source_brand")
+            )
+            # Destination brand is always No Brand — never use draft.product.brand
+            # as source (it may already be the No Brand placeholder).
             brand_resolution = resolve_brand_for_category(
-                source_brand=(draft.get("product") or {}).get("brand"),
+                source_brand=source_brand_provenance,
                 primary_category_id=primary,
                 query_brands=client.query_category_brands,
+                marketplace=str(dest.get("country") or "pk"),
             )
             timings["brand_resolution_ms"] = round(
                 (time.perf_counter() - t_brand) * 1000, 1
@@ -458,11 +475,13 @@ def _prepare_destination(
             used_no_brand = bool(brand_resolution.get("used_no_brand")) or (
                 brand_resolution.get("status") == "NO_BRAND"
             )
-            if brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}:
+            if brand_resolution.get("status") == "NO_BRAND":
                 draft["product"]["brand"] = brand_resolution.get("brand")
                 attrs = draft["product"].get("attributes") or {}
                 attrs["brand"] = brand_resolution.get("brand")
                 draft["product"]["attributes"] = attrs
+            # Always clear source brand from destination draft product field
+            # when policy forces No Brand (provenance kept on brand_resolution).
             draft["brand_resolution"] = brand_resolution
 
             t_attr = time.perf_counter()
@@ -471,25 +490,56 @@ def _prepare_destination(
                 (attr_report.get("timings_ms") or {}).get("attribute_resolution_ms")
                 or round((time.perf_counter() - t_attr) * 1000, 1)
             )
+            for k in (
+                "variant_semantic_resolution_ms",
+                "variant_value_mapping_ms",
+            ):
+                if (attr_report.get("timings_ms") or {}).get(k) is not None:
+                    timings[k] = float((attr_report.get("timings_ms") or {})[k])
             draft.setdefault("validation", {})["attribute_resolution"] = {
                 "resolved_count": attr_report.get("resolved_count"),
                 "unresolved_count": attr_report.get("unresolved_count"),
                 "resolved": (attr_report.get("resolved") or [])[:20],
                 "unresolved": (attr_report.get("unresolved") or [])[:20],
+                "compatibility": attr_report.get("compatibility"),
             }
 
             category_result = validate_draft_against_category(draft, cat_payload)
             draft.setdefault("validation", {})["category"] = category_result
             if brand_resolution.get("status") == "UNRESOLVED":
-                errors.append(f"brand:{brand_resolution.get('message')}")
-            if not category_result.get("valid"):
-                errors.extend(
-                    f"category_missing:{m}"
-                    for m in category_result.get("missing_required") or []
+                reason = brand_resolution.get("reason") or "brand_unresolved"
+                errors.append(
+                    f"brand:{reason}:{brand_resolution.get('message')}"
                 )
-                errors.extend(
-                    f"category_invalid:{i.get('attribute')}"
-                    for i in category_result.get("invalid_values") or []
+            # Prefer clear semantic conflict messages over opaque category_invalid
+            semantic_msgs = [
+                u.get("message")
+                for u in (attr_report.get("unresolved") or [])
+                if u.get("reason") == "semantic_mismatch" and u.get("message")
+            ]
+            if semantic_msgs:
+                for msg in dict.fromkeys(semantic_msgs):
+                    errors.append(f"variant_schema_conflict:{msg}")
+            if not category_result.get("valid"):
+                covered_attrs = {
+                    str(u.get("attribute"))
+                    for u in (attr_report.get("unresolved") or [])
+                    if u.get("reason") == "semantic_mismatch"
+                }
+                for m in category_result.get("missing_required") or []:
+                    # sku:color_family → color_family
+                    attr_bit = str(m).split(":")[-1]
+                    if attr_bit in covered_attrs:
+                        continue
+                    errors.append(f"category_missing:{m}")
+                for i in category_result.get("invalid_values") or []:
+                    attr_name = str(i.get("attribute") or "")
+                    if attr_name in covered_attrs:
+                        continue
+                    errors.append(f"category_invalid:{attr_name}")
+            if (attr_report.get("compatibility") or {}).get("compatible") is False:
+                draft.setdefault("validation", {})["category_schema_conflict"] = (
+                    attr_report.get("compatibility")
                 )
         except DarazApiError as exc:
             errors.append(f"category_attributes:{exc.code}:{exc}")
@@ -532,7 +582,7 @@ def _prepare_destination(
     can_create = (
         not draft["validation"]["errors"]
         and (category_result is None or category_result.get("valid"))
-        and brand_resolution.get("status") in {"EXACT_MATCH", "NO_BRAND"}
+        and brand_resolution.get("status") == "NO_BRAND"
         and bool(final_urls)
         and bool(primary)
     )
