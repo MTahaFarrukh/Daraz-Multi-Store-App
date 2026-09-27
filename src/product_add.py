@@ -271,11 +271,37 @@ def _prepare_destination(
     try:
         resp = client.create_product(xml)
     except DarazApiError as exc:
+        diag = getattr(exc, "diagnostics", None) or {}
+        safe_bits = []
+        if exc.http_status is not None:
+            safe_bits.append(f"http={exc.http_status}")
+        if diag.get("url_length") is not None:
+            safe_bits.append(f"url_len={diag['url_length']}")
+        if diag.get("body_length") is not None:
+            safe_bits.append(f"body_len={diag['body_length']}")
+        if diag.get("transport"):
+            safe_bits.append(f"transport={diag['transport']}")
+        suffix = f" ({', '.join(safe_bits)})" if safe_bits else ""
         return {
             "store": store_info,
             "status": "Failed",
-            "reason": f"CreateProduct:{exc.code}:{exc}",
+            "reason": f"CreateProduct:{exc.code}:{exc}{suffix}",
             "daraz_error": redact_create_response(exc.payload),
+            "transport_diagnostics": {
+                k: diag[k]
+                for k in (
+                    "http_status",
+                    "content_type",
+                    "url_length",
+                    "body_length",
+                    "transport",
+                    "method",
+                    "api_path",
+                )
+                if k in diag
+            }
+            if diag
+            else None,
             "draft_preview": preview,
             "timings_ms": {"dest_total": round((time.perf_counter() - t0) * 1000, 1)},
         }

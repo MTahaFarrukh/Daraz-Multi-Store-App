@@ -41,12 +41,15 @@ class DarazApiError(Exception):
         payload: dict | None = None,
         http_status: int | None = None,
         request_id: str | None = None,
+        diagnostics: dict | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.payload = payload or {}
         self.http_status = http_status
         self.request_id = request_id or (self.payload.get("request_id") if self.payload else None)
+        # Safe transport diagnostics (lengths / content-type only — never tokens)
+        self.diagnostics = diagnostics or {}
 
 
 class DarazClient:
@@ -110,7 +113,18 @@ class DarazClient:
         business_params: dict[str, Any] | None = None,
         body: str | None = None,
         require_token: bool = True,
+        transport: str = "auto",
     ) -> dict[str, Any]:
+        """Execute a signed Daraz REST call.
+
+        transport:
+          - ``auto`` (default): GET uses query params; POST with JSON ``body`` uses
+            query system/business params + JSON body; POST with a ``payload``
+            business param uses application/x-www-form-urlencoded (payload must
+            NOT be stuffed into the URL — that caused HTTP 414 on CreateProduct).
+          - ``form``: force form-urlencoded body for all signed params.
+          - ``query``: force all params into the query string (legacy/small POST).
+        """
         params: dict[str, Any] = self._common_params()
         if require_token:
             if not self.access_token:
@@ -119,26 +133,84 @@ class DarazClient:
         if business_params:
             params.update(business_params)
 
+        # Normalize to strings for stable signing + form encoding
+        params = {
+            str(k): (v if isinstance(v, str) else str(v))
+            for k, v in params.items()
+            if v is not None and v != ""
+        }
+
+        # Sign: parameter map (incl. payload when present) + optional JSON body.
+        # Form transport does NOT append a separate body string — payload is a param.
         params["sign"] = self.sign(self.app_secret, api_path, params, body)
 
         url = f"{self.api_base}{api_path}"
+        method_u = method.upper()
+        biz = business_params or {}
+        use_form = method_u == "POST" and body is None and (
+            transport == "form"
+            or (transport == "auto" and "payload" in biz)
+        )
+
+        request_url_len = 0
+        request_body_len = 0
         with httpx.Client(timeout=self.timeout) as client:
-            if method.upper() == "GET":
+            if method_u == "GET":
                 response = client.get(url, params=params)
-            else:
+            elif use_form:
+                # Large XML (CreateProduct / image migrate) must be form body.
+                response = client.post(
+                    url,
+                    data=params,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            elif method_u == "POST":
                 response = client.post(
                     url,
                     params=params,
                     content=body,
                     headers={"Content-Type": "application/json"},
                 )
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+
+        try:
+            request_url_len = len(str(response.request.url))
+            req_content = response.request.content or b""
+            request_body_len = len(req_content)
+        except Exception:  # noqa: BLE001
+            request_url_len = len(url)
+            request_body_len = 0
+
+        content_type = response.headers.get("content-type") or ""
+        diag = {
+            "http_status": response.status_code,
+            "content_type": content_type.split(";")[0].strip()[:80],
+            "url_length": request_url_len,
+            "body_length": request_body_len,
+            "transport": "form" if use_form else ("json_body" if body else "query"),
+            "api_path": api_path,
+            "method": method_u,
+        }
 
         try:
             data = response.json()
         except ValueError as exc:
+            preview = (response.text or "")[:180].replace("\n", " ")
+            # Never echo tokens/secrets if they somehow appear
+            for secret_key in ("access_token", "sign", "app_secret"):
+                if secret_key in preview.lower():
+                    preview = "[redacted]"
+                    break
+            diag["response_preview"] = preview
             raise DarazApiError(
-                f"Non-JSON response (HTTP {response.status_code})",
+                f"Non-JSON response (HTTP {response.status_code})"
+                f" content_type={diag['content_type'] or '?'}"
+                f" url_len={request_url_len}"
+                f" body_len={request_body_len}"
+                f" transport={diag['transport']}",
                 http_status=response.status_code,
+                diagnostics=diag,
             ) from exc
 
         if response.status_code >= 400:
@@ -147,6 +219,7 @@ class DarazClient:
                 code=str(data.get("code")) if data.get("code") is not None else None,
                 payload=data,
                 http_status=response.status_code,
+                diagnostics=diag,
             )
 
         if str(data.get("code", "0")) != "0":
@@ -155,6 +228,7 @@ class DarazClient:
                 code=str(data.get("code")),
                 payload=data,
                 http_status=response.status_code,
+                diagnostics=diag,
             )
         return data
 
@@ -383,11 +457,16 @@ class DarazClient:
         )
 
     def create_product(self, payload_xml: str) -> dict[str, Any]:
-        """POST /product/create — XML payload. Gated by callers; do not use casually."""
+        """POST /product/create — XML product payload via form body (not query).
+
+        Large CreateProduct XML must use ``application/x-www-form-urlencoded``
+        so the request URL stays short (HTTP 414 otherwise).
+        """
         return self._request(
             "/product/create",
             method="POST",
             business_params={"payload": payload_xml},
+            transport="form",
         )
 
     # ------------------------------------------------------------------
