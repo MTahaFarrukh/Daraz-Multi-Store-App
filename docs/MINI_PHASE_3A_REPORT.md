@@ -1,4 +1,4 @@
-# Mini Phase 3A Report � Label Processing Engine
+kdkdkfd# Mini Phase 3A Report � Label Processing Engine
 
 **Date:** 2026-08-19  
 **Scope:** Local document processing only (no Daraz API,no dashboard)
