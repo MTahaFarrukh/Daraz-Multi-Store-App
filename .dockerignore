@@ -14,5 +14,7 @@ data/test-label.*
 *.pdf
 *.html
 !src/static/**
+!frontend/index.html
+!frontend/dist/**
 .cursor
 terminals

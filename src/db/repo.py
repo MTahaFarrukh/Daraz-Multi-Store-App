@@ -343,6 +343,7 @@ class TenancyRepo(Protocol):
     ) -> dict[str, Any]: ...
 
     def insert_label_print(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+    def insert_label_prints_atomic(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
 
     def upsert_daraz_product(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -388,6 +389,11 @@ class TenancyRepo(Protocol):
         exclude_product_id: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+    def get_product_attempt(self, workspace_id: str, attempt_id: str) -> dict[str, Any] | None: ...
+    def find_product_attempt(self, workspace_id: str, fingerprint: str) -> dict[str, Any] | None: ...
+    def update_product_attempt(self, workspace_id: str, attempt_id: str, **fields: Any) -> dict[str, Any] | None: ...
+
 
 class MemoryTenancyRepo:
     """In-memory repo for tests and local AUTH_TEST_MODE without Postgres."""
@@ -407,6 +413,43 @@ class MemoryTenancyRepo:
         self.products: dict[str, dict[str, Any]] = {}  # product uuid â†’ row
         self.product_variants: dict[str, dict[str, Any]] = {}  # variant uuid â†’ row
         self.product_defaults: dict[str, dict[str, Any]] = {}  # workspace_id â†’ row
+        self.product_attempts: dict[str, dict[str, Any]] = {}
+        self.audit_events: dict[str, dict[str, Any]] = {}
+
+    def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            row = {"id": _uuid(), "created_at": _now().isoformat(), **deepcopy(payload)}
+            self.audit_events[row["id"]] = row
+            return deepcopy(row)
+
+    def list_audit_events(self, workspace_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [deepcopy(r) for r in self.audit_events.values() if str(r.get("workspace_id")) == str(workspace_id)]
+
+    def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            row = {"id": _uuid(), "created_at": _now().isoformat(), "updated_at": _now().isoformat(),
+                   "retry_count": 0, "verification_state": "UNVERIFIED", **deepcopy(payload)}
+            self.product_attempts[row["id"]] = row
+            return deepcopy(row)
+
+    def get_product_attempt(self, workspace_id: str, attempt_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.product_attempts.get(str(attempt_id))
+            return deepcopy(row) if row and str(row.get("workspace_id")) == str(workspace_id) else None
+
+    def find_product_attempt(self, workspace_id: str, fingerprint: str) -> dict[str, Any] | None:
+        with self._lock:
+            rows = [r for r in self.product_attempts.values() if str(r.get("workspace_id")) == str(workspace_id) and r.get("request_fingerprint") == fingerprint]
+            return deepcopy(rows[-1]) if rows else None
+
+    def update_product_attempt(self, workspace_id: str, attempt_id: str, **fields: Any) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.product_attempts.get(str(attempt_id))
+            if not row or str(row.get("workspace_id")) != str(workspace_id):
+                return None
+            row.update(deepcopy(fields)); row["updated_at"] = _now().isoformat()
+            return deepcopy(row)
 
     def create_workspace_with_owner(self, user_id: str, name: str) -> dict[str, Any]:
         with self._lock:
@@ -940,8 +983,9 @@ class MemoryTenancyRepo:
                 if status_group and str(order.get("status_group")) != str(status_group):
                     continue
                 if status_raw:
-                    raw = str(order.get("status_raw") or "").lower()
-                    if str(status_raw).lower() not in raw:
+                    raw = str(order.get("status_raw") or "").strip().lower()
+                    wanted = str(status_raw).strip().lower()
+                    if raw != wanted:
                         continue
                 if date_from and (order.get("created_at_daraz") or "") < str(date_from):
                     continue
@@ -1093,6 +1137,15 @@ class MemoryTenancyRepo:
             }
             self.label_prints[str(row["id"])] = row
             return deepcopy(row)
+
+    def insert_label_prints_atomic(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = []
+            for payload in payloads:
+                now = _now().isoformat()
+                row = {"id": _uuid(), "workspace_id": str(payload["workspace_id"]), "store_id": str(payload["store_id"]), "order_id": str(payload["order_id"]), "daraz_order_id": str(payload["daraz_order_id"]), "package_id": payload.get("package_id"), "order_item_ids": list(payload.get("order_item_ids") or []), "print_job_id": payload.get("print_job_id"), "printed_at": payload.get("printed_at") or now, "printed_by_user_id": payload.get("printed_by_user_id"), "is_reprint": bool(payload.get("is_reprint")), "fetch_source": payload.get("fetch_source"), "created_at": now}
+                self.label_prints[row["id"]] = row; rows.append(row)
+            return deepcopy(rows)
 
     # --- Phase 4B: local product warehouse ---------------------------------
 
@@ -1417,6 +1470,47 @@ class MemoryTenancyRepo:
 
 
 class PostgresTenancyRepo:
+    def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+        with connect() as conn:
+            row = conn.execute("""INSERT INTO workspace_audit_events
+                (workspace_id,actor_user_id,action,entity_type,entity_id,metadata)
+                VALUES (%s,%s,%s,%s,%s,%s::jsonb) RETURNING id,created_at""",
+                (payload["workspace_id"], payload.get("actor_user_id"), payload["action"], payload["entity_type"], payload.get("entity_id"), json.dumps(payload.get("metadata") or {}))).fetchone(); conn.commit()
+        return {**payload, "id": str(row[0]), "created_at": row[1].isoformat()}
+    def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+        with connect() as conn:
+            row = conn.execute("""INSERT INTO product_create_attempts
+                (workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,verification_state)
+                VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING id,created_at,updated_at""",
+                (payload["workspace_id"], payload.get("source_type"), payload.get("source_identity"), payload["destination_store_id"], payload["request_fingerprint"], payload.get("state","PREPARING"), json.dumps(payload.get("generated_seller_skus") or []), payload.get("verification_state","UNVERIFIED"))).fetchone()
+            conn.commit()
+        return {**payload, "id": str(row[0]), "created_at": row[1].isoformat(), "updated_at": row[2].isoformat(), "retry_count": 0}
+
+    def find_product_attempt(self, workspace_id: str, fingerprint: str) -> dict[str, Any] | None:
+        from src.db.connection import connect
+        with connect() as conn:
+            row = conn.execute("SELECT id,workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,destination_item_id,verification_state,last_error,retry_count,created_at,updated_at FROM product_create_attempts WHERE workspace_id=%s AND request_fingerprint=%s", (workspace_id, fingerprint)).fetchone()
+        if not row: return None
+        return {"id": str(row[0]), "workspace_id": str(row[1]), "source_type": row[2], "source_identity": row[3], "destination_store_id": str(row[4]), "request_fingerprint": row[5], "state": row[6], "generated_seller_skus": row[7], "destination_item_id": row[8], "verification_state": row[9], "last_error": row[10], "retry_count": row[11], "created_at": row[12].isoformat(), "updated_at": row[13].isoformat()}
+
+    def get_product_attempt(self, workspace_id: str, attempt_id: str) -> dict[str, Any] | None:
+        from src.db.connection import connect
+        with connect() as conn:
+            row = conn.execute("SELECT id,workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,destination_item_id,verification_state,last_error,retry_count,created_at,updated_at FROM product_create_attempts WHERE workspace_id=%s AND id=%s", (workspace_id, attempt_id)).fetchone()
+        if not row: return None
+        return self.find_product_attempt(workspace_id, row[5])
+
+    def update_product_attempt(self, workspace_id: str, attempt_id: str, **fields: Any) -> dict[str, Any] | None:
+        from src.db.connection import connect
+        allowed = {k: v for k, v in fields.items() if k in {"state","destination_item_id","verification_state","last_error","retry_count"}}
+        if not allowed: return self.get_product_attempt(workspace_id, attempt_id)
+        sets = ", ".join(f"{k}=%s" for k in allowed)
+        with connect() as conn:
+            conn.execute(f"UPDATE product_create_attempts SET {sets}, updated_at=NOW() WHERE workspace_id=%s AND id=%s", (*allowed.values(), workspace_id, attempt_id)); conn.commit()
+        return self.get_product_attempt(workspace_id, attempt_id)
+
     """Postgres-backed tenancy repository."""
 
     def __init__(self) -> None:
@@ -2423,8 +2517,8 @@ class PostgresTenancyRepo:
             where.append("o.status_group = %s")
             params.append(status_group)
         if status_raw:
-            where.append("o.status_raw ILIKE %s")
-            params.append(f"%{status_raw}%")
+            where.append("LOWER(TRIM(o.status_raw)) = LOWER(TRIM(%s))")
+            params.append(status_raw)
         if date_from:
             where.append("o.created_at_daraz >= %s")
             params.append(_parse_ts(date_from) or date_from)
@@ -3250,7 +3344,12 @@ def get_repo() -> TenancyRepo:
         # Prefer memory when AUTH_TEST_MODE or TENANCY_REPO=memory
         mode = get_env("TENANCY_REPO", "").lower()
         test_mode = get_env("AUTH_TEST_MODE", "").lower() in {"1", "true", "yes"}
-        if mode == "memory" or test_mode or not get_env("DATABASE_URL"):
+        environment = get_env("ENVIRONMENT", get_env("ENV", "")).lower()
+        production = environment in {"production", "prod"} or get_env("RENDER", "").lower() in {"1", "true", "yes"}
+        database_url = get_env("DATABASE_URL")
+        if production and (mode == "memory" or test_mode or not database_url):
+            raise RuntimeError("Production requires DATABASE_URL and cannot use the memory repository")
+        if mode == "memory" or test_mode or not database_url:
             # If DATABASE_URL missing but not test mode, still allow memory for
             # unit tests; production app routes will require auth config separately.
             _repo = MemoryTenancyRepo()

@@ -139,9 +139,7 @@ def record_label_prints(
       is_reprint?, fetch_source?
     """
     repo = get_repo()
-    inserted: list[dict[str, Any]] = []
-    for s in successes:
-        row = repo.insert_label_print(
+    payloads = [
             {
                 "workspace_id": workspace_id,
                 "store_id": s["store_id"],
@@ -154,6 +152,7 @@ def record_label_prints(
                 "is_reprint": bool(s.get("is_reprint")),
                 "fetch_source": s.get("fetch_source"),
             }
-        )
-        inserted.append(row)
-    return inserted
+        for s in successes]
+    if hasattr(repo, "insert_label_prints_atomic"):
+        return repo.insert_label_prints_atomic(payloads)
+    return [repo.insert_label_print(p) for p in payloads]

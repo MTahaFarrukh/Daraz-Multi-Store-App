@@ -309,3 +309,50 @@ CREATE TABLE IF NOT EXISTS workspace_product_defaults (
     sku_prefix TEXT NOT NULL DEFAULT 'MTF-',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS product_create_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL,
+    source_identity TEXT NOT NULL,
+    destination_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    request_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL,
+    generated_seller_skus JSONB NOT NULL DEFAULT '[]'::jsonb,
+    destination_sku_mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+    destination_item_id TEXT,
+    daraz_response JSONB,
+    verification_state TEXT NOT NULL DEFAULT 'UNVERIFIED',
+    last_error TEXT,
+    retry_count INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, request_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_product_create_attempts_workspace
+    ON product_create_attempts (workspace_id, state);
+
+CREATE TABLE IF NOT EXISTS workspace_audit_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    actor_user_id UUID,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_audit_events_workspace_time
+    ON workspace_audit_events (workspace_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS trusted_workspace_connections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    destination_workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    view_products BOOLEAN NOT NULL DEFAULT FALSE,
+    copy_products BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (source_workspace_id <> destination_workspace_id)
+);

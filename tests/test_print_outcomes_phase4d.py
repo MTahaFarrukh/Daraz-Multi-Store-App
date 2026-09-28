@@ -379,24 +379,18 @@ def test_bulk_getdocument_one_call_for_multiple_orders(
         output=tmp_path / "bulk.pdf",
     )
     assert fetch_called["n"] == 0
-    assert mock_client.get_shipping_label.call_count == 1
-    ids_arg = mock_client.get_shipping_label.call_args.args[0]
-    assert set(ids_arg) == {"item-B1", "item-B2"}
-    assert result["print_status"] == "success"
+    # A multi-item PDF has no trustworthy page-to-item manifest.  The safety
+    # path retries per item instead of crediting labels by page count.
+    assert mock_client.get_shipping_label.call_count >= 2
     assert result["summary"]["success_count"] == 2
-    assert result["timings_ms"]["getdocument_calls"] == 1
-    assert result["timings_ms"]["bulk_calls"] == 1
+    assert result["timings_ms"]["bulk_calls"] == 3
     assert result["timings_ms"]["printawb_calls"] == 0
     assert result["timings_ms"]["html_docs_converted"] == 0
     assert all(o["state"] == SUCCESS for o in result["outcomes"])
-    assert all(
-        d.get("fetch_source") == "get_document_bulk" for d in result["label_details"]
-    )
     prints1 = repo.list_label_prints_for_orders(wid, [o1["id"]])[o1["id"]]
     prints2 = repo.list_label_prints_for_orders(wid, [o2["id"]])[o2["id"]]
     assert len(prints1) == 1
     assert len(prints2) == 1
-    assert prints1[0].get("fetch_source") == "get_document_bulk"
     diag = result["document_diagnostics"][0]
     assert diag["bulk_attempted"] is True
     assert diag["bulk_success"] is True
@@ -646,17 +640,17 @@ def test_page_reconcile_never_over_credits_print_events(
     assert len(result["outcomes"]) == 3
     by_id = {o["order_id"]: o for o in result["outcomes"]}
     states = {by_id[o1["id"]]["state"], by_id[o2["id"]]["state"], by_id[o3["id"]]["state"]}
-    assert SUCCESS in states
-    assert DOCUMENT_MAPPING_FAILED in states
-    assert result["summary"]["success_count"] == 2
-    assert result["prints_recorded"] == 2
+    assert states == {DOCUMENT_MAPPING_FAILED}
+    assert result["summary"]["success_count"] == 0
+    assert result["prints_recorded"] == 0
     # Only SUCCESS orders get print events
     printed = 0
     for oid in (o1["id"], o2["id"], o3["id"]):
         printed += len(repo.list_label_prints_for_orders(wid, [oid])[oid])
-    assert printed == 2
+    assert printed == 0
     failed = [o for o in result["outcomes"] if o["state"] == DOCUMENT_MAPPING_FAILED]
-    assert len(failed) == 1
-    assert not repo.list_label_prints_for_orders(wid, [failed[0]["order_id"]])[
-        failed[0]["order_id"]
-    ]
+    assert len(failed) == 3
+    for failed_outcome in failed:
+        assert not repo.list_label_prints_for_orders(wid, [failed_outcome["order_id"]])[
+            failed_outcome["order_id"]
+        ]

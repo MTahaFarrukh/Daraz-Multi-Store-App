@@ -1,3 +1,4 @@
+import { queryClient } from "@/lib/queryClient";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Api } from "@/lib/api";
@@ -7,6 +8,7 @@ import { useStoreGroups } from "@/hooks/queries/useStoreGroups";
 import { usePrintJobs } from "@/hooks/queries/usePrintAndOrders";
 import {
   pollPrintJob,
+  refreshPrintQueries,
   usePrintOrdersByIds,
 } from "@/hooks/queries/useUnifiedOrders";
 import { RtsSelectionToolbar } from "@/components/orders/RtsSelectionToolbar";
@@ -230,6 +232,7 @@ export function ShippingPage() {
           setBusy("Gathering labels…");
         }
       });
+      if (workspaceId) void refreshPrintQueries(queryClient, workspaceId).catch(() => undefined);
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }

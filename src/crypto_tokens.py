@@ -14,6 +14,9 @@ def get_fernet() -> Fernet:
     env_key = get_env("DARAZ_TOKEN_KEY")
     if env_key:
         return Fernet(env_key.encode("ascii"))
+    production = get_env("ENVIRONMENT", get_env("ENV", "")).lower() in {"production", "prod"} or get_env("RENDER", "").lower() in {"1", "true", "yes"}
+    if production and not TOKEN_KEY_PATH.exists():
+        raise RuntimeError("Production requires DARAZ_TOKEN_KEY or a persistent token key file")
     TOKEN_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     if TOKEN_KEY_PATH.exists():
         return Fernet(TOKEN_KEY_PATH.read_text(encoding="utf-8").strip().encode("ascii"))

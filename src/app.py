@@ -50,6 +50,7 @@ from src.print_job import (
 from src.print_safety import validate_print_targets
 from src.token_refresh import refresh_store_tokens
 from src.token_store import build_token_record, sanitize_store_view
+from src.authorization import require_capability
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -95,6 +96,48 @@ app = FastAPI(
     redoc_url=None if is_production() else "/redoc",
     openapi_url=_openapi_url,
 )
+
+@app.get("/api/audit-events")
+def api_audit_events(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
+    try:
+        require_capability(ctx.role, "workspace.read")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    repo = get_repo()
+    rows = repo.list_audit_events(ctx.workspace_id) if hasattr(repo, "list_audit_events") else []
+    return {"items": rows}
+
+@app.get("/api/inventory")
+def api_inventory(
+    store_id: str | None = None, search: str | None = None,
+    status: str | None = None, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    rows = get_repo().list_daraz_products(ctx.workspace_id, {"store_id": store_id, "search": search, "status": status, "limit": limit, "offset": offset})
+    return rows
+
+@app.get("/api/product-create-attempts/{attempt_id}")
+def api_product_create_attempt(attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
+    attempt = get_repo().get_product_attempt(ctx.workspace_id, attempt_id)
+    if not attempt: raise HTTPException(status_code=404, detail="Product create attempt not found")
+    return attempt
+
+@app.post("/api/product-create-attempts/{attempt_id}/reconcile")
+def api_reconcile_product_create_attempt(attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
+    try: require_capability(ctx.role, "product.retry")
+    except PermissionError as exc: raise HTTPException(status_code=403, detail=str(exc)) from exc
+    attempt = get_repo().get_product_attempt(ctx.workspace_id, attempt_id)
+    if not attempt: raise HTTPException(status_code=404, detail="Product create attempt not found")
+    return get_repo().update_product_attempt(ctx.workspace_id, attempt_id, state="NEEDS_RECONCILIATION", verification_state="UNVERIFIED") or attempt
+
+@app.get("/api/analytics/summary")
+def api_analytics_summary(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
+    repo = get_repo(); orders = repo.list_orders(ctx.workspace_id, {"limit": 10000}).get("items", [])
+    by_status: dict[str, int] = {}
+    for order in orders:
+        key = str(order.get("status_group") or "other"); by_status[key] = by_status.get(key, 0) + 1
+    gross = sum(float(o.get("price") or 0) for o in orders)
+    return {"gross_sales": gross, "order_count": len(orders), "status_distribution": by_status, "label": "Gross Sales"}
 
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -923,6 +966,10 @@ def api_print_labels_orders(
     wait: bool = Query(False, description="Block until done (local dev only)"),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    try:
+        require_capability(ctx.role, "shipping.reprint" if body.allow_reprint else "shipping.print")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     import threading
     import time as _time
 
@@ -1037,6 +1084,8 @@ def api_print_labels(
     wait: bool = Query(False, description="Block until done (local dev only)"),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    if reuse_saved:
+        raise HTTPException(status_code=400, detail="Saved-label reuse is unavailable. Use an owned print job download.")
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
     except ValueError as exc:
@@ -1120,13 +1169,14 @@ def api_print_labels_status(
     job_id: str,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    reset_print_job_if_stale(job_id)
     try:
         state = require_workspace_job(job_id, ctx.workspace_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    reset_print_job_if_stale(job_id)
+    state = require_workspace_job(job_id, ctx.workspace_id)
     if state["status"] == "done" and state.get("result"):
         return {**state, **state["result"]}
     return state
@@ -1583,6 +1633,10 @@ def api_add_product_from_url(
     body: AddFromUrlBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    try:
+        require_capability(ctx.role, "product.create")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     """One-click add from public Daraz URL → multi-store (create gated)."""
     from src.product_add import add_product_from_public_url
     from src.product_fetch import ProductFetchError
@@ -1610,6 +1664,10 @@ def api_add_product_from_connected(
     body: AddFromConnectedBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    try:
+        require_capability(ctx.role, "product.create")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     """One-click add from connected Item ID → multi-store (create gated)."""
     from src.product_add import add_product_from_connected
     from src.product_fetch import ProductFetchError

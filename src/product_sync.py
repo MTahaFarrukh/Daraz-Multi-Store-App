@@ -294,18 +294,37 @@ def sync_store_products(
                 continue
             now = _now_iso()
             payload["catalog_seen_at"] = now
+            existing = repo.get_daraz_product_by_item_id(
+                workspace_id, store_uuid, str(payload["daraz_item_id"])
+            )
+            # A lightweight catalog row must not erase a previously hydrated
+            # detail record. Preserve rich fields and variants unless this
+            # pass fetched authoritative detail for the same item.
+            if existing and not (iid in details_by_id) and existing.get("detail_complete"):
+                for field in (
+                    "title", "title_en", "description", "description_en",
+                    "short_description", "short_description_en", "package_content",
+                    "attributes_json", "variation_json", "images_json",
+                    "market_images_json", "video_ref", "raw_json",
+                ):
+                    incoming = payload.get(field)
+                    if incoming in (None, "", {}, []):
+                        payload[field] = existing.get(field)
             if iid in details_by_id:
                 payload["detail_complete"] = True
                 payload["detail_synced_at"] = now
             else:
-                payload["detail_complete"] = False
+                payload["detail_complete"] = bool(existing and existing.get("detail_complete"))
             row = repo.upsert_daraz_product(payload)
             products_upserted += 1
-            variants = variant_payloads_from_daraz(
-                workspace_id, store_uuid, str(row["id"]), merged
-            )
-            repo.replace_product_variants(workspace_id, str(row["id"]), variants)
-            variants_upserted += len(variants)
+            if existing and existing.get("detail_complete") and iid not in details_by_id:
+                variants = []
+            else:
+                variants = variant_payloads_from_daraz(
+                    workspace_id, store_uuid, str(row["id"]), merged
+                )
+                repo.replace_product_variants(workspace_id, str(row["id"]), variants)
+                variants_upserted += len(variants)
 
         return {
             "store_id": slug,

@@ -6,6 +6,12 @@ import html
 from typing import Any
 from xml.sax.saxutils import escape
 
+_KNOWN_SALE_PROP_KEYS = {
+    "color", "size", "pack", "capacity", "model", "style", "type",
+    "color_family", "size_family", "pack_size", "capacity_value",
+    "model_name", "style_name", "type_name",
+}
+
 
 def _esc(value: Any) -> str:
     if value is None:
@@ -70,6 +76,21 @@ def build_create_product_xml(draft: dict[str, Any]) -> str:
     sku_nodes: list[str] = []
     for v in variants:
         sale = v.get("sale_props") or {}
+        mapping = (v.get("dimension_mapping") or {}).get("mapped") or []
+        allowed_sale_keys = {
+            str(m.get("destination_attribute_key"))
+            for m in mapping
+            if isinstance(m, dict) and m.get("destination_attribute_key")
+        }
+        # Source keys are provenance only. Serialize sale properties that the
+        # category resolver explicitly mapped to destination attributes.
+        if allowed_sale_keys:
+            sale = {k: val for k, val in sale.items() if str(k) in allowed_sale_keys}
+        else:
+            sale = {
+                k: val for k, val in sale.items()
+                if str(k).strip().lower() in _KNOWN_SALE_PROP_KEYS
+            }
         sale_xml = ""
         if isinstance(sale, dict) and sale:
             inner = "".join(

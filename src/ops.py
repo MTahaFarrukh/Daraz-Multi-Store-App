@@ -367,7 +367,7 @@ def _items_by_order(
         except Exception:
             data = None
 
-        parsed = False
+        returned: set[str] = set()
         if isinstance(data, list):
             for entry in data:
                 if not isinstance(entry, dict):
@@ -381,7 +381,7 @@ def _items_by_order(
                 )
                 if not isinstance(entries, list):
                     continue
-                parsed = True
+                returned.add(oid)
                 item_ids, package_id = order_label_meta(entries)
                 if item_ids:
                     items_by_order[oid] = {
@@ -389,8 +389,10 @@ def _items_by_order(
                         "package_id": package_id,
                     }
 
-        if not parsed:
-            for oid in chunk:
+        for oid in chunk:
+            if str(oid) in returned:
+                continue
+            try:
                 items_resp = client.get_order_items(oid)
                 items = extract_order_items(items_resp)
                 item_ids, package_id = order_label_meta(items)
@@ -398,6 +400,8 @@ def _items_by_order(
                     "item_ids": item_ids,
                     "package_id": package_id,
                 }
+            except Exception:
+                items_by_order[str(oid)] = {"item_ids": [], "package_id": None}
     return items_by_order
 
 
@@ -461,6 +465,8 @@ def print_labels(
 
     progress(f"Fetching up to {limit} orders…")
 
+    if reuse_saved and workspace_id:
+        raise ValueError("Saved-label reuse is unavailable for workspace requests")
     if reuse_saved:
         raw_labels = labels_from_disk(store_id, store_ids=store_ids)[:limit]
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
@@ -536,7 +542,7 @@ def print_labels(
                     label_fetch_meta.append(fetch_meta)
                     collected_item_ids.extend(item_ids)
 
-    if not raw_labels:
+    if not raw_labels and not workspace_id:
         raw_labels = labels_from_disk(store_id, store_ids=store_ids)[:limit]
         label_fetch_sources = [_disk_fetch_source(label) for label in raw_labels]
         label_fetch_meta = [{} for _ in raw_labels]
@@ -821,7 +827,7 @@ def print_labels_for_orders(
 
     use_native = _prefer_native_pdf()
     use_bulk_first = _prefer_bulk_getdocument()  # False when native preferred
-    use_phase2_bulk = use_native or use_bulk_first
+    use_phase2_bulk = use_bulk_first
 
     def _append_success(
         t: dict[str, Any],
@@ -940,7 +946,9 @@ def print_labels_for_orders(
                 pages_n = _label_pdf_page_count(bulk_label)
                 diag["bulk_format"] = "pdf"
                 diag["pages"] = pages_n
-                if _bulk_pages_match_targets(pages_n, group):
+                # A request for one target establishes its association. A multi-target
+                # blob has no identity manifest; matching page counts prove nothing.
+                if len(group) == 1 and pages_n > 0:
                     diag["bulk_success"] = True
                     fetch_source = "get_document_bulk"
                     fetch_meta: dict[str, Any] = {
@@ -1315,9 +1323,10 @@ def print_labels_for_orders(
 
             # Reconcile: never over-credit SUCCESS vs actual PDF pages
             success_batch = list(pending_successes)
-            if pages < len(success_batch):
-                excess = success_batch[pages:]
-                success_batch = success_batch[:pages]
+            expected_total = sum(_label_pdf_page_count(label) for label in pdf_labels)
+            if pages != expected_total or any(_label_pdf_page_count(label) == 0 for label in pdf_labels):
+                excess = success_batch
+                success_batch = []
                 progress(
                     f"Page mapping: {pages} PDF page(s) for "
                     f"{len(pending_successes)} target(s); "
@@ -1331,7 +1340,7 @@ def print_labels_for_orders(
                     outcomes_by_id[oid] = make_outcome(
                         order_id=oid,
                         state=DOCUMENT_MAPPING_FAILED,
-                        reason=f"pages_{pages}_lt_targets_{len(pending_successes)}",
+                        reason="merged_document_mapping_unproven",
                         is_reprint=bool(s.get("is_reprint")),
                         **base,
                     )

@@ -6,9 +6,11 @@ import json
 import time
 from typing import Any
 
-from src.crypto_tokens import decrypt_secret, encrypt_secret
+from cryptography.fernet import InvalidToken
 
-STATE_PREFIX = "oauth1:"
+from src.crypto_tokens import get_fernet
+
+STATE_PREFIX = "oauth2:"
 STATE_TTL_SECONDS = 60 * 30
 
 
@@ -19,18 +21,23 @@ def build_oauth_state(*, workspace_id: str, user_id: str) -> str:
         "exp": int(time.time()) + STATE_TTL_SECONDS,
     }
     raw = json.dumps(payload, separators=(",", ":"))
-    return STATE_PREFIX + encrypt_secret(raw)
+    return STATE_PREFIX + get_fernet().encrypt(raw.encode("utf-8")).decode("ascii")
 
 
 def parse_oauth_state(state: str | None) -> dict[str, Any]:
     if not state or not state.startswith(STATE_PREFIX):
         raise ValueError("Missing or invalid OAuth state")
-    encrypted = state[len(STATE_PREFIX) :]
-    # encrypt_secret already adds DMST1:; build_oauth_state double-wraps via encrypt_secret
-    # Actually build uses encrypt_secret which adds DMST1. So state is oauth1:DMST1:...
-    plain = decrypt_secret(encrypted)
-    data = json.loads(plain)
-    if int(data.get("exp") or 0) < int(time.time()):
+    try:
+        plain = get_fernet().decrypt(state[len(STATE_PREFIX):].encode("ascii"))
+        data = json.loads(plain)
+        if not isinstance(data, dict) or type(data.get("exp")) is not int:
+            raise ValueError("Invalid state payload")
+        if not all(isinstance(data.get(k), str) and data[k].strip()
+                   for k in ("workspace_id", "user_id")):
+            raise ValueError("Invalid state binding")
+    except (InvalidToken, ValueError, TypeError, UnicodeError) as exc:
+        raise ValueError("Invalid OAuth state — start Connect store again") from exc
+    if data["exp"] <= int(time.time()):
         raise ValueError("OAuth state expired — start Connect store again")
     workspace_id = str(data.get("workspace_id") or "").strip()
     user_id = str(data.get("user_id") or "").strip()

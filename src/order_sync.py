@@ -147,7 +147,7 @@ def _fetch_items_for_orders(
     by_order: dict[str, list[dict[str, Any]]] = {oid: [] for oid in order_ids}
     for i in range(0, len(order_ids), 50):
         chunk = order_ids[i : i + 50]
-        parsed = False
+        returned: set[str] = set()
         try:
             multi = client.get_multiple_order_items(chunk)
             data = multi.get("data")
@@ -164,19 +164,20 @@ def _fetch_items_for_orders(
                     )
                     if oid and isinstance(entries, list):
                         by_order[oid] = [e for e in entries if isinstance(e, dict)]
-                        parsed = True
+                        returned.add(oid)
         except Exception as exc:  # noqa: BLE001
             logger.debug("get_multiple_order_items failed: %s", exc)
             parsed = False
 
-        if not parsed:
-            for oid in chunk:
-                try:
-                    items_resp = client.get_order_items(oid)
-                    by_order[oid] = extract_order_items(items_resp)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("get_order_items failed order=%s: %s", oid, exc)
-                    by_order[oid] = []
+        for oid in chunk:
+            if oid in returned:
+                continue
+            try:
+                items_resp = client.get_order_items(oid)
+                by_order[oid] = extract_order_items(items_resp)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("get_order_items failed order=%s: %s", oid, exc)
+                by_order[oid] = []
     return by_order
 
 

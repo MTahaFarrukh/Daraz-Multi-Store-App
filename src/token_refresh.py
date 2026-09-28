@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+import threading
 
 from src.config import DEFAULT_API_BASE, get_env, require_env
 from src.daraz_api import DarazApiError, DarazClient
@@ -109,7 +110,16 @@ def refresh_store_tokens(
             results.append({"store_id": sid, "status": "skipped", "reason": "not_expiring_soon"})
             continue
         try:
-            updated = refresh_one_store(store, upsert_fn=upsert)
+            key = f"{workspace_id or 'legacy'}:{sid}"
+            lock = _refresh_lock(key)
+            with lock:
+                # Another waiter may have persisted a fresh token while we
+                # were queued; reload it before deciding to refresh.
+                current = get_one(sid) or store
+                if not force and not access_token_expires_soon(current, within_minutes=within_minutes):
+                    results.append({"store_id": sid, "status": "skipped", "reason": "refreshed_by_peer"})
+                    continue
+                updated = refresh_one_store(current, upsert_fn=upsert)
             results.append(
                 {
                     "store_id": updated.get("store_id", sid),
@@ -127,3 +137,11 @@ def refresh_store_tokens(
                 }
             )
     return results
+
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+def _refresh_lock(key: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())

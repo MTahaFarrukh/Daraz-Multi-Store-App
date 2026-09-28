@@ -38,7 +38,10 @@ class WorkspaceContext:
 
 
 def auth_test_mode() -> bool:
-    return get_env("AUTH_TEST_MODE", "").lower() in {"1", "true", "yes"}
+    enabled = get_env("AUTH_TEST_MODE", "").lower() in {"1", "true", "yes"}
+    if enabled and is_production():
+        raise RuntimeError("AUTH_TEST_MODE is not permitted in production")
+    return enabled
 
 
 def supabase_url() -> str:

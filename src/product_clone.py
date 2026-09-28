@@ -80,7 +80,8 @@ def build_connected_clone_draft(
 
     defaults = repo.get_product_defaults(workspace_id)
     prefix = defaults.get("sku_prefix") or DEFAULT_SKU_PREFIX
-    initial_qty = int(defaults.get("default_initial_quantity") or 1)
+    configured_qty = defaults.get("default_initial_quantity")
+    initial_qty = 1 if configured_qty is None else int(configured_qty)
     if initial_qty < 0:
         initial_qty = 0
 

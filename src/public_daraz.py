@@ -250,7 +250,6 @@ def _sku_price_fields(sku: dict[str, Any]) -> tuple[float | None, float | None, 
         special = parse_money(
             raw_price.get("specialPrice")
             or raw_price.get("special_price")
-            or raw_price.get("salePrice")
         )
         # If only one numeric present under price.price, treat as regular.
         if regular is None:
@@ -461,8 +460,6 @@ def _fetch_catalog_enrichment(item_id: str, *, host: str = "www.daraz.pk") -> di
             if str(row.get("itemId") or row.get("nid") or "") == str(item_id):
                 hit = row
                 break
-        if hit is None and isinstance(items[0], dict):
-            hit = items[0]
         if not isinstance(hit, dict):
             out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
             return out
@@ -471,6 +468,7 @@ def _fetch_catalog_enrichment(item_id: str, *, host: str = "www.daraz.pk") -> di
         out.update(
             {
                 "brand": hit.get("brandName"),
+                "exact_item_match": True,
                 "brand_id": hit.get("brandId"),
                 "category_ids": category_ids,
                 "category_id": category_ids[-1] if category_ids else None,
@@ -979,21 +977,47 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         json_ld_price=price,
     )
 
-    # Category: prefer leaf from catalog categories, else skuInfos categoryId.
-    category_id = catalog.get("category_id")
-    category_confidence = "high" if category_id else None
-    category_source = "catalog.categories" if category_id else None
-    if not category_id:
-        for v in variants:
-            if v.get("category_id"):
-                category_id = str(v["category_id"])
-                category_confidence = "high"
-                category_source = "skuInfos.categoryId"
-                break
-    if not category_id and reg_cat:
-        category_id = str(reg_cat)
-        category_confidence = "medium"
-        category_source = "regCategoryId"
+    # Category evidence is deliberately bounded to the requested PDP item.
+    # Search/catalog results are usable only when their item identity matched;
+    # an unrelated first result must never select a destination category.
+    category_candidates: list[dict[str, Any]] = []
+    catalog_category = catalog.get("category_id") if catalog.get("exact_item_match") else None
+    if catalog_category:
+        category_candidates.append({
+            "category_id": str(catalog_category), "source": "catalog.categories",
+            "confidence": "high", "exact_item_match": True,
+        })
+    sku_categories: list[str] = []
+    for v in variants:
+        cid = v.get("category_id")
+        if cid and str(cid) not in sku_categories:
+            sku_categories.append(str(cid))
+    for cid in sku_categories:
+        category_candidates.append({
+            "category_id": cid, "source": "skuInfos.categoryId",
+            "confidence": "high", "exact_item_match": True,
+        })
+    if reg_cat:
+        category_candidates.append({
+            "category_id": str(reg_cat), "source": "regCategoryId",
+            "confidence": "medium", "exact_item_match": True,
+        })
+
+    # Prefer consensus among structured item-level evidence.  A conflict is
+    # retained for the destination validator instead of silently guessing.
+    category_id = None
+    category_confidence = None
+    category_source = None
+    if category_candidates:
+        high_ids = [c["category_id"] for c in category_candidates if c["confidence"] == "high"]
+        if high_ids and len(set(high_ids)) == 1:
+            category_id = high_ids[0]
+            category_confidence = "high"
+            category_source = "+".join(sorted({c["source"] for c in category_candidates if c["category_id"] == category_id}))
+        elif not high_ids and len({c["category_id"] for c in category_candidates}) == 1:
+            category_id = category_candidates[0]["category_id"]
+            category_confidence = "medium"
+            category_source = "+".join(sorted({c["source"] for c in category_candidates}))
 
     if not brand and catalog.get("brand"):
         brand = catalog.get("brand")
@@ -1055,11 +1079,14 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         "category_hint": category_hint,
         "category_id": category_id,
         "category_ids": catalog.get("category_ids") or [],
+        "category_candidates": category_candidates,
         "category_resolution": {
             "category_id": category_id,
             "category_name": category_hint,
             "source": category_source,
             "confidence": category_confidence,
+            "candidates": category_candidates,
+            "conflict": bool(category_candidates and not category_id),
         },
         "variants": variants,
         "pricing_summary": {
@@ -1146,7 +1173,8 @@ def build_public_clone_draft_from_extracted(
 
     defaults = repo.get_product_defaults(workspace_id)
     prefix = defaults.get("sku_prefix") or DEFAULT_SKU_PREFIX
-    initial_qty = int(defaults.get("default_initial_quantity") or 1)
+    configured_qty = defaults.get("default_initial_quantity")
+    initial_qty = 1 if configured_qty is None else int(configured_qty)
     if initial_qty < 0:
         initial_qty = 0
 
@@ -1341,6 +1369,8 @@ def build_public_clone_draft_from_extracted(
             "category_name": extracted.get("category_hint"),
             "source": cat_res.get("source"),
             "confidence": cat_confidence,
+            "candidates": cat_res.get("candidates") or extracted.get("category_candidates") or [],
+            "conflict": bool(cat_res.get("conflict")),
         },
         "media": {
             "product_images": images,

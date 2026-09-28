@@ -1,3 +1,4 @@
+import { queryClient } from "@/lib/queryClient";
 import { useMemo, useState } from "react";
 import { Api } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
@@ -6,6 +7,7 @@ import { useStoreGroups } from "@/hooks/queries/useStoreGroups";
 import { usePrintJobs } from "@/hooks/queries/usePrintAndOrders";
 import {
   pollPrintJob,
+  refreshPrintQueries,
   useOrderDetail,
   useOrderStatusCounts,
   usePrintOrdersByIds,
@@ -277,6 +279,7 @@ export function OrdersPage() {
           setBusy("Gathering labels…");
         }
       });
+      if (workspaceId) void refreshPrintQueries(queryClient, workspaceId).catch(() => undefined);
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import hashlib
+import json
 from typing import Any
 
 from src.brand_resolve import resolve_brand_for_category
@@ -420,6 +422,19 @@ def _prepare_destination(
 
     primary = (draft.get("product") or {}).get("primary_category_id")
     cat_res = draft.get("category_resolution") or {}
+    if cat_res.get("conflict"):
+        return {
+            "store": store_info,
+            "status": "NEEDS_ATTENTION",
+            "creation_status": "NEEDS_ATTENTION",
+            "reason": "category_evidence_conflict",
+            "category_resolution": cat_res,
+            "draft_preview": build_create_product_payload_preview(draft),
+            "timings_ms": {
+                **timings,
+                "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+            },
+        }
     if not primary and cat_res.get("confidence") not in {"high", "medium"}:
         return {
             "store": store_info,
@@ -650,6 +665,22 @@ def _prepare_destination(
             },
         }
 
+    repo = get_repo()
+    sku_values = [str(v.get("seller_sku") or "") for v in (draft.get("variants") or [])]
+    source_identity = str(draft.get("source_item_id") or draft.get("source_url") or draft.get("source_type") or "")
+    fingerprint = hashlib.sha256(json.dumps({"source": source_identity, "store": str(dest.get("id")), "skus": sku_values}, sort_keys=True).encode()).hexdigest()
+    attempt = repo.find_product_attempt(workspace_id, fingerprint)
+    if attempt and attempt.get("state") in {"CREATING", "CREATED_UNVERIFIED", "NEEDS_RECONCILIATION"}:
+        return {**result_base, "status": "NEEDS_ATTENTION", "creation_status": "NEEDS_RECONCILIATION", "reason": "product_create_attempt_requires_reconciliation", "attempt_id": attempt["id"], "timings_ms": {**timings, "dest_total": round((time.perf_counter() - t0) * 1000, 1)}}
+    if not attempt:
+        attempt = repo.create_product_attempt({
+            "workspace_id": workspace_id, "source_type": draft.get("source_type") or "unknown",
+            "source_identity": source_identity, "destination_store_id": str(dest.get("id")),
+            "request_fingerprint": fingerprint, "state": "PREPARING",
+            "generated_seller_skus": sku_values, "verification_state": "UNVERIFIED",
+        })
+    repo.update_product_attempt(workspace_id, attempt["id"], state="CREATING")
+
     t_create = time.perf_counter()
     xml = build_create_product_xml(draft)
     try:
@@ -667,11 +698,14 @@ def _prepare_destination(
             safe_bits.append(f"transport={diag['transport']}")
         suffix = f" ({', '.join(safe_bits)})" if safe_bits else ""
         timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
+        uncertain = exc.http_status is None or exc.http_status >= 500
+        repo.update_product_attempt(workspace_id, attempt["id"], state="NEEDS_RECONCILIATION" if uncertain else "FAILED_SAFE_TO_RETRY", last_error=f"{exc.code}:{exc}", retry_count=int(attempt.get("retry_count") or 0) + 1)
         return {
             **result_base,
             "status": "Failed",
             "creation_status": "FAILED",
             "reason": f"CreateProduct:{exc.code}:{exc}{suffix}",
+            "attempt_id": attempt["id"],
             "daraz_error": redact_create_response(exc.payload),
             "transport_diagnostics": {
                 k: diag[k]
@@ -697,6 +731,7 @@ def _prepare_destination(
 
     timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
     item_id = _extract_item_id_from_create(resp)
+    repo.update_product_attempt(workspace_id, attempt["id"], state="CREATED_UNVERIFIED", destination_item_id=str(item_id) if item_id else None, daraz_response=redact_create_response(resp))
 
     t_sp = time.perf_counter()
     special = _apply_special_prices(client, draft)
@@ -708,6 +743,7 @@ def _prepare_destination(
     post = _post_create_status(client, item_id)
     fidelity = verify_pricing_fidelity(draft, post.get("raw"))
     timings["verification_ms"] = round((time.perf_counter() - t_ver) * 1000, 1)
+    repo.update_product_attempt(workspace_id, attempt["id"], state="VERIFIED" if post.get("raw") else "CREATED_UNVERIFIED", verification_state="VERIFIED" if post.get("raw") else "UNVERIFIED", destination_item_id=str(item_id) if item_id else None)
 
     catalog_upsert: dict[str, Any] = {"ok": False}
     if item_id:

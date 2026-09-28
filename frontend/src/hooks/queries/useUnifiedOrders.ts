@@ -117,22 +117,20 @@ export function usePrintOrdersByIds(workspaceId: string | undefined) {
       orderIds: string[];
       allowReprint?: boolean;
     }) => Api.printOrdersByIds(orderIds, allowReprint),
-    onSuccess: async () => {
-      if (!workspaceId) return;
-      await Promise.all([
-        qc.invalidateQueries({
-          queryKey: ["workspace", workspaceId, "unified-orders"],
-        }),
-        qc.invalidateQueries({
-          queryKey: ["workspace", workspaceId, "order-status-counts"],
-        }),
-        qc.invalidateQueries({
-          queryKey: ["workspace", workspaceId, "order-detail"],
-        }),
-        qc.invalidateQueries({ queryKey: queryKeys.printJobs(workspaceId) }),
-      ]);
+    // Do not make job-id delivery wait for refetches.
+    onSuccess: () => {
+      if (workspaceId) void refreshPrintQueries(qc, workspaceId).catch(() => undefined);
     },
   });
+}
+
+export function refreshPrintQueries(qc: ReturnType<typeof useQueryClient>, workspaceId: string) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: ["workspace", workspaceId, "unified-orders"] }),
+    qc.invalidateQueries({ queryKey: ["workspace", workspaceId, "order-status-counts"] }),
+    qc.invalidateQueries({ queryKey: ["workspace", workspaceId, "order-detail"] }),
+    qc.invalidateQueries({ queryKey: queryKeys.printJobs(workspaceId) }),
+  ]);
 }
 
 /** Poll a print job until done/error or timeout. */
