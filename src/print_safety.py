@@ -52,78 +52,27 @@ def printable_meta(
 def validate_print_targets(
     workspace_id: str,
     order_uuids: list[str],
+    *,
+    skip_hydrate: bool = False,
+    prepared: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify orders into printable buckets; expose print-event partitions.
 
-    Hydrates missing order items first. UNPRINTED / printed is based only on
-    label print events — independent of whether items exist after hydrate.
-    Orders still missing item ids go to ``not_eligible`` (reason
-    ``no_order_item_ids``) but remain in ``unprinted_ids`` / ``printed_ids``.
+    Prefer passing a canonical ``prepared`` structure from
+    ``prepare_print_targets`` so hydrate runs at most once. When ``prepared``
+    is provided, classification uses that data with no further DB hydrate.
     """
-    from src.print_hydrate import hydrate_missing_order_items
+    if prepared is not None:
+        from src.print_prepare import classify_prepared_targets
 
-    hydrate = hydrate_missing_order_items(workspace_id, order_uuids)
+        return classify_prepared_targets(prepared)
 
-    repo = get_repo()
-    new_printable: list[dict[str, Any]] = []
-    already_printed: list[dict[str, Any]] = []
-    not_eligible: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    unprinted_ids: list[str] = []
-    printed_ids: list[str] = []
+    from src.print_prepare import classify_prepared_targets, prepare_print_targets
 
-    seen: set[str] = set()
-    selected_order: list[str] = []
-    for raw_id in order_uuids:
-        oid = str(raw_id)
-        if oid in seen:
-            continue
-        seen.add(oid)
-        selected_order.append(oid)
-        order = repo.get_order_by_id(workspace_id, oid)
-        if not order:
-            errors.append({"order_id": oid, "error": "not_found"})
-            continue
-        items = repo.list_order_items(workspace_id, oid)
-        eligible = order_is_eligible(order, items)
-        meta = printable_meta(order, items)
-        entry = {
-            "order_id": oid,
-            "store_id": str(order.get("store_id")),
-            "daraz_order_id": str(order.get("daraz_order_id")),
-            "status_group": order.get("status_group"),
-            "order_item_ids": meta["order_item_ids"],
-            "package_id": meta["package_id"],
-        }
-        printed = repo.has_label_print(
-            workspace_id, str(order["store_id"]), str(order["daraz_order_id"])
-        )
-        if printed:
-            printed_ids.append(oid)
-        else:
-            unprinted_ids.append(oid)
-
-        if not eligible:
-            not_eligible.append({**entry, "reason": "not_eligible"})
-            continue
-        if not meta["order_item_ids"]:
-            not_eligible.append({**entry, "reason": "no_order_item_ids"})
-            continue
-        if printed:
-            already_printed.append(entry)
-        else:
-            new_printable.append(entry)
-
-    return {
-        "new_printable": new_printable,
-        "already_printed": already_printed,
-        "not_eligible": not_eligible,
-        "errors": errors,
-        "unprinted_ids": unprinted_ids,
-        "printed_ids": printed_ids,
-        "selected_count": len(selected_order),
-        "hydrate": hydrate,
-    }
+    prepared_data = prepare_print_targets(
+        workspace_id, order_uuids, hydrate=not skip_hydrate
+    )
+    return classify_prepared_targets(prepared_data)
 
 
 def record_label_prints(
@@ -137,6 +86,9 @@ def record_label_prints(
     Each success dict needs:
       order_id, store_id, daraz_order_id, order_item_ids, package_id?,
       is_reprint?, fetch_source?
+
+    Uses a single atomic transaction when available. Callers must treat a raised
+    exception as print-history persistence failure (no partial history).
     """
     repo = get_repo()
     payloads = [
@@ -153,6 +105,8 @@ def record_label_prints(
                 "fetch_source": s.get("fetch_source"),
             }
         for s in successes]
+    if not payloads:
+        return []
     if hasattr(repo, "insert_label_prints_atomic"):
         return repo.insert_label_prints_atomic(payloads)
     return [repo.insert_label_print(p) for p in payloads]

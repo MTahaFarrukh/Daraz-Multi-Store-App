@@ -3,7 +3,14 @@ import {
   useAddProductFromConnected,
   useAddProductFromUrl,
 } from "@/hooks/queries/useProducts";
-import type { AddProductResponse, StoreView } from "@/types/api";
+import { Api } from "@/lib/api";
+import {
+  destinationActionKind,
+  destinationProgressLabel,
+  shouldShowReconcile,
+  shouldShowRetry,
+} from "@/lib/productAddProgress";
+import type { AddProductDestinationResult, AddProductResponse, StoreView } from "@/types/api";
 import { CloneDraftPreview } from "@/pages/products/CloneDraftPreview";
 import { Dialog } from "@/components/ui/Dialog";
 
@@ -204,6 +211,12 @@ export function AddDarazProductDialog({
       });
       setResult(res);
       applyResultMessages(res);
+      // Progressive attempt refresh when IDs are available (non-blocking).
+      for (const d of res.destinations || []) {
+        if (d.attempt_id) {
+          void pollAttemptIntoResult(d.attempt_id, d.store?.store_id || null);
+        }
+      }
     } catch (err) {
       onError(err instanceof Error ? err.message : "Add product failed");
     } finally {
@@ -244,11 +257,130 @@ export function AddDarazProductDialog({
     }
   }
 
-  const retryable = (result?.destinations || []).filter((d) =>
-    ["Failed", "FAILED", "NEEDS_ATTENTION", "CREATED_WITH_WARNING"].includes(
-      String(d.status)
-    )
+  const retryable = (result?.destinations || []).filter((d) => shouldShowRetry(d));
+  const reconcileable = (result?.destinations || []).filter((d) =>
+    shouldShowReconcile(d)
   );
+
+  async function pollAttemptIntoResult(attemptId: string, _storeId: string | null) {
+    try {
+      const attempt = await Api.getProductCreateAttempt(attemptId);
+      setResult((prev) => {
+        if (!prev?.destinations) return prev;
+        const nextDest = prev.destinations.map((d) => {
+          if (d.attempt_id !== attemptId) return d;
+          return {
+            ...d,
+            attempt_id: attemptId,
+            attempt_state: String(attempt.state || d.attempt_state || ""),
+            creation_status: String(
+              attempt.state || d.creation_status || d.status || ""
+            ),
+            status:
+              String(attempt.state) === "VERIFIED"
+                ? "Created"
+                : String(attempt.state || d.status),
+            item_id:
+              (attempt.destination_item_id as string | undefined) || d.item_id,
+            reason:
+              (attempt.last_error as string | undefined) || d.reason || undefined,
+          };
+        });
+        return { ...prev, destinations: nextDest };
+      });
+    } catch {
+      /* poll is best-effort */
+    }
+  }
+
+  async function onRetryDestination(d: AddProductDestinationResult) {
+    if (!d.attempt_id) return;
+    setBusy(`Retrying ${d.store?.display_name || d.store?.store_id || "store"}…`);
+    onError("");
+    try {
+      const res = await Api.retryProductCreateAttempt(d.attempt_id, true);
+      const attempt = (res.attempt as Record<string, unknown> | undefined) || res;
+      const state = String(attempt.state || res.status || "");
+      setResult((prev) => {
+        if (!prev?.destinations) return prev;
+        return {
+          ...prev,
+          destinations: prev.destinations.map((row) =>
+            row.attempt_id === d.attempt_id
+              ? {
+                  ...row,
+                  attempt_state: state,
+                  creation_status: state,
+                  status:
+                    state === "VERIFIED"
+                      ? "Created"
+                      : state === "FAILED_SAFE_TO_RETRY"
+                        ? "Failed"
+                        : state,
+                  item_id:
+                    (attempt.destination_item_id as string | undefined) ||
+                    row.item_id,
+                  reason:
+                    (attempt.last_error as string | undefined) ||
+                    (res.reason as string | undefined) ||
+                    row.reason,
+                }
+              : row
+          ),
+        };
+      });
+      onOk(`Retry finished · ${state}`);
+      void pollAttemptIntoResult(d.attempt_id, d.store?.store_id || null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function onReconcileDestination(d: AddProductDestinationResult) {
+    if (!d.attempt_id) return;
+    setBusy(`Reconciling ${d.store?.display_name || d.store?.store_id || "store"}…`);
+    onError("");
+    try {
+      const res = await Api.reconcileProductCreateAttempt(d.attempt_id);
+      const attempt = (res.attempt as Record<string, unknown> | undefined) || res;
+      const state = String(attempt.state || res.status || "");
+      setResult((prev) => {
+        if (!prev?.destinations) return prev;
+        return {
+          ...prev,
+          destinations: prev.destinations.map((row) =>
+            row.attempt_id === d.attempt_id
+              ? {
+                  ...row,
+                  attempt_state: state,
+                  creation_status: state,
+                  status:
+                    state === "VERIFIED"
+                      ? "Created"
+                      : state === "NEEDS_RECONCILIATION"
+                        ? "NEEDS_ATTENTION"
+                        : state,
+                  item_id:
+                    (attempt.destination_item_id as string | undefined) ||
+                    row.item_id,
+                  reason:
+                    (attempt.last_error as string | undefined) ||
+                    (res.reason as string | undefined) ||
+                    row.reason,
+                }
+              : row
+          ),
+        };
+      });
+      onOk(`Reconcile finished · ${state}`);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  }
 
   const draftVariants =
     ((draftPreview?.draft as Record<string, unknown> | undefined)?.variants as Array<
@@ -417,59 +549,73 @@ export function AddDarazProductDialog({
 
       {result?.destinations?.length ? (
         <section style={{ marginTop: "1rem" }}>
-          <h4 style={{ margin: "0 0 0.5rem" }}>Per-store results</h4>
+          <h4 style={{ margin: "0 0 0.5rem" }}>Per-store progress</h4>
           <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
-            {result.destinations.map((d, i) => (
-              <li key={`${d.store?.store_id || i}-${d.status}`}>
-                <strong>{d.store?.display_name || d.store?.store_id || "Store"}</strong> —{" "}
-                {d.status}
-                {d.item_id ? ` · item ${d.item_id}` : ""}
-                {d.existing_daraz_item_id
-                  ? ` · existing ${d.existing_daraz_item_id}`
-                  : ""}
-                {d.used_no_brand ? " · No Brand" : ""}
-                {d.reason ? ` · ${d.reason}` : ""}
-              </li>
-            ))}
+            {result.destinations.map((d, i) => {
+              const action = destinationActionKind(d);
+              return (
+                <li
+                  key={`${d.store?.store_id || i}-${d.attempt_id || d.status}`}
+                  style={{ marginBottom: "0.35rem" }}
+                >
+                  <strong>{d.store?.display_name || d.store?.store_id || "Store"}</strong>{" "}
+                  — {destinationProgressLabel(d)}
+                  {d.item_id ? ` · item ${d.item_id}` : ""}
+                  {d.existing_daraz_item_id
+                    ? ` · existing ${d.existing_daraz_item_id}`
+                    : ""}
+                  {d.used_no_brand ? " · No Brand" : ""}
+                  {d.reason ? ` · ${d.reason}` : ""}
+                  {action === "retry" ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ marginLeft: "0.5rem" }}
+                      disabled={Boolean(busy)}
+                      onClick={() => void onRetryDestination(d)}
+                    >
+                      Retry
+                    </button>
+                  ) : null}
+                  {action === "reconcile" ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ marginLeft: "0.5rem" }}
+                      disabled={Boolean(busy)}
+                      onClick={() => void onReconcileDestination(d)}
+                    >
+                      Reconcile
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
-          {retryable.length ? (
-            <div className="row" style={{ marginTop: "0.75rem" }}>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={Boolean(busy)}
-                onClick={() => {
-                  const resume: Record<string, string> = {};
-                  const destIds: string[] = [];
-                  for (const d of retryable) {
-                    const sid = d.store?.store_id;
-                    if (!sid) continue;
-                    destIds.push(sid);
-                    const item =
-                      d.retry_safe?.item_id ||
-                      (d.status === "CREATED_WITH_WARNING" ? d.item_id : null);
-                    if (item) resume[sid] = String(item);
-                  }
-                  void runAdd({
-                    destIds,
-                    execute: Boolean(result.product_create_enabled),
-                    confirm: Boolean(result.product_create_enabled),
-                    resumeByStore: Object.keys(resume).length ? resume : undefined,
-                  });
-                }}
-              >
-                Retry Failed {retryable.length}
-              </button>
-            </div>
-          ) : null}
-          {result.timings_ms?.total != null ? (
-            <p className="muted-line" style={{ marginBottom: 0 }}>
-              {Math.round(result.timings_ms.total)}ms
-              {result.timings_ms.fetch_extract != null
-                ? ` · fetch ${Math.round(result.timings_ms.fetch_extract)}ms`
+          {retryable.length || reconcileable.length ? (
+            <p className="muted-line" style={{ marginTop: "0.5rem" }}>
+              {retryable.length
+                ? `${retryable.length} store(s) safe to retry (keeps Seller SKUs). `
                 : ""}
-              {result.timings_ms.duplicate_check_ms != null
-                ? ` · dup ${Math.round(result.timings_ms.duplicate_check_ms)}ms`
+              {reconcileable.length
+                ? `${reconcileable.length} store(s) need reconciliation.`
+                : ""}
+            </p>
+          ) : null}
+          {result.timings_ms?.total != null || result.timings_ms?.total_ms != null ? (
+            <p className="muted-line" style={{ marginBottom: 0 }}>
+              {Math.round(
+                Number(result.timings_ms.total_ms ?? result.timings_ms.total) || 0
+              )}
+              ms
+              {result.timings_ms.destination_parallelism != null
+                ? ` · parallel ${result.timings_ms.destination_parallelism}`
+                : ""}
+              {result.timings_ms.catalog_strategy
+                ? ` · catalog ${String(result.timings_ms.catalog_strategy)}`
+                : ""}
+              {result.timings_ms.fetch_extract != null
+                ? ` · fetch ${Math.round(Number(result.timings_ms.fetch_extract) || 0)}ms`
                 : ""}
             </p>
           ) : null}

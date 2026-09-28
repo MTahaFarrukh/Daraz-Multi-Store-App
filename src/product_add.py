@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import time
+import copy
 import hashlib
 import json
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from src.brand_resolve import resolve_brand_for_category
@@ -46,6 +49,11 @@ from src.product_create_reconcile import (
     apply_attempt_seller_skus,
     build_generated_seller_skus,
     build_source_identity,
+)
+
+# Bounded destination create pipelines (override via env for ops/tests).
+PRODUCT_DESTINATION_CONCURRENCY = max(
+    1, int(os.environ.get("PRODUCT_DESTINATION_CONCURRENCY", "3") or "3")
 )
 
 
@@ -315,8 +323,9 @@ def _prepare_destination(
         }
 
     t_dup = time.perf_counter()
-    duplicates = list(draft.get("possible_duplicates") or [])
-    if not duplicates:
+    if draft.get("duplicate_check_done"):
+        duplicates = list(draft.get("possible_duplicates") or [])
+    else:
         repo = get_repo()
         product = draft.get("product") or {}
         found = repo.find_possible_product_duplicates(
@@ -336,6 +345,7 @@ def _prepare_destination(
             for d in found[:8]
         ]
         draft["possible_duplicates"] = duplicates
+        draft["duplicate_check_done"] = True
     # Collect source dimensions for soft duplicate demotion (Pack of 1 vs 2, etc.)
     src_dims: list[dict[str, Any]] = []
     for v in draft.get("variants") or []:
@@ -347,6 +357,8 @@ def _prepare_destination(
         duplicates, source_dimensions=src_dims or None
     )
     timings["duplicate_check_ms"] = round((time.perf_counter() - t_dup) * 1000, 1)
+    timings["duplicate_ms"] = timings["duplicate_check_ms"]
+    timings["duplicate_check_count"] = 1 if draft.get("duplicate_check_done") else 0
 
     if dup_kind == "ALREADY_EXISTS" and not allow_duplicates:
         return {
@@ -479,6 +491,7 @@ def _prepare_destination(
                 (time.perf_counter() - t_cat) * 1000, 1
             )
             timings["category_resolution_ms"] = timings["category_attributes_ms"]
+            timings["category_ms"] = timings["category_attributes_ms"]
             t_brand = time.perf_counter()
             prior_brand_meta = draft.get("brand_resolution") or {}
             source_brand_provenance = (
@@ -496,6 +509,7 @@ def _prepare_destination(
             timings["brand_resolution_ms"] = round(
                 (time.perf_counter() - t_brand) * 1000, 1
             )
+            timings["brand_ms"] = timings["brand_resolution_ms"]
             used_no_brand = bool(brand_resolution.get("used_no_brand")) or (
                 brand_resolution.get("status") == "NO_BRAND"
             )
@@ -514,6 +528,7 @@ def _prepare_destination(
                 (attr_report.get("timings_ms") or {}).get("attribute_resolution_ms")
                 or round((time.perf_counter() - t_attr) * 1000, 1)
             )
+            timings["attributes_ms"] = timings["attribute_resolution_ms"]
             for k in (
                 "variant_semantic_resolution_ms",
                 "variant_value_mapping_ms",
@@ -639,8 +654,10 @@ def _prepare_destination(
     source_images = list(
         media.get("product_images") or media.get("resolved_images") or []
     )
+    t_img = time.perf_counter()
     img_svc = DarazImageMigrationService(client)
     resolved = img_svc.resolve_many(source_images)
+    timings["images_ms"] = round((time.perf_counter() - t_img) * 1000, 1)
     final_urls: list[str] = []
     img_errors: list[str] = []
     strategies: list[str] = []
@@ -655,6 +672,7 @@ def _prepare_destination(
         "strategies": strategies,
         "resolved_count": len(final_urls),
         "errors": img_errors,
+        "unique_source_urls": len(dict.fromkeys(u for u in source_images if u)),
     }
     if img_errors or not final_urls:
         errors.append("images:unable_to_resolve_all")
@@ -848,12 +866,23 @@ def _prepare_destination(
             safe_bits.append(f"transport={diag['transport']}")
         suffix = f" ({', '.join(safe_bits)})" if safe_bits else ""
         timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
+        timings["create_ms"] = timings["create_product_ms"]
         uncertain = exc.http_status is None or exc.http_status >= 500
-        repo.update_product_attempt(workspace_id, attempt["id"], state="NEEDS_RECONCILIATION" if uncertain else "FAILED_SAFE_TO_RETRY", last_error=f"{exc.code}:{exc}", retry_count=int(attempt.get("retry_count") or 0) + 1)
+        fail_state = (
+            "NEEDS_RECONCILIATION" if uncertain else "FAILED_SAFE_TO_RETRY"
+        )
+        repo.update_product_attempt(
+            workspace_id,
+            attempt["id"],
+            state=fail_state,
+            last_error=f"{exc.code}:{exc}",
+            retry_count=int(attempt.get("retry_count") or 0) + 1,
+        )
         return {
             **result_base,
             "status": "Failed",
-            "creation_status": "FAILED",
+            "creation_status": fail_state,
+            "attempt_state": fail_state,
             "reason": f"CreateProduct:{exc.code}:{exc}{suffix}",
             "attempt_id": attempt["id"],
             "daraz_error": redact_create_response(exc.payload),
@@ -875,11 +904,13 @@ def _prepare_destination(
             "draft_preview": preview,
             "timings_ms": {
                 **timings,
+                "destination_total_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "dest_total": round((time.perf_counter() - t0) * 1000, 1),
             },
         }
 
     timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
+    timings["create_ms"] = timings["create_product_ms"]
     item_id = _extract_item_id_from_create(resp)
     repo.update_product_attempt(
         workspace_id,
@@ -897,6 +928,7 @@ def _prepare_destination(
     )
 
     t_ver = time.perf_counter()
+    # Prefer CreateProduct item_id for direct getProductItem — no product-list scan.
     post = _post_create_status(client, item_id)
     fidelity = verify_pricing_fidelity(draft, post.get("raw"))
     timings["verification_ms"] = round((time.perf_counter() - t_ver) * 1000, 1)
@@ -912,11 +944,13 @@ def _prepare_destination(
         )
         if isinstance(data, dict):
             mapping = _sku_mapping_from_product(data, generated_rows)
+    t_persist = time.perf_counter()
+    verified = bool(post.get("raw"))
     repo.update_product_attempt(
         workspace_id,
         attempt["id"],
-        state="VERIFIED" if post.get("raw") else "CREATED_UNVERIFIED",
-        verification_state="VERIFIED" if post.get("raw") else "UNVERIFIED",
+        state="VERIFIED" if verified else "CREATED_UNVERIFIED",
+        verification_state="VERIFIED" if verified else "UNVERIFIED",
         destination_item_id=str(item_id) if item_id else None,
         destination_sku_mapping=mapping or None,
     )
@@ -930,6 +964,7 @@ def _prepare_destination(
             draft=draft,
             live_item=post.get("raw"),
         )
+    timings["persistence_ms"] = round((time.perf_counter() - t_persist) * 1000, 1)
 
     warnings: list[str] = []
     status = post["status"]
@@ -955,10 +990,13 @@ def _prepare_destination(
         if isinstance(v, dict) and parse_money(v.get("special_price")) is not None
     )
 
+    dest_total = round((time.perf_counter() - t0) * 1000, 1)
     return {
         **result_base,
         "status": status,
         "creation_status": creation_status,
+        "attempt_state": "VERIFIED" if verified else "CREATED_UNVERIFIED",
+        "attempt_id": attempt["id"],
         "item_id": post.get("item_id") or item_id,
         "daraz_status": post.get("daraz_status"),
         "daraz_response": redact_create_response(resp),
@@ -982,9 +1020,99 @@ def _prepare_destination(
         "catalog_upsert": catalog_upsert,
         "timings_ms": {
             **timings,
-            "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+            "destination_total_ms": dest_total,
+            "dest_total": dest_total,
         },
     }
+
+
+def _destination_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("PRODUCT_DESTINATION_CONCURRENCY", "3") or "3"))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _prefetch_destination_context(
+    workspace_id: str, dest_ids: list[str]
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Batch workspace defaults + resolve stores + Seller SKUs once per request."""
+    repo = get_repo()
+    defaults = repo.get_product_defaults(workspace_id)
+    stores: dict[str, dict[str, Any]] = {}
+    skus_by_dest: dict[str, list[str]] = {}
+    for dest_ref in dest_ids:
+        dest = _resolve_dest(workspace_id, dest_ref)
+        if not dest:
+            continue
+        stores[dest_ref] = dest
+        dest_uuid = str(dest["id"])
+        if dest_uuid not in skus_by_dest:
+            skus_by_dest[dest_uuid] = list(
+                repo.list_destination_seller_skus(workspace_id, dest_uuid)
+            )
+    return defaults, stores, skus_by_dest
+
+
+def _refresh_destination_tokens(workspace_id: str, stores: list[dict[str, Any]]) -> None:
+    """Coordinate token refresh once per store before concurrent destinations."""
+    if not stores:
+        return
+    try:
+        from src.token_refresh import refresh_store_tokens
+
+        store_ids = [
+            str(s.get("store_id") or s.get("id"))
+            for s in stores
+            if s.get("store_id") or s.get("id")
+        ]
+        if store_ids:
+            refresh_store_tokens(
+                store_ids=store_ids,
+                within_minutes=15,
+                workspace_id=workspace_id,
+            )
+    except Exception:  # noqa: BLE001
+        # Soft — create path still surfaces token errors per destination.
+        return
+
+
+def _run_destinations_bounded(
+    jobs: list[tuple[int, Any]],
+    *,
+    worker: Any,
+    max_workers: int | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Execute destination jobs with a concurrency cap.
+
+    Returns ``{original_index: result}``. One job failure does not cancel siblings.
+    """
+    if not jobs:
+        return {}
+    workers = max(1, min(max_workers or _destination_concurrency(), len(jobs)))
+    out: dict[int, dict[str, Any]] = {}
+
+    def _safe(idx: int, payload: Any) -> tuple[int, dict[str, Any]]:
+        try:
+            return idx, worker(payload)
+        except Exception as exc:  # noqa: BLE001
+            return idx, {
+                "status": "NEEDS_ATTENTION",
+                "creation_status": "NEEDS_ATTENTION",
+                "reason": f"destination_error:{type(exc).__name__}:{exc}",
+            }
+
+    if workers == 1 or len(jobs) == 1:
+        for i, payload in jobs:
+            idx, row = _safe(i, payload)
+            out[idx] = row
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_safe, i, payload) for i, payload in jobs]
+            for fut in as_completed(futs):
+                idx, row = fut.result()
+                out[idx] = row
+    return out
 
 
 def _summarize(
@@ -1034,14 +1162,24 @@ def _summarize(
     }
 
 
-def _merge_timings(*parts: dict[str, Any] | None) -> dict[str, float]:
-    out: dict[str, float] = {}
+def _merge_timings(*parts: dict[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for part in parts:
         if not isinstance(part, dict):
             continue
         for k, v in part.items():
+            key = str(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[key] = float(v)
+                continue
+            if isinstance(v, str) and key in {
+                "catalog_strategy",
+                "price_strategy",
+            }:
+                out[key] = v
+                continue
             try:
-                out[str(k)] = float(v)
+                out[key] = float(v)
             except (TypeError, ValueError):
                 continue
     return out
@@ -1159,69 +1297,105 @@ def add_product_from_public_url(
         for k, v in (resume_by_store or {}).items()
         if k is not None and v is not None
     }
-    destinations: list[dict[str, Any]] = []
-    for dest_ref in dest_ids:
-        dest = _resolve_dest(workspace_id, dest_ref)
+    defaults, store_map, skus_by_dest = _prefetch_destination_context(
+        workspace_id, dest_ids
+    )
+    # Shared extracted payload must stay immutable across destinations.
+    source_snapshot = copy.deepcopy(extracted)
+    _refresh_destination_tokens(workspace_id, list(store_map.values()))
+    # Re-resolve after refresh so access tokens are current.
+    defaults, store_map, skus_by_dest = _prefetch_destination_context(
+        workspace_id, dest_ids
+    )
+
+    jobs: list[tuple[int, dict[str, Any]]] = []
+    placeholders: list[dict[str, Any] | None] = [None] * len(dest_ids)
+
+    for idx, dest_ref in enumerate(dest_ids):
+        dest = store_map.get(dest_ref)
         if not dest:
-            destinations.append(
-                {
-                    "store": {"store_id": dest_ref, "display_name": dest_ref},
-                    "status": "NEEDS_ATTENTION",
-                    "reason": "destination_store_not_found",
-                }
-            )
+            placeholders[idx] = {
+                "store": {"store_id": dest_ref, "display_name": dest_ref},
+                "status": "NEEDS_ATTENTION",
+                "reason": "destination_store_not_found",
+            }
             continue
+        jobs.append(
+            (
+                idx,
+                {
+                    "dest": dest,
+                    "dest_ref": dest_ref,
+                    "resume_id": resume_map.get(str(dest.get("store_id")))
+                    or resume_map.get(str(dest.get("id"))),
+                },
+            )
+        )
+
+    def _one(payload: dict[str, Any]) -> dict[str, Any]:
+        dest = payload["dest"]
+        # Per-destination deepcopy so attribute mapping never mutates shared source.
+        extracted_copy = copy.deepcopy(source_snapshot)
         try:
             if connected_product_id:
                 draft_result = build_connected_clone_draft(
                     workspace_id,
                     source_product_id=connected_product_id,
                     destination_store_id=str(dest.get("store_id") or dest["id"]),
+                    product_defaults=defaults,
+                    existing_seller_skus=skus_by_dest.get(str(dest["id"])),
+                    destination_store=dest,
                 )
                 draft = draft_result.get("draft") or {}
                 draft["source_type"] = "connected_via_public_url"
-                draft["source_url"] = extracted.get("source_url")
+                draft["source_url"] = extracted_copy.get("source_url")
             else:
                 draft_result = build_public_clone_draft_from_extracted(
                     workspace_id,
-                    extracted=extracted,
+                    extracted=extracted_copy,
                     destination_store_id=str(dest.get("store_id") or dest["id"]),
+                    product_defaults=defaults,
+                    existing_seller_skus=skus_by_dest.get(str(dest["id"])),
+                    destination_store=dest,
                 )
                 draft = draft_result.get("draft") or {}
         except (PublicDarazError, ProductFetchError, ValueError) as exc:
-            destinations.append(
-                {
-                    "store": _store_label(dest),
-                    "status": "NEEDS_ATTENTION",
-                    "reason": str(exc),
-                }
-            )
-            continue
+            return {
+                "store": _store_label(dest),
+                "status": "NEEDS_ATTENTION",
+                "reason": str(exc),
+            }
+        # Isolate draft mutations to this destination.
+        draft = copy.deepcopy(draft)
+        return _prepare_destination(
+            workspace_id,
+            draft=draft,
+            dest=dest,
+            price_override=price_override,
+            variant_price_overrides=variant_price_overrides,
+            allow_duplicates=allow_duplicates,
+            execute=will_execute,
+            confirm=True,
+            gate_on=gate_on,
+            resume_item_id=payload.get("resume_id"),
+            forced_attempt_id=forced_attempt_id,
+            forced_seller_skus=forced_seller_skus,
+        )
 
-        resume_id = resume_map.get(str(dest.get("store_id"))) or resume_map.get(
-            str(dest.get("id"))
-        )
-        destinations.append(
-            _prepare_destination(
-                workspace_id,
-                draft=draft,
-                dest=dest,
-                price_override=price_override,
-                variant_price_overrides=variant_price_overrides,
-                allow_duplicates=allow_duplicates,
-                execute=will_execute,
-                confirm=True,
-                gate_on=gate_on,
-                resume_item_id=resume_id,
-                forced_attempt_id=forced_attempt_id,
-                forced_seller_skus=forced_seller_skus,
-            )
-        )
+    parallelism = min(_destination_concurrency(), max(1, len(jobs))) if jobs else 0
+    ran = _run_destinations_bounded(jobs, worker=_one, max_workers=max(1, parallelism))
+    destinations = []
+    for idx in range(len(dest_ids)):
+        if placeholders[idx] is not None:
+            destinations.append(placeholders[idx] or {})
+        else:
+            destinations.append(ran.get(idx) or {"status": "NEEDS_ATTENTION"})
 
     summary = _summarize(destinations, gate_on=gate_on, execute=will_execute)
     if not gate_on and summary["status"] not in {"NEEDS_ATTENTION", "FAILED"}:
         summary["status"] = "BLOCKED_CREATE"
 
+    extract_timings = dict(extract_timings)
     return {
         **summary,
         "source": source_meta,
@@ -1230,6 +1404,25 @@ def add_product_from_public_url(
             extract_timings,
             {
                 "fetch_extract": fetch_ms,
+                "pdp_fetch_ms": float(extract_timings.get("pdp_fetch_ms") or fetch_ms),
+                "structured_parse_ms": float(
+                    extract_timings.get("structured_parse_ms")
+                    or extract_timings.get("parse_ms")
+                    or 0
+                ),
+                "catalog_ms": float(extract_timings.get("catalog_ms") or 0),
+                "price_resolution_ms": float(
+                    extract_timings.get("price_resolution_ms") or 0
+                ),
+                "source_total_ms": float(
+                    extract_timings.get("source_total_ms")
+                    or extract_timings.get("fetch_extract")
+                    or fetch_ms
+                ),
+                "catalog_strategy": extract_timings.get("catalog_strategy"),
+                "price_strategy": extract_timings.get("price_strategy"),
+                "destination_parallelism": parallelism if jobs else 0,
+                "total_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "total": round((time.perf_counter() - t0) * 1000, 1),
             },
         ),
@@ -1314,63 +1507,86 @@ def add_product_from_connected(
         for k, v in (resume_by_store or {}).items()
         if k is not None and v is not None
     }
-    destinations: list[dict[str, Any]] = []
-    for dest_ref in dest_ids:
-        dest = _resolve_dest(workspace_id, dest_ref)
+    defaults, store_map, skus_by_dest = _prefetch_destination_context(
+        workspace_id, dest_ids
+    )
+    _refresh_destination_tokens(workspace_id, list(store_map.values()))
+    defaults, store_map, skus_by_dest = _prefetch_destination_context(
+        workspace_id, dest_ids
+    )
+
+    jobs: list[tuple[int, dict[str, Any]]] = []
+    placeholders: list[dict[str, Any] | None] = [None] * len(dest_ids)
+    source_store_uuid = str(product["store_id"])
+
+    for idx, dest_ref in enumerate(dest_ids):
+        dest = store_map.get(dest_ref)
         if not dest:
-            destinations.append(
-                {
-                    "store": {"store_id": dest_ref, "display_name": dest_ref},
-                    "status": "NEEDS_ATTENTION",
-                    "reason": "destination_store_not_found",
-                }
-            )
+            placeholders[idx] = {
+                "store": {"store_id": dest_ref, "display_name": dest_ref},
+                "status": "NEEDS_ATTENTION",
+                "reason": "destination_store_not_found",
+            }
             continue
-        if str(dest["id"]) == str(product["store_id"]):
-            destinations.append(
-                {
-                    "store": _store_label(dest),
-                    "status": "NEEDS_ATTENTION",
-                    "reason": "destination_must_differ_from_source",
-                }
-            )
+        if str(dest["id"]) == source_store_uuid:
+            placeholders[idx] = {
+                "store": _store_label(dest),
+                "status": "NEEDS_ATTENTION",
+                "reason": "destination_must_differ_from_source",
+            }
             continue
+        jobs.append(
+            (
+                idx,
+                {
+                    "dest": dest,
+                    "resume_id": resume_map.get(str(dest.get("store_id")))
+                    or resume_map.get(str(dest.get("id"))),
+                },
+            )
+        )
+
+    def _one(payload: dict[str, Any]) -> dict[str, Any]:
+        dest = payload["dest"]
         try:
             draft_result = build_connected_clone_draft(
                 workspace_id,
                 source_product_id=product_id,
                 destination_store_id=str(dest.get("store_id") or dest["id"]),
+                product_defaults=defaults,
+                existing_seller_skus=skus_by_dest.get(str(dest["id"])),
+                destination_store=dest,
             )
-            draft = draft_result.get("draft") or {}
+            draft = copy.deepcopy(draft_result.get("draft") or {})
         except ValueError as exc:
-            destinations.append(
-                {
-                    "store": _store_label(dest),
-                    "status": "NEEDS_ATTENTION",
-                    "reason": str(exc),
-                }
-            )
-            continue
+            return {
+                "store": _store_label(dest),
+                "status": "NEEDS_ATTENTION",
+                "reason": str(exc),
+            }
+        return _prepare_destination(
+            workspace_id,
+            draft=draft,
+            dest=dest,
+            price_override=price_override,
+            variant_price_overrides=variant_price_overrides,
+            allow_duplicates=allow_duplicates,
+            execute=will_execute,
+            confirm=True,
+            gate_on=gate_on,
+            resume_item_id=payload.get("resume_id"),
+            forced_attempt_id=forced_attempt_id,
+            forced_seller_skus=forced_seller_skus,
+        )
 
-        resume_id = resume_map.get(str(dest.get("store_id"))) or resume_map.get(
-            str(dest.get("id"))
-        )
-        destinations.append(
-            _prepare_destination(
-                workspace_id,
-                draft=draft,
-                dest=dest,
-                price_override=price_override,
-                variant_price_overrides=variant_price_overrides,
-                allow_duplicates=allow_duplicates,
-                execute=will_execute,
-                confirm=True,
-                gate_on=gate_on,
-                resume_item_id=resume_id,
-                forced_attempt_id=forced_attempt_id,
-                forced_seller_skus=forced_seller_skus,
-            )
-        )
+    parallelism = min(_destination_concurrency(), max(1, len(jobs))) if jobs else 0
+    ran = _run_destinations_bounded(jobs, worker=_one, max_workers=max(1, parallelism))
+    destinations: list[dict[str, Any]] = []
+    for idx in range(len(dest_ids)):
+        if placeholders[idx] is not None:
+            destinations.append(placeholders[idx] or {})
+        else:
+            destinations.append(ran.get(idx) or {"status": "NEEDS_ATTENTION"})
 
     summary = _summarize(destinations, gate_on=gate_on, execute=will_execute)
     if not gate_on and summary["status"] not in {"NEEDS_ATTENTION", "FAILED"}:
@@ -1382,6 +1598,8 @@ def add_product_from_connected(
         "destinations": destinations,
         "timings_ms": {
             **(fetched.get("timings_ms") or {}),
+            "destination_parallelism": parallelism,
+            "total_ms": round((time.perf_counter() - t0) * 1000, 1),
             "total": round((time.perf_counter() - t0) * 1000, 1),
         },
     }

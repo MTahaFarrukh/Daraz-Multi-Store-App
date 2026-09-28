@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Literal
 
 from src.brand_resolve import resolve_brand_for_category
@@ -54,6 +55,9 @@ def build_connected_clone_draft(
     destination_store_id: str,
     category_attributes_payload: dict[str, Any] | None = None,
     brand_query_fn=None,
+    product_defaults: dict[str, Any] | None = None,
+    existing_seller_skus: list[str] | None = None,
+    destination_store: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a ProductCloneDraft for connected_store → connected_store.
 
@@ -69,16 +73,22 @@ def build_connected_clone_draft(
     if not source_store:
         raise ValueError("Source store not found in this workspace")
 
-    dest = repo.get_store(workspace_id, destination_store_id) or repo.get_store_by_uuid(
-        workspace_id, destination_store_id
-    )
+    dest = destination_store
+    if dest is None:
+        dest = repo.get_store(workspace_id, destination_store_id) or repo.get_store_by_uuid(
+            workspace_id, destination_store_id
+        )
     if not dest:
         raise ValueError("Destination store not found in this workspace")
 
     if str(dest["id"]) == str(product["store_id"]):
         raise ValueError("Destination store must differ from source store")
 
-    defaults = repo.get_product_defaults(workspace_id)
+    defaults = (
+        product_defaults
+        if product_defaults is not None
+        else repo.get_product_defaults(workspace_id)
+    )
     prefix = defaults.get("sku_prefix") or DEFAULT_SKU_PREFIX
     configured_qty = defaults.get("default_initial_quantity")
     initial_qty = 1 if configured_qty is None else int(configured_qty)
@@ -86,7 +96,12 @@ def build_connected_clone_draft(
         initial_qty = 0
 
     variants_src = repo.list_daraz_product_variants(workspace_id, source_product_id)
-    existing_skus = repo.list_destination_seller_skus(workspace_id, str(dest["id"]))
+    if existing_seller_skus is not None:
+        existing_skus = list(existing_seller_skus)
+    else:
+        existing_skus = list(
+            repo.list_destination_seller_skus(workspace_id, str(dest["id"]))
+        )
     allocated: list[str] = list(existing_skus)
 
     warnings: list[str] = []
@@ -95,7 +110,7 @@ def build_connected_clone_draft(
 
     title = product.get("title_en") or product.get("title") or "PRODUCT"
     for idx, v in enumerate(variants_src):
-        sale_props = v.get("sale_props_json") or {}
+        sale_props = copy.deepcopy(v.get("sale_props_json") or {})
         if not isinstance(sale_props, dict):
             sale_props = {}
         sku = generate_seller_sku(
@@ -146,7 +161,7 @@ def build_connected_clone_draft(
                         "package_height",
                     )
                 },
-                "images": v.get("images_json") or [],
+                "images": copy.deepcopy(v.get("images_json") or []),
             }
         )
 
@@ -285,6 +300,7 @@ def build_connected_clone_draft(
             }
             for d in duplicates[:8]
         ],
+        "duplicate_check_done": True,
         "validation": {
             "missing_mandatory": list(errors),
             "unsupported": not_copied,

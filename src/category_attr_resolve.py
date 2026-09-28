@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+import threading
 import time
 from typing import Any
 
@@ -23,6 +24,7 @@ from src.description_enhance import sanitize_description_html
 # Short-lived cache: marketplace/category_id → (ts, raw attributes payload)
 _CATEGORY_ATTR_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CATEGORY_ATTR_TTL_S = 60 * 60
+_CATEGORY_ATTR_LOCK = threading.Lock()
 
 # Product-level attribute aliases → draft lookup keys
 _NORMAL_SOURCE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -38,7 +40,8 @@ _NORMAL_SOURCE_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def clear_category_attr_cache_for_tests() -> None:
-    _CATEGORY_ATTR_CACHE.clear()
+    with _CATEGORY_ATTR_LOCK:
+        _CATEGORY_ATTR_CACHE.clear()
 
 
 def get_cached_category_attributes(
@@ -48,23 +51,34 @@ def get_cached_category_attributes(
     marketplace: str | None = None,
 ) -> dict[str, Any]:
     """Fetch category attributes with an in-process TTL cache keyed by marketplace/category."""
+    import copy
+
     mp = (marketplace or "pk").strip().lower() or "pk"
     key = f"{mp}/{category_id}" if category_id is not None else ""
     now = time.time()
-    if key and key in _CATEGORY_ATTR_CACHE:
-        ts, payload = _CATEGORY_ATTR_CACHE[key]
-        if now - ts < _CATEGORY_ATTR_TTL_S:
-            return payload
+    with _CATEGORY_ATTR_LOCK:
+        if key and key in _CATEGORY_ATTR_CACHE:
+            ts, payload = _CATEGORY_ATTR_CACHE[key]
+            if now - ts < _CATEGORY_ATTR_TTL_S:
+                out = copy.deepcopy(payload)
+                meta = out.setdefault("_cache_meta", {})
+                if isinstance(meta, dict):
+                    meta["cache_hit"] = True
+                    meta["cache_key"] = key
+                return out
     t0 = time.perf_counter()
     payload = fetcher(category_id)
     fetch_ms = round((time.perf_counter() - t0) * 1000, 1)
     if key and isinstance(payload, dict):
-        _CATEGORY_ATTR_CACHE[key] = (now, payload)
-        payload = dict(payload)
+        stored = copy.deepcopy(payload)
+        with _CATEGORY_ATTR_LOCK:
+            _CATEGORY_ATTR_CACHE[key] = (now, stored)
+        payload = copy.deepcopy(stored)
         payload.setdefault("_cache_meta", {})
         if isinstance(payload["_cache_meta"], dict):
             payload["_cache_meta"]["category_attributes_ms"] = fetch_ms
             payload["_cache_meta"]["cache_key"] = key
+            payload["_cache_meta"]["cache_hit"] = False
     return payload
 
 

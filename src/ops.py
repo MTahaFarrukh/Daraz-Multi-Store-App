@@ -51,6 +51,15 @@ def _print_fetch_workers() -> int:
         return 8
 
 
+def _print_store_concurrency() -> int:
+    """Bounded parallel stores (conservative 2–3)."""
+    raw = get_env("PRINT_STORE_CONCURRENCY", "2")
+    try:
+        return max(1, min(int(raw), 3))
+    except ValueError:
+        return 2
+
+
 def _env_flag(name: str, default: str) -> bool:
     return get_env(name, default).lower() not in {"0", "false", "no"}
 
@@ -141,15 +150,27 @@ def _fetch_label_document(
     order_id: str,
     item_ids: list[str],
     package_id: str | None = None,
+    skip_print_awb: bool = False,
+    print_awb_skip_reason: str | None = None,
 ) -> tuple[LabelDocument, str, dict[str, Any]]:
-    """Prefer Daraz native PDF (PrintAWB) when package_id is known; else GetDocument."""
+    """Prefer Daraz native PDF (PrintAWB) when package_id is known; else GetDocument.
+
+    When ``skip_print_awb`` is True (PrintAWB already failed this job for the
+    target), go straight to GetDocument with an explicit reason — do not repeat
+    the identical PrintAWB call.
+    """
     meta: dict[str, Any] = {
         "package_id": package_id,
         "print_awb_attempted": False,
         "print_awb_error": None,
+        "fallback_reason": None,
     }
 
-    if package_id:
+    if skip_print_awb:
+        meta["print_awb_attempted"] = True
+        meta["print_awb_error"] = print_awb_skip_reason or "print_awb_already_failed"
+        meta["fallback_reason"] = "skip_repeat_print_awb"
+    elif package_id:
         meta["print_awb_attempted"] = True
         try:
             doc_resp = client.get_package_shipping_label(package_id, doc_type="PDF")
@@ -169,6 +190,7 @@ def _fetch_label_document(
                     pdf_path.write_bytes(label.document_bytes)
                 return label, "print_awb_pdf", meta
             meta["print_awb_error"] = "PrintAWB returned non-PDF content"
+            meta["fallback_reason"] = "print_awb_not_pdf"
         except DarazApiError as exc:
             if exc.code == "InsufficientPermission":
                 meta["print_awb_error"] = (
@@ -177,8 +199,10 @@ def _fetch_label_document(
                 )
             else:
                 meta["print_awb_error"] = f"[{exc.code or '?'}] {exc}"
+            meta["fallback_reason"] = f"print_awb_error:{exc.code or '?'}"
     else:
         meta["print_awb_error"] = "no package_id on order items"
+        meta["fallback_reason"] = "no_package_id"
 
     doc_resp = client.get_shipping_label(item_ids)
     document = (doc_resp.get("data") or {}).get("document") or {}
@@ -192,6 +216,8 @@ def _fetch_label_document(
         order_item_ids=item_ids,
     )
     fetch_source = "get_document_pdf" if label.is_pdf() else "get_document_html"
+    if not meta.get("fallback_reason"):
+        meta["fallback_reason"] = "get_document"
     return label, fetch_source, meta
 
 
@@ -646,14 +672,15 @@ def print_labels_for_orders(
     successful PDF merge for SUCCESS outcomes.
     """
     import time
+    import threading
 
     from src.db.repo import get_repo
-    from src.print_hydrate import hydrate_missing_order_items
     from src.print_outcomes import (
         ALREADY_PRINTED,
         DARAZ_ERROR,
         DOCUMENT_FAILED,
         DOCUMENT_MAPPING_FAILED,
+        HISTORY_PERSIST_FAILED,
         MERGE_FAILED,
         NOT_ELIGIBLE,
         NOT_FOUND,
@@ -664,19 +691,23 @@ def print_labels_for_orders(
         make_outcome,
         summarize_outcomes,
     )
+    from src.print_prepare import prepare_print_targets
     from src.print_safety import (
         order_is_eligible,
         record_label_prints,
         validate_print_targets,
     )
 
-    def progress(msg: str) -> None:
+    def progress(msg: str, *, stage: str | None = None, force: bool = False) -> None:
         if on_progress:
-            on_progress(msg)
+            try:
+                on_progress(msg, stage=stage, force=force)  # type: ignore[call-arg]
+            except TypeError:
+                on_progress(msg)
 
     t_total = time.perf_counter()
     # Update UI immediately — hydrate/Daraz work must not leave "Starting print job…"
-    progress("Gathering labels…")
+    progress("Preparing…", stage="Preparing", force=True)
     repo = get_repo()
 
     # Preserve selection order; drop duplicates
@@ -689,14 +720,33 @@ def print_labels_for_orders(
         seen.add(oid)
         selected.append(oid)
 
-    hydrate = hydrate_missing_order_items(workspace_id, selected)
+    # Hydrate once → classify from prepared data (no second hydrate)
+    prepared = prepare_print_targets(workspace_id, selected, hydrate=True)
+    prepare_ms = int((prepared.get("timings_ms") or {}).get("prepare_ms") or 0)
+    hydrate = prepared.get("hydrate") or {}
     hydrate_ms = int(hydrate.get("hydrate_ms") or 0)
 
     t_val = time.perf_counter()
-    validated = validate_print_targets(workspace_id, selected)
+    validated = validate_print_targets(
+        workspace_id, selected, prepared=prepared
+    )
     validation_ms = int((time.perf_counter() - t_val) * 1000)
 
+    progress(
+        f"Fetching labels… {len(selected)} order(s)",
+        stage="Fetching labels",
+        force=True,
+    )
+
+    # Index prepared targets for outcome field reuse (avoid re-fetch)
+    prepared_by_id = {
+        str(t["order_id"]): t for t in (prepared.get("targets") or [])
+    }
+
     store_cache: dict[str, dict[str, Any] | None] = {}
+    for t in prepared.get("targets") or []:
+        if t.get("store") and t.get("store_id"):
+            store_cache[str(t["store_id"])] = t["store"]
 
     def _store_meta(store_uuid: str | None) -> dict[str, Any]:
         if not store_uuid:
@@ -721,9 +771,11 @@ def print_labels_for_orders(
         }
 
     def _order_fields(oid: str, entry: dict[str, Any] | None = None) -> dict[str, Any]:
-        order = repo.get_order_by_id(workspace_id, oid)
+        pref = prepared_by_id.get(oid) or {}
+        order = pref.get("order")
         store_uuid = str(
             (entry or {}).get("store_id")
+            or pref.get("store_id")
             or (order or {}).get("store_id")
             or ""
         ) or None
@@ -731,14 +783,19 @@ def print_labels_for_orders(
         return {
             "daraz_order_id": str(
                 (entry or {}).get("daraz_order_id")
+                or pref.get("daraz_order_id")
                 or (order or {}).get("daraz_order_id")
                 or ""
             )
             or None,
             "order_number": str((order or {}).get("order_number") or "") or None,
             **meta,
-            "package_id": (entry or {}).get("package_id"),
-            "order_item_ids": list((entry or {}).get("order_item_ids") or []),
+            "package_id": (entry or {}).get("package_id") or pref.get("package_id"),
+            "order_item_ids": list(
+                (entry or {}).get("order_item_ids")
+                or pref.get("order_item_ids")
+                or []
+            ),
         }
 
     outcomes_by_id: dict[str, dict[str, Any]] = {}
@@ -829,11 +886,20 @@ def print_labels_for_orders(
     use_bulk_first = _prefer_bulk_getdocument()  # False when native preferred
     use_phase2_bulk = use_bulk_first
 
+    result_lock = threading.Lock()
+    printawb_already_failed: set[str] = set()
+    # Bound for shared nested helpers (_fetch_print_awb_only / _run_phase2_bulk)
+    # when store_workers == 1 (serial store path).
+    client: Any = None
+    sid: str = ""
+    sname: str = ""
+
     def _append_success(
         t: dict[str, Any],
         item_ids: list[str],
         package_id: str | None,
         *,
+        store_uuid: str,
         label: LabelDocument,
         fetch_source: str,
         fetch_meta: dict[str, Any],
@@ -841,33 +907,34 @@ def print_labels_for_orders(
         expected_pages: int = 1,
     ) -> None:
         nonlocal native_pdf_docs
-        if label_index is None:
-            label_index = len(raw_labels)
-            raw_labels.append(label)
-            label_fetch_sources.append(fetch_source)
-            label_fetch_meta.append(fetch_meta)
-            if label.is_pdf() and fetch_source in {
-                "print_awb_pdf",
-                "get_document_pdf",
-                "get_document_bulk",
-            }:
-                native_pdf_docs += 1
-        oid = str(t["order_id"])
-        pending_successes.append(
-            {
-                "order_id": oid,
-                "store_id": store_uuid,
-                "daraz_order_id": str(t["daraz_order_id"]),
-                "order_item_ids": item_ids,
-                "package_id": package_id,
-                "is_reprint": oid in reprint_ids,
-                "fetch_source": fetch_source,
-                "entry": t,
-                "fetch_meta": fetch_meta,
-                "label_index": label_index,
-                "expected_pages": expected_pages,
-            }
-        )
+        with result_lock:
+            if label_index is None:
+                label_index = len(raw_labels)
+                raw_labels.append(label)
+                label_fetch_sources.append(fetch_source)
+                label_fetch_meta.append(fetch_meta)
+                if label.is_pdf() and fetch_source in {
+                    "print_awb_pdf",
+                    "get_document_pdf",
+                    "get_document_bulk",
+                }:
+                    native_pdf_docs += 1
+            oid = str(t["order_id"])
+            pending_successes.append(
+                {
+                    "order_id": oid,
+                    "store_id": store_uuid,
+                    "daraz_order_id": str(t["daraz_order_id"]),
+                    "order_item_ids": item_ids,
+                    "package_id": package_id,
+                    "is_reprint": oid in reprint_ids,
+                    "fetch_source": fetch_source,
+                    "entry": t,
+                    "fetch_meta": fetch_meta,
+                    "label_index": label_index,
+                    "expected_pages": expected_pages,
+                }
+            )
 
     def _fetch_print_awb_only(
         *,
@@ -974,6 +1041,7 @@ def print_labels_for_orders(
                             t,
                             item_ids,
                             package_id,
+                            store_uuid=store_uuid,
                             label=bulk_label,
                             fetch_source=fetch_source,
                             fetch_meta={
@@ -1074,6 +1142,8 @@ def print_labels_for_orders(
                     order_id=str(t["daraz_order_id"]),
                     item_ids=item_ids,
                     package_id=package_id,
+                    skip_print_awb=str(t["order_id"]) in printawb_already_failed,
+                    print_awb_skip_reason="print_awb_already_failed_this_job",
                 ): (t, item_ids, package_id)
                 for t, item_ids, package_id in fallback_work
             }
@@ -1128,6 +1198,7 @@ def print_labels_for_orders(
                 t,
                 item_ids,
                 package_id or fetch_meta.get("package_id"),
+                store_uuid=store_uuid,
                 label=label,
                 fetch_source=fetch_source,
                 fetch_meta=fetch_meta,
@@ -1136,57 +1207,75 @@ def print_labels_for_orders(
 
     t_fetch = time.perf_counter()
     if fetch_targets:
-        progress(f"Gathering labels… {len(fetch_targets)} order(s)")
+        progress(
+            f"Fetching labels… {len(fetch_targets)} order(s)",
+            stage="Fetching labels",
+        )
 
-    for store_uuid, store_targets in by_store.items():
-        store = repo.get_store_by_uuid(workspace_id, store_uuid)
-        store_cache[store_uuid] = store
+    store_items = list(by_store.items())
+    # Bounded store concurrency: process stores via ThreadPool when >1 store.
+    # Each worker binds its own client/sid/sname into a local namespace used by
+    # a store-scoped copy of fetch helpers (token isolation).
+    store_workers = min(_print_store_concurrency(), max(1, len(store_items) or 1))
+
+    def _run_store_pipeline(store_uuid: str, store_targets: list[dict[str, Any]]) -> None:
+        nonlocal printawb_calls, getdocument_calls, bulk_calls
+        nonlocal printawb_ms, bulk_getdocument_ms, fallback_fetch_ms
+
+        store = store_cache.get(store_uuid) or repo.get_store_by_uuid(
+            workspace_id, store_uuid
+        )
+        with result_lock:
+            store_cache[store_uuid] = store
         if not store:
-            for t in store_targets:
-                oid = str(t["order_id"])
-                outcomes_by_id[oid] = make_outcome(
-                    order_id=oid,
-                    state=STORE_NOT_FOUND,
-                    reason="store_not_found",
-                    **_order_fields(oid, t),
-                )
-            continue
-        sid = str(store.get("store_id", "store"))
-        sname = store_display_name(store)
+            with result_lock:
+                for t in store_targets:
+                    oid = str(t["order_id"])
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=STORE_NOT_FOUND,
+                        reason="store_not_found",
+                        **_order_fields(oid, t),
+                    )
+            return
+
+        local_sid = str(store.get("store_id", "store"))
+        local_sname = store_display_name(store)
         try:
-            client = client_for_store(store)
+            local_client = client_for_store(store)
         except Exception as exc:  # noqa: BLE001
-            for t in store_targets:
-                oid = str(t["order_id"])
-                outcomes_by_id[oid] = make_outcome(
-                    order_id=oid,
-                    state=DARAZ_ERROR,
-                    reason=str(exc),
-                    daraz_message=str(exc),
-                    **_order_fields(oid, t),
-                )
-            continue
+            with result_lock:
+                for t in store_targets:
+                    oid = str(t["order_id"])
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=DARAZ_ERROR,
+                        reason=str(exc),
+                        daraz_message=str(exc),
+                        **_order_fields(oid, t),
+                    )
+            return
 
         work: list[tuple[dict[str, Any], list[str], str | None]] = []
         for t in store_targets:
             oid = str(t["order_id"])
             item_ids = list(t.get("order_item_ids") or [])
             if not item_ids:
-                outcomes_by_id[oid] = make_outcome(
-                    order_id=oid,
-                    state=PACKAGE_RESOLUTION_FAILED,
-                    reason="no_order_item_ids",
-                    **_order_fields(oid, t),
-                )
+                with result_lock:
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=PACKAGE_RESOLUTION_FAILED,
+                        reason="no_order_item_ids",
+                        **_order_fields(oid, t),
+                    )
                 continue
             work.append((t, item_ids, t.get("package_id")))
-
         if not work:
-            continue
+            return
 
         diag: dict[str, Any] = {
             "store_id": store_uuid,
-            "store_slug": sid,
+            "store_slug": local_sid,
             "target_count": len(work),
             "bulk_attempted": False,
             "bulk_success": False,
@@ -1194,18 +1283,40 @@ def print_labels_for_orders(
             "pages": None,
             "fallback_count": 0,
             "fallback_reason": None,
+            "store_concurrency": store_workers,
         }
-
         remaining = list(work)
 
-        # Phase 1 — PrintAWB for package_id targets (native PDF preferred)
+        def _local_fetch_awb(
+            *, order_id: str, item_ids: list[str], package_id: str
+        ) -> tuple[LabelDocument, str, dict[str, Any]]:
+            meta: dict[str, Any] = {
+                "package_id": package_id,
+                "print_awb_attempted": True,
+                "print_awb_error": None,
+            }
+            doc_resp = local_client.get_package_shipping_label(
+                package_id, doc_type="PDF"
+            )
+            label = document_from_print_awb_response(
+                doc_resp,
+                store_id=local_sid,
+                store_name=local_sname,
+                order_id=order_id,
+                order_item_ids=item_ids,
+                download_url=local_client.download_binary_url,
+            )
+            if label.is_pdf():
+                return label, "print_awb_pdf", meta
+            meta["print_awb_error"] = "PrintAWB returned non-PDF content"
+            raise DarazApiError("PrintAWB returned non-PDF content", code="NOT_PDF")
+
         if use_native:
             with_pkg = [(t, ids, pkg) for t, ids, pkg in remaining if pkg]
             without_pkg = [(t, ids, pkg) for t, ids, pkg in remaining if not pkg]
             phase1_failed: list[tuple[dict[str, Any], list[str], str | None]] = []
-
             if with_pkg:
-                progress(f"Gathering labels… PrintAWB for {len(with_pkg)} order(s)")
+                progress(f"Fetching labels… PrintAWB for {len(with_pkg)} order(s)")
                 workers = min(_print_fetch_workers(), len(with_pkg))
                 t_awb = time.perf_counter()
                 results: dict[
@@ -1214,7 +1325,7 @@ def print_labels_for_orders(
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {
                         pool.submit(
-                            _fetch_print_awb_only,
+                            _local_fetch_awb,
                             order_id=str(t["daraz_order_id"]),
                             item_ids=item_ids,
                             package_id=str(package_id),
@@ -1226,25 +1337,25 @@ def print_labels_for_orders(
                         t, item_ids, package_id = futures[future]
                         oid = str(t["order_id"])
                         done += 1
-                        printawb_calls += 1
+                        with result_lock:
+                            printawb_calls += 1
                         if done == 1 or done == len(with_pkg) or done % 5 == 0:
                             progress(
-                                f"Gathering labels… PrintAWB {done}/{len(with_pkg)}"
+                                f"Fetching labels… PrintAWB {done}/{len(with_pkg)}"
                             )
                         try:
                             results[oid] = future.result()
                         except BaseException as exc:  # noqa: BLE001
                             results[oid] = exc
-                printawb_ms += int((time.perf_counter() - t_awb) * 1000)
-
+                with result_lock:
+                    printawb_ms += int((time.perf_counter() - t_awb) * 1000)
                 for t, item_ids, package_id in with_pkg:
                     oid = str(t["order_id"])
                     result = results.get(oid)
-                    if isinstance(result, BaseException):
+                    if isinstance(result, BaseException) or result is None:
                         phase1_failed.append((t, item_ids, package_id))
-                        continue
-                    if result is None:
-                        phase1_failed.append((t, item_ids, package_id))
+                        with result_lock:
+                            printawb_already_failed.add(oid)
                         continue
                     label, fetch_source, fetch_meta = result
                     pages_n = _label_pdf_page_count(label) if label.is_pdf() else 1
@@ -1252,6 +1363,7 @@ def print_labels_for_orders(
                         t,
                         item_ids,
                         package_id,
+                        store_uuid=store_uuid,
                         label=label,
                         fetch_source=fetch_source,
                         fetch_meta=fetch_meta,
@@ -1261,21 +1373,129 @@ def print_labels_for_orders(
             else:
                 remaining = without_pkg
 
-        # Phase 2 — bulk GetDocument for remaining (native path or bulk-first)
         fallback_work = remaining
-        if remaining and use_phase2_bulk:
+        if remaining and use_phase2_bulk and store_workers <= 1:
+            # Bind outer closure vars used by shared _run_phase2_bulk
+            nonlocal client, sid, sname
+            client = local_client
+            sid = local_sid
+            sname = local_sname
             max_depth = max(1, int(ceil(log2(max(len(remaining), 2)))))
             fallback_work = _run_phase2_bulk(
                 remaining, depth=0, diag=diag, max_depth=max_depth
             )
+        elif remaining and use_phase2_bulk and store_workers > 1:
+            diag["fallback_reason"] = "store_concurrency_skip_bulk"
+            fallback_work = remaining
 
         diag["fallback_count"] = len(fallback_work)
         if fallback_work and not diag.get("fallback_reason"):
             diag["fallback_reason"] = "per_order"
-        document_diagnostics.append(diag)
 
-        # Phase 3 prep — per-order PrintAWB/GetDocument for leftovers
-        _run_per_order_fallback(fallback_work)
+        with result_lock:
+            document_diagnostics.append(diag)
+
+        # Phase 3 — per-order fetch with skip-repeat-PrintAWB
+        if not fallback_work:
+            return
+        labels_by_order: dict[str, tuple[LabelDocument, str, dict[str, Any]]] = {}
+        workers = min(_print_fetch_workers(), len(fallback_work))
+        progress(f"Fetching labels… {len(fallback_work)} order(s)")
+        t_fb = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _fetch_label_document,
+                    local_client,
+                    store_id=local_sid,
+                    store_name=local_sname,
+                    order_id=str(t["daraz_order_id"]),
+                    item_ids=item_ids,
+                    package_id=package_id,
+                    skip_print_awb=str(t["order_id"]) in printawb_already_failed,
+                    print_awb_skip_reason="print_awb_already_failed_this_job",
+                ): (t, item_ids, package_id)
+                for t, item_ids, package_id in fallback_work
+            }
+            done = 0
+            for future in as_completed(futures):
+                t, _item_ids, _package_id = futures[future]
+                oid = str(t["order_id"])
+                done += 1
+                if done == 1 or done == len(fallback_work) or done % 5 == 0:
+                    progress(f"Fetching labels… {done}/{len(fallback_work)}")
+                try:
+                    labels_by_order[oid] = future.result()
+                except DarazApiError as exc:
+                    with result_lock:
+                        outcomes_by_id[oid] = make_outcome(
+                            order_id=oid,
+                            state=DARAZ_ERROR,
+                            reason=str(exc),
+                            daraz_code=exc.code,
+                            daraz_message=str(exc),
+                            is_reprint=oid in reprint_ids,
+                            **_order_fields(oid, t),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    with result_lock:
+                        outcomes_by_id[oid] = make_outcome(
+                            order_id=oid,
+                            state=DOCUMENT_FAILED,
+                            reason=str(exc),
+                            is_reprint=oid in reprint_ids,
+                            **_order_fields(oid, t),
+                        )
+        with result_lock:
+            fallback_fetch_ms += int((time.perf_counter() - t_fb) * 1000)
+
+        for t, item_ids, package_id in fallback_work:
+            oid = str(t["order_id"])
+            if oid not in labels_by_order:
+                with result_lock:
+                    if oid not in outcomes_by_id:
+                        outcomes_by_id[oid] = make_outcome(
+                            order_id=oid,
+                            state=DOCUMENT_FAILED,
+                            reason="label_fetch_missing",
+                            is_reprint=oid in reprint_ids,
+                            **_order_fields(oid, t),
+                        )
+                continue
+            label, fetch_source, fetch_meta = labels_by_order[oid]
+            with result_lock:
+                if fetch_meta.get("print_awb_attempted") and not fetch_meta.get(
+                    "fallback_reason"
+                ) == "skip_repeat_print_awb":
+                    if fetch_source == "print_awb_pdf":
+                        printawb_calls += 1
+                if fetch_source != "print_awb_pdf":
+                    getdocument_calls += 1
+            pages_n = _label_pdf_page_count(label) if label.is_pdf() else 1
+            _append_success(
+                t,
+                item_ids,
+                package_id or fetch_meta.get("package_id"),
+                store_uuid=store_uuid,
+                label=label,
+                fetch_source=fetch_source,
+                fetch_meta=fetch_meta,
+                expected_pages=max(1, pages_n) if label.is_pdf() else 1,
+            )
+
+    if store_items:
+        if store_workers <= 1 or len(store_items) == 1:
+            for store_uuid, store_targets in store_items:
+                _run_store_pipeline(store_uuid, store_targets)
+        else:
+            # Deterministic completion order: submit all, wait in store_uuid order
+            with ThreadPoolExecutor(max_workers=store_workers) as pool:
+                future_map = {
+                    su: pool.submit(_run_store_pipeline, su, tg)
+                    for su, tg in store_items
+                }
+                for su, _tg in store_items:
+                    future_map[su].result()
 
     document_fetch_ms = int((time.perf_counter() - t_fetch) * 1000)
 
@@ -1296,10 +1516,13 @@ def print_labels_for_orders(
             ]
             html_count = len(html_indices)
             if html_count == 0:
-                progress("Combining labels…")
+                progress("Merging PDF…", stage="Merging PDF")
                 pdf_labels = list(raw_labels)
             else:
-                progress(f"Converting {html_count} HTML label(s) to PDF…")
+                progress(
+                    f"Processing documents… converting {html_count} HTML label(s)",
+                    stage="Processing documents",
+                )
                 t_html = time.perf_counter()
                 converted_by_index: dict[int, LabelDocument] = {}
                 with html_converter_session() as converter:
@@ -1313,7 +1536,7 @@ def print_labels_for_orders(
                             html_docs_converted += 1
                 html_conversion_ms = int((time.perf_counter() - t_html) * 1000)
                 pdf_labels = [converted_by_index[i] for i in range(len(raw_labels))]
-                progress("Combining labels…")
+                progress("Merging PDF…", stage="Merging PDF")
 
             out_pdf = output or (OUTPUT_DIR / "combined-labels.pdf")
             out_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -1358,25 +1581,47 @@ def print_labels_for_orders(
                 }
                 for s in success_batch
             ]
-            recorded = (
-                record_label_prints(workspace_id, user_id, job_id, to_record)
-                if to_record
-                else []
-            )
+            history_persist_ok = True
+            history_persist_error: str | None = None
+            if to_record:
+                progress("Saving history…", stage="Saving history", force=True)
+                try:
+                    recorded = record_label_prints(
+                        workspace_id, user_id, job_id, to_record
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    history_persist_ok = False
+                    history_persist_error = f"{type(exc).__name__}: {exc}"
+                    recorded = []
             record_ms = int((time.perf_counter() - t_rec) * 1000)
 
-            for s in success_batch:
-                oid = str(s["order_id"])
-                base = _order_fields(oid, s.get("entry"))
-                base["package_id"] = s.get("package_id")
-                base["order_item_ids"] = list(s.get("order_item_ids") or [])
-                outcomes_by_id[oid] = make_outcome(
-                    order_id=oid,
-                    state=SUCCESS,
-                    reason=None,
-                    is_reprint=bool(s.get("is_reprint")),
-                    **base,
-                )
+            if not history_persist_ok:
+                # Labels must NOT be treated as safely recorded after rollback
+                for s in success_batch:
+                    oid = str(s["order_id"])
+                    base = _order_fields(oid, s.get("entry"))
+                    base["package_id"] = s.get("package_id")
+                    base["order_item_ids"] = list(s.get("order_item_ids") or [])
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=HISTORY_PERSIST_FAILED,
+                        reason=history_persist_error or "print_history_persist_failed",
+                        is_reprint=bool(s.get("is_reprint")),
+                        **base,
+                    )
+            else:
+                for s in success_batch:
+                    oid = str(s["order_id"])
+                    base = _order_fields(oid, s.get("entry"))
+                    base["package_id"] = s.get("package_id")
+                    base["order_item_ids"] = list(s.get("order_item_ids") or [])
+                    outcomes_by_id[oid] = make_outcome(
+                        order_id=oid,
+                        state=SUCCESS,
+                        reason=None,
+                        is_reprint=bool(s.get("is_reprint")),
+                        **base,
+                    )
 
             for label, fetch_source, fetch_meta in zip(
                 raw_labels, label_fetch_sources, label_fetch_meta, strict=True
@@ -1451,21 +1696,25 @@ def print_labels_for_orders(
 
     total_ms = int((time.perf_counter() - t_total) * 1000)
     timings_ms = {
+        "prepare_ms": prepare_ms,
         "hydrate_ms": hydrate_ms,
         "validation_ms": validation_ms,
-        "document_fetch_ms": document_fetch_ms,
         "printawb_ms": printawb_ms,
-        "bulk_getdocument_ms": bulk_getdocument_ms,
+        "fallback_ms": fallback_fetch_ms,
         "fallback_fetch_ms": fallback_fetch_ms,
+        "bulk_getdocument_ms": bulk_getdocument_ms,
         "html_conversion_ms": html_conversion_ms,
         "merge_ms": merge_ms,
+        "event_persist_ms": record_ms,
         "record_ms": record_ms,
+        "document_fetch_ms": document_fetch_ms,
         "total_ms": total_ms,
         "printawb_calls": printawb_calls,
         "getdocument_calls": getdocument_calls,
         "bulk_calls": bulk_calls,
         "native_pdf_docs": native_pdf_docs,
         "html_docs_converted": html_docs_converted,
+        "store_concurrency": store_workers if store_items else 0,
     }
 
     return {
@@ -1495,7 +1744,9 @@ def print_labels_for_orders(
         "failed_count": summary["failed_count"],
         "failures": failed_outcomes,
         "failed_order_ids": summary["failed_order_ids"],
+        "retryable_order_ids": summary["retryable_order_ids"],
         "prints_recorded": len(recorded),
+        "print_history_persisted": len(recorded) > 0 or not pending_successes,
         "outcomes": outcomes,
         "summary": summary,
         "print_status": summary["print_status"],

@@ -12,7 +12,9 @@ Phase 4C live proof (PK):
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -24,6 +26,26 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_INTERVAL_S = 1.0
 DEFAULT_TIMEOUT_S = 45.0
 DEFAULT_INITIAL_WAIT_S = 0.6
+DEFAULT_IMAGE_WORKERS = 4
+
+# Process-level URL → migrated URL (no tokens). Thread-safe.
+_GLOBAL_IMAGE_CACHE: dict[str, str] = {}
+_GLOBAL_IMAGE_LOCK = threading.Lock()
+
+
+def clear_image_migrate_cache_for_tests() -> None:
+    with _GLOBAL_IMAGE_LOCK:
+        _GLOBAL_IMAGE_CACHE.clear()
+
+
+def _global_cache_get(url: str) -> str | None:
+    with _GLOBAL_IMAGE_LOCK:
+        return _GLOBAL_IMAGE_CACHE.get(url)
+
+
+def _global_cache_set(url: str, migrated: str) -> None:
+    with _GLOBAL_IMAGE_LOCK:
+        _GLOBAL_IMAGE_CACHE[url] = migrated
 
 _DARAZ_CDN_HOST_MARKERS = (
     "static-01.daraz",
@@ -131,9 +153,19 @@ class DarazImageMigrationService:
                 strategy="cache",
                 migrated_url=self._cache[url],
             )
+        cached = _global_cache_get(url)
+        if cached:
+            self._cache[url] = cached
+            return ImageMigrationResult(
+                source_url=url,
+                status="completed",
+                strategy="global_cache",
+                migrated_url=cached,
+            )
 
         if self.prefer_cdn_reuse and not force_migrate and is_daraz_product_cdn_url(url):
             self._cache[url] = url
+            _global_cache_set(url, url)
             return ImageMigrationResult(
                 source_url=url,
                 status="completed",
@@ -162,6 +194,7 @@ class DarazImageMigrationService:
             immediate = urls[0] if urls else None
         if immediate:
             self._cache[url] = immediate
+            _global_cache_set(url, immediate)
             return ImageMigrationResult(
                 source_url=url,
                 status="completed",
@@ -176,26 +209,30 @@ class DarazImageMigrationService:
         return self.resolve_one(source_url, force_migrate=True)
 
     def resolve_many(self, urls: list[str]) -> list[ImageMigrationResult]:
-        results: list[ImageMigrationResult] = []
+        """Resolve URLs with dedupe + bounded concurrency for unique sources."""
+        ordered: list[str] = []
         seen: set[str] = set()
         for url in urls:
             key = (url or "").strip()
             if not key:
                 continue
-            if key in seen:
-                if key in self._cache:
-                    results.append(
-                        ImageMigrationResult(
-                            source_url=key,
-                            status="completed",
-                            strategy="cache",
-                            migrated_url=self._cache[key],
-                        )
-                    )
-                continue
+            ordered.append(key)
             seen.add(key)
-            results.append(self.resolve_one(key))
-        return results
+
+        unique = list(dict.fromkeys(ordered))
+        resolved: dict[str, ImageMigrationResult] = {}
+        workers = max(1, min(DEFAULT_IMAGE_WORKERS, len(unique) or 1))
+        if len(unique) <= 1 or workers == 1:
+            for key in unique:
+                resolved[key] = self.resolve_one(key)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = {pool.submit(self.resolve_one, key): key for key in unique}
+                for fut in as_completed(futs):
+                    key = futs[fut]
+                    resolved[key] = fut.result()
+
+        return [resolved[key] for key in ordered if key in resolved]
 
     def migrate_many(self, urls: list[str]) -> list[ImageMigrationResult]:
         return [self.resolve_one(u, force_migrate=True) for u in urls if (u or "").strip()]
@@ -261,6 +298,7 @@ class DarazImageMigrationService:
                 if urls:
                     migrated = urls[0]
                     self._cache[source_url] = migrated
+                    _global_cache_set(source_url, migrated)
                     return ImageMigrationResult(
                         source_url=source_url,
                         status="completed",

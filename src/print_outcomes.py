@@ -14,6 +14,7 @@ DOCUMENT_MAPPING_FAILED = "DOCUMENT_MAPPING_FAILED"
 DARAZ_ERROR = "DARAZ_ERROR"
 MERGE_FAILED = "MERGE_FAILED"
 UNKNOWN_FAILURE = "UNKNOWN_FAILURE"
+HISTORY_PERSIST_FAILED = "HISTORY_PERSIST_FAILED"
 NOT_FOUND = "NOT_FOUND"
 STORE_NOT_FOUND = "STORE_NOT_FOUND"
 
@@ -61,6 +62,7 @@ def summarize_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         st = str(o.get("state") or UNKNOWN_FAILURE)
         by_state[st] = by_state.get(st, 0) + 1
     failed_ids = [str(o["order_id"]) for o in outcomes if o.get("state") != SUCCESS]
+    retryable_ids = retryable_order_ids(outcomes)
     if selected == 0:
         status = "empty"
     elif failed == 0:
@@ -77,5 +79,34 @@ def summarize_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
         "print_status": status,
         "by_state": by_state,
         "failed_order_ids": failed_ids,
+        "retryable_order_ids": retryable_ids,
         "message": f"Print completed: {success} / {selected}",
     }
+
+
+# Proven successes must never be silently re-printed by Retry Failed.
+_NON_RETRYABLE_STATES = frozenset({SUCCESS, ALREADY_PRINTED})
+
+
+def retryable_order_ids(outcomes: list[dict[str, Any]]) -> list[str]:
+    """Order IDs safe to retry: failed / unproven only (never SUCCESS)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for o in outcomes:
+        state = str(o.get("state") or UNKNOWN_FAILURE)
+        if state in _NON_RETRYABLE_STATES:
+            continue
+        oid = str(o.get("order_id") or "")
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+        out.append(oid)
+    return out
+
+
+def proven_success_order_ids(outcomes: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(o["order_id"])
+        for o in outcomes
+        if o.get("state") == SUCCESS and o.get("order_id")
+    ]

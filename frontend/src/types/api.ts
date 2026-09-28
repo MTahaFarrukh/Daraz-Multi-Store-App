@@ -230,7 +230,7 @@ export type LabelDetail = {
 export type PrintJobStatus = {
   id?: string;
   job_id?: string;
-  status: "idle" | "processing" | "done" | "error" | string;
+  status: "idle" | "processing" | "done" | "error" | "interrupted" | string;
   message?: string;
   error?: string | null;
   pages?: number;
@@ -241,6 +241,19 @@ export type PrintJobStatus = {
   started_at?: string | null;
   updated_at?: string | null;
   result?: Record<string, unknown> | null;
+  worker_id?: string | null;
+  heartbeat_at?: string | null;
+  processing_stage?: string | null;
+  interrupted_at?: string | null;
+  progress?: {
+    completed?: number;
+    total?: number;
+    failed?: number;
+  } | null;
+  retryable_order_ids?: string[];
+  failed_order_ids?: string[];
+  failed_count?: number;
+  summary?: Record<string, unknown>;
 };
 
 export type PrintJobListItem = {
@@ -426,6 +439,8 @@ export type AddProductDestinationResult = {
   };
   status: string;
   creation_status?: string | null;
+  attempt_state?: string | null;
+  attempt_id?: string | null;
   item_id?: string | null;
   reason?: string | null;
   daraz_status?: string | null;
@@ -444,7 +459,7 @@ export type AddProductDestinationResult = {
   retry_safe?: { item_id?: string; step?: string } | null;
   existing_product_id?: string | null;
   existing_daraz_item_id?: string | null;
-  timings_ms?: Record<string, number>;
+  timings_ms?: Record<string, number | string>;
 };
 
 export type AddProductResponse = {
@@ -460,5 +475,5 @@ export type AddProductResponse = {
   edit_before?: boolean;
   draft_result?: ProductCloneDraftResponse & Record<string, unknown>;
   destination_store_ids?: string[];
-  timings_ms?: Record<string, number>;
+  timings_ms?: Record<string, number | string>;
 };

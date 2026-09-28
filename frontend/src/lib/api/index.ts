@@ -287,6 +287,23 @@ export const Api = {
       body: JSON.stringify(body),
     }),
 
+  getProductCreateAttempt: (attemptId: string) =>
+    api<Record<string, unknown>>(
+      `/api/product-create-attempts/${encodeURIComponent(attemptId)}`
+    ),
+
+  retryProductCreateAttempt: (attemptId: string, execute = true) =>
+    api<Record<string, unknown>>(
+      `/api/product-create-attempts/${encodeURIComponent(attemptId)}/retry?execute=${execute}`,
+      { method: "POST" }
+    ),
+
+  reconcileProductCreateAttempt: (attemptId: string) =>
+    api<Record<string, unknown>>(
+      `/api/product-create-attempts/${encodeURIComponent(attemptId)}/reconcile`,
+      { method: "POST" }
+    ),
+
   ensureProductDetail: (productId: string) =>
     api<{
       product: ProductRow;

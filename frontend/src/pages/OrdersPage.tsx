@@ -280,6 +280,20 @@ export function OrdersPage() {
         }
       });
       if (workspaceId) void refreshPrintQueries(queryClient, workspaceId).catch(() => undefined);
+      if (status.status === "interrupted") {
+        const result = (status.result || status) as Record<string, any>;
+        const retryIds: string[] =
+          result.retryable_order_ids ||
+          result.summary?.retryable_order_ids ||
+          result.failed_order_ids ||
+          [];
+        setFailedPrintIds(retryIds);
+        throw new Error(
+          status.error ||
+            status.message ||
+            "Print interrupted — recovery required. Use Retry Failed for remaining targets."
+        );
+      }
       if (status.status === "error") {
         throw new Error(status.error || status.message || "Print failed");
       }
@@ -289,7 +303,12 @@ export function OrdersPage() {
         result.message ||
         summary.message ||
         `PDF ready · ${status.pages ?? result.pages ?? "?"} page(s)`;
-      const failedIds: string[] = result.failed_order_ids || summary.failed_order_ids || [];
+      const failedIds: string[] =
+        result.retryable_order_ids ||
+        summary.retryable_order_ids ||
+        result.failed_order_ids ||
+        summary.failed_order_ids ||
+        [];
       const printStatus = result.print_status || summary.print_status;
       const outcomes: Array<Record<string, any>> = Array.isArray(result.outcomes)
         ? result.outcomes

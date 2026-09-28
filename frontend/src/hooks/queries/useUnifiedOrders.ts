@@ -133,18 +133,26 @@ export function refreshPrintQueries(qc: ReturnType<typeof useQueryClient>, works
   ]);
 }
 
-/** Poll a print job until done/error or timeout. */
+/** Poll a print job until done/error/interrupted or timeout. */
 export async function pollPrintJob(
   jobId: string,
-  onProgress?: (message: string) => void,
+  onProgress?: (message: string, status?: Record<string, unknown>) => void,
   maxWaitMs = 25 * 60 * 1000
 ) {
   const started = Date.now();
   let intervalMs = 400;
   while (Date.now() - started < maxWaitMs) {
     const status = await Api.printStatus(jobId);
-    if (status.message) onProgress?.(status.message);
-    if (status.status === "done" || status.status === "error") {
+    const msg =
+      status.processing_stage && status.status === "processing"
+        ? `${status.processing_stage}${status.message ? ` — ${status.message}` : ""}`
+        : status.message;
+    if (msg) onProgress?.(msg, status);
+    if (
+      status.status === "done" ||
+      status.status === "error" ||
+      status.status === "interrupted"
+    ) {
       return { ...status, id: jobId };
     }
     await new Promise((r) => setTimeout(r, intervalMs));

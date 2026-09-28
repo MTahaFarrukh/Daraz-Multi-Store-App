@@ -72,18 +72,37 @@ def hydrate_missing_order_items(
     api_calls = 0
     orders_hydrated = 0
 
-    missing: list[dict[str, Any]] = []
     seen: set[str] = set()
+    selected: list[str] = []
     for raw_id in order_uuids:
         oid = str(raw_id)
         if oid in seen:
             continue
         seen.add(oid)
-        order = repo.get_order_by_id(workspace_id, oid)
+        selected.append(oid)
+
+    if hasattr(repo, "list_orders_by_ids"):
+        orders_by_id = repo.list_orders_by_ids(workspace_id, selected)
+    else:
+        orders_by_id = {}
+        for oid in selected:
+            order = repo.get_order_by_id(workspace_id, oid)
+            if order:
+                orders_by_id[oid] = order
+
+    if hasattr(repo, "list_order_items_by_order_ids"):
+        items_by_order = repo.list_order_items_by_order_ids(workspace_id, selected)
+    else:
+        items_by_order = {
+            oid: repo.list_order_items(workspace_id, oid) for oid in selected
+        }
+
+    missing: list[dict[str, Any]] = []
+    for oid in selected:
+        order = orders_by_id.get(oid)
         if not order:
             continue
-        items = repo.list_order_items(workspace_id, oid)
-        if not items:
+        if not items_by_order.get(oid):
             missing.append(order)
 
     by_store: dict[str, list[dict[str, Any]]] = {}

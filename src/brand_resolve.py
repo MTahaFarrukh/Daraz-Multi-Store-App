@@ -5,6 +5,7 @@ Source brand may be stored as provenance only; never used as destination brand.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Callable
 
@@ -14,10 +15,12 @@ BrandLookup = Callable[..., dict[str, Any]]
 # marketplace/category_id → (ts, resolution dict)
 _NO_BRAND_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _NO_BRAND_TTL_S = 60 * 60
+_NO_BRAND_LOCK = threading.Lock()
 
 
 def clear_no_brand_cache_for_tests() -> None:
-    _NO_BRAND_CACHE.clear()
+    with _NO_BRAND_LOCK:
+        _NO_BRAND_CACHE.clear()
 
 
 def _normalize(name: str | None) -> str:
@@ -59,12 +62,13 @@ def resolve_destination_no_brand(
     mp = (marketplace or "pk").strip().lower() or "pk"
     cache_key = f"{mp}/{primary_category_id}"
     now = time.time()
-    if cache_key in _NO_BRAND_CACHE:
-        ts, cached = _NO_BRAND_CACHE[cache_key]
-        if now - ts < _NO_BRAND_TTL_S:
-            out = dict(cached)
-            out["cache_hit"] = True
-            return out
+    with _NO_BRAND_LOCK:
+        if cache_key in _NO_BRAND_CACHE:
+            ts, cached = _NO_BRAND_CACHE[cache_key]
+            if now - ts < _NO_BRAND_TTL_S:
+                out = dict(cached)
+                out["cache_hit"] = True
+                return out
 
     t0 = time.perf_counter()
     diagnostics: dict[str, Any] = {"pages": 0, "complete": False}
@@ -119,7 +123,11 @@ def resolve_destination_no_brand(
                 "cache_hit": False, "lookup": diagnostics,
                 "timings_ms": {"brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)},
             }
-            _NO_BRAND_CACHE[cache_key] = (now, {k: v for k, v in result.items() if k != "timings_ms"})
+            with _NO_BRAND_LOCK:
+                _NO_BRAND_CACHE[cache_key] = (
+                    now,
+                    {k: v for k, v in result.items() if k != "timings_ms"},
+                )
             return result
     return {
         "status": "UNRESOLVED", "brand": None, "brand_id": None,

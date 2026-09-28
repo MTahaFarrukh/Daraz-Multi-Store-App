@@ -213,6 +213,13 @@ ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reprint_count INT;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS failed_count INT;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS store_ids JSONB;
 
+-- Batch 2: worker ownership / heartbeat recovery
+ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS worker_started_at TIMESTAMPTZ;
+ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS processing_stage TEXT;
+ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS interrupted_at TIMESTAMPTZ;
+
 -- Phase 4B: local product warehouse (products + variants + per-workspace defaults)
 CREATE TABLE IF NOT EXISTS daraz_products (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

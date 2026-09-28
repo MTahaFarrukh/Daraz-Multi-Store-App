@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import ipaddress
 import json
@@ -17,6 +18,7 @@ import httpx
 
 from src.db.repo import get_repo
 from src.description_enhance import enhance_description_with_images
+from src.http_pool import get_shared_http_client
 from src.image_migrate import is_daraz_product_cdn_url
 from src.package_resolve import resolve_variant_package
 from src.product_fidelity import parse_money
@@ -435,15 +437,16 @@ def _fetch_catalog_enrichment(item_id: str, *, host: str = "www.daraz.pk") -> di
     try:
         _resolve_public(host)
         url = f"https://{host}/catalog/?_keyori=ss&from=input&q={item_id}&ajax=true"
-        with httpx.Client(
-            timeout=min(TIMEOUT_S, 8.0),
-            follow_redirects=True,
+        client = get_shared_http_client(
+            timeout=min(TIMEOUT_S, 8.0), follow_redirects=True
+        )
+        resp = client.get(
+            url,
             headers={
                 "User-Agent": "MultiStoreProductImport/1.0",
                 "Accept": "application/json",
             },
-        ) as client:
-            resp = client.get(url)
+        )
         if resp.status_code >= 400:
             out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
             return out
@@ -891,42 +894,39 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
     if use_cache and clean in _cache:
         ts, payload = _cache[clean]
         if now - ts < CACHE_TTL_S:
-            return payload
+            return copy.deepcopy(payload)
 
     t0 = time.perf_counter()
     current = clean
     html = ""
-    with httpx.Client(
-        timeout=TIMEOUT_S,
-        follow_redirects=False,
-        headers={"User-Agent": "MultiStoreProductImport/1.0"},
-    ) as client:
-        for _ in range(MAX_REDIRECTS + 1):
-            parsed = urlparse(current)
-            if parsed.scheme != "https" or not _host_allowed(parsed.hostname or ""):
-                raise PublicDarazError("Redirect target not allowed", code="ssrf_blocked")
-            _resolve_public(parsed.hostname or "")
-            resp = client.get(current)
-            if resp.status_code in {301, 302, 303, 307, 308}:
-                loc = resp.headers.get("location")
-                if not loc:
-                    raise PublicDarazError("Redirect without Location", code="bad_redirect")
-                if loc.startswith("/"):
-                    loc = f"https://{parsed.hostname}{loc}"
-                current = loc
-                continue
-            if resp.status_code >= 400:
-                raise PublicDarazError(
-                    f"HTTP {resp.status_code} fetching product page",
-                    code="http_error",
-                )
-            raw = resp.content
-            if len(raw) > MAX_BYTES:
-                raise PublicDarazError("Response too large", code="response_too_large")
-            html = raw.decode(resp.encoding or "utf-8", errors="replace")
-            break
-        else:
-            raise PublicDarazError("Too many redirects", code="redirect_limit")
+    client = get_shared_http_client(timeout=TIMEOUT_S, follow_redirects=False)
+    ua = {"User-Agent": "MultiStoreProductImport/1.0"}
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed = urlparse(current)
+        if parsed.scheme != "https" or not _host_allowed(parsed.hostname or ""):
+            raise PublicDarazError("Redirect target not allowed", code="ssrf_blocked")
+        _resolve_public(parsed.hostname or "")
+        resp = client.get(current, headers=ua)
+        if resp.status_code in {301, 302, 303, 307, 308}:
+            loc = resp.headers.get("location")
+            if not loc:
+                raise PublicDarazError("Redirect without Location", code="bad_redirect")
+            if loc.startswith("/"):
+                loc = f"https://{parsed.hostname}{loc}"
+            current = loc
+            continue
+        if resp.status_code >= 400:
+            raise PublicDarazError(
+                f"HTTP {resp.status_code} fetching product page",
+                code="http_error",
+            )
+        raw = resp.content
+        if len(raw) > MAX_BYTES:
+            raise PublicDarazError("Response too large", code="response_too_large")
+        html = raw.decode(resp.encoding or "utf-8", errors="replace")
+        break
+    else:
+        raise PublicDarazError("Too many redirects", code="redirect_limit")
     ssr_fetch_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     t_parse = time.perf_counter()
@@ -956,19 +956,89 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
     parse_ms = round((time.perf_counter() - t_parse) * 1000, 1)
 
     host = urlparse(clean).hostname or "www.daraz.pk"
-    catalog = _fetch_catalog_enrichment(str(item_id or ""), host=host)
 
-    # Phase 4D.5.1: hydrate missing SSR prices via getDetailInfo (all SKUs, one call)
-    # BEFORE catalog cheapest hints — catalog must never flatten across variants.
-    detail_meta: dict[str, Any] = {"ok": False, "skipped": True}
-    missing_before_detail = sum(1 for v in variants if v.get("price") is None)
-    if missing_before_detail and variants:
-        detail_meta = _fetch_pdp_detail_sku_prices(clean, item_id=str(item_id or ""))
-        detail_meta["skipped"] = False
-        if detail_meta.get("ok"):
-            variants = merge_detail_prices_into_variants(
-                variants, detail_meta.get("prices_by_sku") or {}
+    # Decide whether catalog enrichment can add useful missing data.
+    # Strong structured evidence (SKU category / regCategoryId + title + images)
+    # means catalog is optional — never weaken correctness when data is incomplete.
+    structured_cat_ids: list[str] = []
+    for v in variants:
+        cid = v.get("category_id")
+        if cid and str(cid) not in structured_cat_ids:
+            structured_cat_ids.append(str(cid))
+    if reg_cat and str(reg_cat) not in structured_cat_ids:
+        structured_cat_ids.append(str(reg_cat))
+    missing_prices = sum(1 for v in variants if v.get("price") is None)
+    catalog_needed = not (
+        bool(title)
+        and bool(images)
+        and bool(structured_cat_ids)
+        and missing_prices == 0
+    )
+    # Brand from catalog is optional (destination always forces No Brand).
+    # Still fetch catalog when title/category/images incomplete.
+    if not title or not images or not structured_cat_ids:
+        catalog_needed = True
+
+    catalog: dict[str, Any] = {
+        "ok": False,
+        "exact_item_match": False,
+        "timings_ms": {"catalog": 0},
+    }
+    catalog_strategy = "SKIPPED"
+    detail_meta: dict[str, Any] = {"ok": False, "skipped": True, "timings_ms": {}}
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    need_detail = bool(missing_prices and variants)
+
+    def _run_catalog() -> dict[str, Any]:
+        return _fetch_catalog_enrichment(str(item_id or ""), host=host)
+
+    def _run_detail() -> dict[str, Any]:
+        meta = _fetch_pdp_detail_sku_prices(clean, item_id=str(item_id or ""))
+        meta["skipped"] = False
+        return meta
+
+    if catalog_needed and need_detail:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_c = pool.submit(_run_catalog)
+            fut_d = pool.submit(_run_detail)
+            try:
+                catalog = fut_c.result()
+                catalog_strategy = (
+                    "USED"
+                    if catalog.get("exact_item_match")
+                    else "FALLBACK"
+                )
+            except Exception:  # noqa: BLE001
+                catalog_strategy = "FALLBACK"
+                catalog = {
+                    "ok": False,
+                    "exact_item_match": False,
+                    "timings_ms": {"catalog": 0},
+                }
+            try:
+                detail_meta = fut_d.result()
+            except Exception:  # noqa: BLE001
+                detail_meta = {"ok": False, "skipped": False, "timings_ms": {}}
+    elif catalog_needed:
+        try:
+            catalog = _run_catalog()
+            catalog_strategy = (
+                "USED" if catalog.get("exact_item_match") else "FALLBACK"
             )
+        except Exception:  # noqa: BLE001
+            catalog_strategy = "FALLBACK"
+    elif need_detail:
+        try:
+            detail_meta = _run_detail()
+        except Exception:  # noqa: BLE001
+            detail_meta = {"ok": False, "skipped": False, "timings_ms": {}}
+
+    if detail_meta.get("ok"):
+        variants = merge_detail_prices_into_variants(
+            variants, detail_meta.get("prices_by_sku") or {}
+        )
 
     variants = _apply_price_fallbacks(
         variants,
@@ -1059,10 +1129,24 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
     timings = {
         "ssr_fetch_ms": ssr_fetch_ms,
         "structured_parse_ms": parse_ms,
+        "pdp_fetch_ms": ssr_fetch_ms,
         "public_fetch_ms": round((time.perf_counter() - t0) * 1000, 1),
         "parse_ms": parse_ms,
         "fetch_extract": round((time.perf_counter() - t0) * 1000, 1),
         "total_source_extract_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "source_total_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "catalog_ms": float((catalog.get("timings_ms") or {}).get("catalog") or 0),
+        "price_resolution_ms": float(
+            (detail_meta.get("timings_ms") or {}).get("detail_price_ms")
+            or (detail_meta.get("timings_ms") or {}).get("price_resolution_ms")
+            or 0
+        ),
+        "catalog_strategy": catalog_strategy,
+        "price_strategy": (
+            "getDetailInfo"
+            if detail_meta.get("ok")
+            else ("skipped" if detail_meta.get("skipped") else "fallback")
+        ),
     }
     timings.update(catalog.get("timings_ms") or {})
     timings.update(detail_meta.get("timings_ms") or {})
@@ -1088,6 +1172,8 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
             "candidates": category_candidates,
             "conflict": bool(category_candidates and not category_id),
         },
+        "catalog_strategy": catalog_strategy,
+        "price_strategy": timings["price_strategy"],
         "variants": variants,
         "pricing_summary": {
             "variant_count": len(variants),
@@ -1162,16 +1248,31 @@ def build_public_clone_draft_from_extracted(
     *,
     extracted: dict[str, Any],
     destination_store_id: str,
+    product_defaults: dict[str, Any] | None = None,
+    existing_seller_skus: list[str] | None = None,
+    destination_store: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a public-URL clone draft from an already-fetched extract (no HTTP)."""
+    """Build a public-URL clone draft from an already-fetched extract (no HTTP).
+
+    ``extracted`` is treated as read-only — callers should pass a deepcopy when
+    sharing one source across concurrent destinations.
+    """
     repo = get_repo()
-    dest = repo.get_store(workspace_id, destination_store_id) or repo.get_store_by_uuid(
-        workspace_id, destination_store_id
-    )
+    dest = destination_store
+    if dest is None:
+        dest = repo.get_store(workspace_id, destination_store_id) or repo.get_store_by_uuid(
+            workspace_id, destination_store_id
+        )
     if not dest:
         raise PublicDarazError("Destination store not found", code="dest_not_found")
 
-    defaults = repo.get_product_defaults(workspace_id)
+    t_def = time.perf_counter()
+    defaults = (
+        product_defaults
+        if product_defaults is not None
+        else repo.get_product_defaults(workspace_id)
+    )
+    defaults_ms = round((time.perf_counter() - t_def) * 1000, 1)
     prefix = defaults.get("sku_prefix") or DEFAULT_SKU_PREFIX
     configured_qty = defaults.get("default_initial_quantity")
     initial_qty = 1 if configured_qty is None else int(configured_qty)
@@ -1195,11 +1296,14 @@ def build_public_clone_draft_from_extracted(
     )
     item_id = extracted.get("item_id")
 
-    existing_skus = list(
-        repo.list_destination_seller_skus(workspace_id, str(dest["id"]))
-    )
+    if existing_seller_skus is not None:
+        existing_skus = list(existing_seller_skus)
+    else:
+        existing_skus = list(
+            repo.list_destination_seller_skus(workspace_id, str(dest["id"]))
+        )
     allocated = list(existing_skus)
-    src_variants = extracted.get("variants") or []
+    src_variants = copy.deepcopy(extracted.get("variants") or [])
     if not isinstance(src_variants, list) or not src_variants:
         src_variants = [
             {
@@ -1213,7 +1317,7 @@ def build_public_clone_draft_from_extracted(
     for idx, raw_v in enumerate(src_variants):
         if not isinstance(raw_v, dict):
             continue
-        sale_props = raw_v.get("sale_props") or {}
+        sale_props = copy.deepcopy(raw_v.get("sale_props") or {})
         if not isinstance(sale_props, dict):
             sale_props = {}
         sku = generate_seller_sku(
@@ -1236,7 +1340,7 @@ def build_public_clone_draft_from_extracted(
                 "source_daraz_sku_id": raw_v.get("daraz_sku_id"),
                 "daraz_sku_id": raw_v.get("daraz_sku_id"),
                 "sale_props": sale_props,
-                "dimensions": list(raw_v.get("dimensions") or []),
+                "dimensions": copy.deepcopy(list(raw_v.get("dimensions") or [])),
                 "prop_path": raw_v.get("prop_path"),
                 "price": raw_v.get("price")
                 if raw_v.get("price") is not None
@@ -1395,6 +1499,7 @@ def build_public_clone_draft_from_extracted(
             }
             for d in duplicates[:8]
         ],
+        "duplicate_check_done": True,
         "unresolved_variants": unresolved_prices,
         "pricing_summary": extracted.get("pricing_summary") or {},
         "validation": {
@@ -1441,7 +1546,10 @@ def build_public_clone_draft_from_extracted(
         "errors": draft["validation"]["errors"],
         "possible_duplicates": draft["possible_duplicates"],
         "source_resolution": "public_daraz_url",
-        "timings_ms": extracted.get("timings_ms") or {},
+        "timings_ms": {
+            **(extracted.get("timings_ms") or {}),
+            "defaults_ms": defaults_ms,
+        },
         "create_probe_enabled": False,
     }
 

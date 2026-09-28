@@ -238,6 +238,16 @@ def _startup() -> None:
             logger.error("Failed to ensure SaaS schema: %s", exc)
 
 
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    try:
+        from src.http_pool import close_shared_http_clients
+
+        close_shared_http_clients()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _spa_index() -> FileResponse | HTMLResponse:
     index = FRONTEND_DIST / "index.html"
     if index.is_file():

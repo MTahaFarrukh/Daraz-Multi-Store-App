@@ -314,6 +314,10 @@ class TenancyRepo(Protocol):
         self, workspace_id: str, order_uuid: str
     ) -> dict[str, Any] | None: ...
 
+    def list_orders_by_ids(
+        self, workspace_id: str, order_uuids: list[str]
+    ) -> dict[str, dict[str, Any]]: ...
+
     def list_orders(
         self, workspace_id: str, filters: dict[str, Any] | None = None
     ) -> dict[str, Any]: ...
@@ -325,6 +329,14 @@ class TenancyRepo(Protocol):
     def list_order_items(
         self, workspace_id: str, order_uuid: str
     ) -> list[dict[str, Any]]: ...
+
+    def list_order_items_by_order_ids(
+        self, workspace_id: str, order_uuids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]: ...
+
+    def list_stores_by_uuids(
+        self, workspace_id: str, store_uuids: list[str]
+    ) -> dict[str, dict[str, Any]]: ...
 
     def list_label_prints_for_orders(
         self, workspace_id: str, order_uuids: list[str]
@@ -910,6 +922,32 @@ class MemoryTenancyRepo:
                 return None
             return deepcopy(row)
 
+    def list_orders_by_ids(
+        self, workspace_id: str, order_uuids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for raw in order_uuids:
+                oid = str(raw)
+                row = self.orders.get(oid)
+                if row and str(row.get("workspace_id")) == str(workspace_id):
+                    out[oid] = deepcopy(row)
+        return out
+
+    def list_stores_by_uuids(
+        self, workspace_id: str, store_uuids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        wanted = {str(u) for u in store_uuids}
+        out: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for s in self.stores.values():
+                if (
+                    str(s.get("workspace_id")) == str(workspace_id)
+                    and str(s.get("id")) in wanted
+                ):
+                    out[str(s["id"])] = store_row_to_record(s)
+        return out
+
     def _printed_order_ids_unlocked(self, workspace_id: str) -> set[str]:
         return {
             str(p["order_id"])
@@ -1070,6 +1108,20 @@ class MemoryTenancyRepo:
                 and str(i.get("workspace_id")) == str(workspace_id)
             ]
 
+    def list_order_items_by_order_ids(
+        self, workspace_id: str, order_uuids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        wanted = {str(u) for u in order_uuids}
+        out: dict[str, list[dict[str, Any]]] = {u: [] for u in wanted}
+        with self._lock:
+            for i in self.order_items.values():
+                if str(i.get("workspace_id")) != str(workspace_id):
+                    continue
+                oid = str(i.get("order_id"))
+                if oid in wanted:
+                    out[oid].append(deepcopy(i))
+        return out
+
     def list_label_prints_for_orders(
         self, workspace_id: str, order_uuids: list[str]
     ) -> dict[str, list[dict[str, Any]]]:
@@ -1118,34 +1170,41 @@ class MemoryTenancyRepo:
         }
 
     def insert_label_print(self, payload: dict[str, Any]) -> dict[str, Any]:
-        now = _now().isoformat()
-        with self._lock:
-            row = {
-                "id": payload.get("id") or _uuid(),
-                "workspace_id": str(payload["workspace_id"]),
-                "store_id": str(payload["store_id"]),
-                "order_id": str(payload["order_id"]),
-                "daraz_order_id": str(payload["daraz_order_id"]),
-                "package_id": payload.get("package_id"),
-                "order_item_ids": list(payload.get("order_item_ids") or []),
-                "print_job_id": payload.get("print_job_id"),
-                "printed_at": payload.get("printed_at") or now,
-                "printed_by_user_id": payload.get("printed_by_user_id"),
-                "is_reprint": bool(payload.get("is_reprint")),
-                "fetch_source": payload.get("fetch_source"),
-                "created_at": now,
-            }
-            self.label_prints[str(row["id"])] = row
-            return deepcopy(row)
+        rows = self.insert_label_prints_atomic([payload])
+        return rows[0]
 
     def insert_label_prints_atomic(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Insert all print events or none (mirrors PostgreSQL transaction).
+
+        Test hook: set ``self._atomic_fail_after = N`` to raise before committing
+        the N-th payload (0-indexed), leaving zero events persisted.
+        """
         with self._lock:
-            rows = []
-            for payload in payloads:
+            pending: list[dict[str, Any]] = []
+            fail_after = getattr(self, "_atomic_fail_after", None)
+            for idx, payload in enumerate(payloads):
+                if fail_after is not None and idx == int(fail_after):
+                    raise RuntimeError("injected atomic label-print failure")
                 now = _now().isoformat()
-                row = {"id": _uuid(), "workspace_id": str(payload["workspace_id"]), "store_id": str(payload["store_id"]), "order_id": str(payload["order_id"]), "daraz_order_id": str(payload["daraz_order_id"]), "package_id": payload.get("package_id"), "order_item_ids": list(payload.get("order_item_ids") or []), "print_job_id": payload.get("print_job_id"), "printed_at": payload.get("printed_at") or now, "printed_by_user_id": payload.get("printed_by_user_id"), "is_reprint": bool(payload.get("is_reprint")), "fetch_source": payload.get("fetch_source"), "created_at": now}
-                self.label_prints[row["id"]] = row; rows.append(row)
-            return deepcopy(rows)
+                row = {
+                    "id": _uuid(),
+                    "workspace_id": str(payload["workspace_id"]),
+                    "store_id": str(payload["store_id"]),
+                    "order_id": str(payload["order_id"]),
+                    "daraz_order_id": str(payload["daraz_order_id"]),
+                    "package_id": payload.get("package_id"),
+                    "order_item_ids": list(payload.get("order_item_ids") or []),
+                    "print_job_id": payload.get("print_job_id"),
+                    "printed_at": payload.get("printed_at") or now,
+                    "printed_by_user_id": payload.get("printed_by_user_id"),
+                    "is_reprint": bool(payload.get("is_reprint")),
+                    "fetch_source": payload.get("fetch_source"),
+                    "created_at": now,
+                }
+                pending.append(row)
+            for row in pending:
+                self.label_prints[row["id"]] = row
+            return deepcopy(pending)
 
     # --- Phase 4B: local product warehouse ---------------------------------
 
@@ -2040,9 +2099,12 @@ class PostgresTenancyRepo:
                 """
                 INSERT INTO print_jobs (
                     id, workspace_id, user_id, status, message, error, result, output_path,
-                    started_at, updated_at
+                    started_at, updated_at,
+                    worker_id, worker_started_at, heartbeat_at, processing_stage, interrupted_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, NOW()
+                    %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                    %s, NOW(),
+                    %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     status = EXCLUDED.status,
@@ -2051,7 +2113,12 @@ class PostgresTenancyRepo:
                     result = EXCLUDED.result,
                     output_path = EXCLUDED.output_path,
                     started_at = EXCLUDED.started_at,
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    worker_id = EXCLUDED.worker_id,
+                    worker_started_at = EXCLUDED.worker_started_at,
+                    heartbeat_at = EXCLUDED.heartbeat_at,
+                    processing_stage = EXCLUDED.processing_stage,
+                    interrupted_at = EXCLUDED.interrupted_at
                 """,
                 (
                     job["id"],
@@ -2063,6 +2130,11 @@ class PostgresTenancyRepo:
                     json.dumps(job.get("result")) if job.get("result") is not None else None,
                     job.get("output_path"),
                     _parse_ts(job.get("started_at")),
+                    job.get("worker_id"),
+                    _parse_ts(job.get("worker_started_at")),
+                    _parse_ts(job.get("heartbeat_at")),
+                    job.get("processing_stage"),
+                    _parse_ts(job.get("interrupted_at")),
                 ),
             )
             conn.commit()
@@ -2074,7 +2146,8 @@ class PostgresTenancyRepo:
             row = conn.execute(
                 """
                 SELECT id, workspace_id, user_id, status, message, error, result,
-                       output_path, started_at, updated_at
+                       output_path, started_at, updated_at,
+                       worker_id, worker_started_at, heartbeat_at, processing_stage, interrupted_at
                 FROM print_jobs WHERE id = %s
                 """,
                 (job_id,),
@@ -2098,6 +2171,11 @@ class PostgresTenancyRepo:
             "output_path": row[7],
             "started_at": row[8].isoformat() if row[8] else None,
             "updated_at": row[9].isoformat() if row[9] else None,
+            "worker_id": row[10],
+            "worker_started_at": row[11].isoformat() if row[11] else None,
+            "heartbeat_at": row[12].isoformat() if row[12] else None,
+            "processing_stage": row[13],
+            "interrupted_at": row[14].isoformat() if row[14] else None,
         }
 
     def list_print_jobs(
@@ -2556,6 +2634,37 @@ class PostgresTenancyRepo:
             ).fetchone()
         return self._order_row(row) if row else None
 
+    def list_orders_by_ids(
+        self, workspace_id: str, order_uuids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        from src.db.connection import connect
+
+        ids = [str(u) for u in order_uuids if u]
+        if not ids:
+            return {}
+        with connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {self._ORDER_SELECT}
+                FROM daraz_orders
+                WHERE workspace_id = %s AND id = ANY(%s::uuid[])
+                """,
+                (workspace_id, ids),
+            ).fetchall()
+        return {
+            str(r[0]): self._order_row(r) for r in rows
+        }
+
+    def list_stores_by_uuids(
+        self, workspace_id: str, store_uuids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for su in store_uuids:
+            store = self.get_store_by_uuid(workspace_id, str(su))
+            if store:
+                out[str(store["id"])] = store
+        return out
+
     def list_orders(
         self, workspace_id: str, filters: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -2710,6 +2819,35 @@ class PostgresTenancyRepo:
             ).fetchall()
         return [self._item_row(r) for r in rows]
 
+    def list_order_items_by_order_ids(
+        self, workspace_id: str, order_uuids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        from src.db.connection import connect
+
+        ids = [str(u) for u in order_uuids if u]
+        out: dict[str, list[dict[str, Any]]] = {u: [] for u in ids}
+        if not ids:
+            return out
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, store_id, order_id, daraz_order_item_id,
+                       daraz_order_id, status_raw, package_id, name, sku, sku_id,
+                       product_id, quantity, item_price, paid_price, currency,
+                       tracking_code, shipment_provider, shipping_type, warehouse_code,
+                       synced_at, created_at, updated_at
+                FROM daraz_order_items
+                WHERE workspace_id = %s AND order_id = ANY(%s::uuid[])
+                ORDER BY created_at ASC
+                """,
+                (workspace_id, ids),
+            ).fetchall()
+        for r in rows:
+            item = self._item_row(r)
+            oid = str(item.get("order_id"))
+            out.setdefault(oid, []).append(item)
+        return out
+
     def list_label_prints_for_orders(
         self, workspace_id: str, order_uuids: list[str]
     ) -> dict[str, list[dict[str, Any]]]:
@@ -2785,51 +2923,74 @@ class PostgresTenancyRepo:
         }
 
     def insert_label_print(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rows = self.insert_label_prints_atomic([payload])
+        return rows[0]
+
+    def insert_label_prints_atomic(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Insert all proven-success print events in ONE PostgreSQL transaction.
+
+        Any failure rolls back the entire batch — zero partial print history.
+        """
         from src.db.connection import connect
 
+        if not payloads:
+            return []
+
+        fail_after = getattr(self, "_atomic_fail_after", None)
+        rows_out: list[dict[str, Any]] = []
         with connect() as conn:
-            row = conn.execute(
-                """
-                INSERT INTO order_label_prints (
-                    workspace_id, store_id, order_id, daraz_order_id, package_id,
-                    order_item_ids, print_job_id, printed_by_user_id, is_reprint, fetch_source
-                ) VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s::jsonb, %s, %s, %s, %s
-                )
-                RETURNING id, workspace_id, store_id, order_id, daraz_order_id, package_id,
-                          order_item_ids, print_job_id, printed_at, printed_by_user_id,
-                          is_reprint, fetch_source, created_at
-                """,
-                (
-                    payload["workspace_id"],
-                    payload["store_id"],
-                    payload["order_id"],
-                    payload["daraz_order_id"],
-                    payload.get("package_id"),
-                    json.dumps(list(payload.get("order_item_ids") or [])),
-                    payload.get("print_job_id"),
-                    payload.get("printed_by_user_id"),
-                    bool(payload.get("is_reprint")),
-                    payload.get("fetch_source"),
-                ),
-            ).fetchone()
-            conn.commit()
-        return {
-            "id": str(row[0]),
-            "workspace_id": str(row[1]),
-            "store_id": str(row[2]),
-            "order_id": str(row[3]),
-            "daraz_order_id": row[4],
-            "package_id": row[5],
-            "order_item_ids": self._json_maybe(row[6]) or [],
-            "print_job_id": str(row[7]) if row[7] else None,
-            "printed_at": row[8].isoformat() if row[8] else None,
-            "printed_by_user_id": str(row[9]) if row[9] else None,
-            "is_reprint": bool(row[10]),
-            "fetch_source": row[11],
-            "created_at": row[12].isoformat() if row[12] else None,
-        }
+            try:
+                for idx, payload in enumerate(payloads):
+                    if fail_after is not None and idx == int(fail_after):
+                        raise RuntimeError("injected atomic label-print failure")
+                    row = conn.execute(
+                        """
+                        INSERT INTO order_label_prints (
+                            workspace_id, store_id, order_id, daraz_order_id, package_id,
+                            order_item_ids, print_job_id, printed_by_user_id, is_reprint, fetch_source
+                        ) VALUES (
+                            %s, %s, %s, %s, %s,
+                            %s::jsonb, %s, %s, %s, %s
+                        )
+                        RETURNING id, workspace_id, store_id, order_id, daraz_order_id, package_id,
+                                  order_item_ids, print_job_id, printed_at, printed_by_user_id,
+                                  is_reprint, fetch_source, created_at
+                        """,
+                        (
+                            payload["workspace_id"],
+                            payload["store_id"],
+                            payload["order_id"],
+                            payload["daraz_order_id"],
+                            payload.get("package_id"),
+                            json.dumps(list(payload.get("order_item_ids") or [])),
+                            payload.get("print_job_id"),
+                            payload.get("printed_by_user_id"),
+                            bool(payload.get("is_reprint")),
+                            payload.get("fetch_source"),
+                        ),
+                    ).fetchone()
+                    rows_out.append(
+                        {
+                            "id": str(row[0]),
+                            "workspace_id": str(row[1]),
+                            "store_id": str(row[2]),
+                            "order_id": str(row[3]),
+                            "daraz_order_id": row[4],
+                            "package_id": row[5],
+                            "order_item_ids": self._json_maybe(row[6]) or [],
+                            "print_job_id": str(row[7]) if row[7] else None,
+                            "printed_at": row[8].isoformat() if row[8] else None,
+                            "printed_by_user_id": str(row[9]) if row[9] else None,
+                            "is_reprint": bool(row[10]),
+                            "fetch_source": row[11],
+                            "created_at": row[12].isoformat() if row[12] else None,
+                        }
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return rows_out
 
     @staticmethod
     def _perf_row(row) -> dict[str, Any]:

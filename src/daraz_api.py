@@ -154,25 +154,27 @@ class DarazClient:
 
         request_url_len = 0
         request_body_len = 0
-        with httpx.Client(timeout=self.timeout) as client:
-            if method_u == "GET":
-                response = client.get(url, params=params)
-            elif use_form:
-                # Large XML (CreateProduct / image migrate) must be form body.
-                response = client.post(
-                    url,
-                    data=params,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
-            elif method_u == "POST":
-                response = client.post(
-                    url,
-                    params=params,
-                    content=body,
-                    headers={"Content-Type": "application/json"},
-                )
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+        from src.http_pool import get_shared_http_client
+
+        client = get_shared_http_client(timeout=self.timeout, follow_redirects=True)
+        if method_u == "GET":
+            response = client.get(url, params=params)
+        elif use_form:
+            # Large XML (CreateProduct / image migrate) must be form body.
+            response = client.post(
+                url,
+                data=params,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        elif method_u == "POST":
+            response = client.post(
+                url,
+                params=params,
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
 
         try:
             request_url_len = len(str(response.request.url))
@@ -592,8 +594,10 @@ class DarazClient:
 
     def download_binary_url(self, url: str) -> bytes:
         """Download a signed OSS/pdf_url from PrintAWB (no Daraz signing required)."""
-        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-            response = client.get(url)
+        from src.http_pool import get_shared_http_client
+
+        client = get_shared_http_client(timeout=self.timeout, follow_redirects=True)
+        response = client.get(url)
         if response.status_code >= 400:
             raise DarazApiError(
                 f"Failed to download label URL (HTTP {response.status_code})",
