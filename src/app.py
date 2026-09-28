@@ -373,6 +373,21 @@ def _daraz_http_error(exc: DarazApiError) -> HTTPException:
 
 @app.on_event("startup")
 def _startup() -> None:
+    from src.log_redact import RedactingFilter
+    from src.production_guards import validate_production_environment
+
+    logging.getLogger().addFilter(RedactingFilter())
+    for name in ("httpx", "httpcore", "uvicorn", "uvicorn.access"):
+        logging.getLogger(name).addFilter(RedactingFilter())
+
+    try:
+        result = validate_production_environment()
+        for w in result.get("warnings") or []:
+            logger.warning("env: %s", w)
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise
+
     _mount_frontend_assets()
     if not auth_configured():
         logger.warning(

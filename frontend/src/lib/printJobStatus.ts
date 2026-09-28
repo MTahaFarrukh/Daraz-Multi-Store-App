@@ -23,6 +23,20 @@ export type PrintJobLike = {
   failed_order_ids?: string[] | null;
 };
 
+const STAGE_LABELS: Record<string, string> = {
+  PREPARING: "Preparing",
+  FETCHING: "Fetching labels",
+  FETCHING_LABELS: "Fetching labels",
+  PROCESSING: "Processing",
+  MERGING: "Merging PDF",
+  MERGING_PDF: "Merging PDF",
+  SAVING: "Saving history",
+  SAVING_HISTORY: "Saving history",
+  COMPLETE: "Complete",
+  COMPLETED: "Complete",
+  RECOVERY_REQUIRED: "Interrupted — recovery required",
+};
+
 export function isPrintJobInterrupted(job: PrintJobLike | null | undefined): boolean {
   if (!job) return false;
   const status = String(job.status || "").toLowerCase();
@@ -33,7 +47,14 @@ export function isPrintJobInterrupted(job: PrintJobLike | null | undefined): boo
 export function printJobStageLabel(job: PrintJobLike | null | undefined): string {
   if (!job) return "";
   if (isPrintJobInterrupted(job)) return "Interrupted — recovery required";
-  return String(job.processing_stage || job.message || "").trim();
+  const stage = String(job.processing_stage || "").trim();
+  if (STAGE_LABELS[stage]) return STAGE_LABELS[stage];
+  const status = String(job.status || "").toLowerCase();
+  if (status === "completed" || status === "done") return "Complete";
+  if (status === "running" || status === "processing") {
+    return STAGE_LABELS[stage] || job.message || "Processing";
+  }
+  return String(job.message || stage || "").trim();
 }
 
 export function printJobProgressText(job: PrintJobLike | null | undefined): string {

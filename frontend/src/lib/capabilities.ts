@@ -40,7 +40,27 @@ export function canSyncFinance(workspace: WorkspaceCaps | null | undefined): boo
 }
 
 export function formatAuditAction(action: string): string {
-  return String(action || "")
-    .replace(/\./g, " · ")
-    .replace(/_/g, " ");
+  const raw = String(action || "").trim();
+  if (!raw) return "—";
+  const known: Record<string, string> = {
+    "product.reconcile.verified": "Product reconciliation verified",
+    "product.reconcile.result": "Product reconciliation result",
+    "product.retry.result": "Product retry result",
+    "product.create.verified": "Product create verified",
+    "finance.sync.requested": "Finance sync requested",
+    "finance.sync.completed": "Finance sync completed",
+    "finance.sync.failed": "Finance sync failed",
+    "store.rename": "Store renamed",
+    "connections.request": "Connection requested",
+    "connections.accept": "Connection accepted",
+    "connections.reject": "Connection rejected",
+    "connections.revoke": "Connection revoked",
+  };
+  if (known[raw]) return known[raw];
+  return raw
+    .split(".")
+    .map((part) => part.replace(/_/g, " "))
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" · ")
+    .replace(/ · /g, " ");
 }

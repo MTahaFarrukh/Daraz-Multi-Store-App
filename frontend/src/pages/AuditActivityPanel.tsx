@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Api } from "@/lib/api";
 import { canViewAudit, formatAuditAction } from "@/lib/capabilities";
 import { useAuth } from "@/hooks/useAuth";
-import { ErrorBanner } from "@/components/ui/Primitives";
+import { ErrorBanner, StatusBadge } from "@/components/ui/Primitives";
 
 export function AuditActivityPanel() {
   const { me } = useAuth();
@@ -79,7 +79,7 @@ export function AuditActivityPanel() {
                 <th>Actor</th>
                 <th>Action</th>
                 <th>Entity</th>
-                <th>Summary</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -93,11 +93,15 @@ export function AuditActivityPanel() {
                   </td>
                   <td>{formatAuditAction(ev.action)}</td>
                   <td>
-                    {ev.entity_type}
+                    {String(ev.entity_type || "")
+                      .replace(/_/g, " ")
+                      .replace(/^\w/, (c) => c.toUpperCase())}
                     {ev.entity_id ? ` · ${String(ev.entity_id).slice(0, 10)}` : ""}
                   </td>
-                  <td className="muted-line">
-                    {summarizeMeta(ev.metadata)}
+                  <td>
+                    <StatusBadge tone="muted">
+                      {String((ev.metadata as { status?: string } | undefined)?.status || "—")}
+                    </StatusBadge>
                   </td>
                 </tr>
               ))}
@@ -107,13 +111,4 @@ export function AuditActivityPanel() {
       )}
     </section>
   );
-}
-
-function summarizeMeta(meta: Record<string, unknown> | undefined): string {
-  if (!meta || !Object.keys(meta).length) return "—";
-  const bits: string[] = [];
-  for (const key of ["status", "store_id", "attempt_id", "error_code", "destination_store_id"]) {
-    if (meta[key] != null && meta[key] !== "") bits.push(`${key}=${String(meta[key])}`);
-  }
-  return bits.slice(0, 3).join(" · ") || "—";
 }

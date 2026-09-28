@@ -599,7 +599,17 @@ export type FinanceSummary = {
   transaction_count?: number;
   payout_count?: number;
   last_synced?: string | null;
-  completeness?: Record<string, boolean>;
+  completeness?: {
+    level?: string;
+    has_transactions?: boolean;
+    has_payouts?: boolean;
+    fees_known?: boolean;
+    payouts_known?: boolean;
+    unknown_transactions?: number;
+    gross_sales_source?: string;
+    finance_ledger_excluded_from_gross_sales?: boolean;
+    [key: string]: unknown;
+  };
   metric_notes?: Record<string, string>;
 };
 

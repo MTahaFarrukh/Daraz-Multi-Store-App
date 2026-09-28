@@ -412,6 +412,12 @@ CREATE TABLE IF NOT EXISTS finance_transactions (
 CREATE INDEX IF NOT EXISTS idx_finance_txn_workspace_time
     ON finance_transactions (workspace_id, synced_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_finance_txn_workspace_store
+    ON finance_transactions (workspace_id, store_id);
+
+CREATE INDEX IF NOT EXISTS idx_finance_txn_source
+    ON finance_transactions (workspace_id, source_transaction_id);
+
 CREATE TABLE IF NOT EXISTS finance_payouts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -433,4 +439,26 @@ CREATE TABLE IF NOT EXISTS finance_payouts (
 );
 CREATE INDEX IF NOT EXISTS idx_finance_payout_workspace_time
     ON finance_payouts (workspace_id, synced_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_finance_payout_workspace_store
+    ON finance_payouts (workspace_id, store_id);
+
+CREATE INDEX IF NOT EXISTS idx_finance_payout_source
+    ON finance_payouts (workspace_id, source_payout_id);
+
+CREATE INDEX IF NOT EXISTS idx_daraz_product_variants_workspace_qty
+    ON daraz_product_variants (workspace_id, quantity)
+    WHERE quantity IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_daraz_orders_workspace_store_created
+    ON daraz_orders (workspace_id, store_id, created_at_daraz);
+
+CREATE INDEX IF NOT EXISTS idx_product_create_attempts_workspace_state
+    ON product_create_attempts (workspace_id, state, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_audit_events_action
+    ON workspace_audit_events (workspace_id, action, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trusted_ws_source_status
+    ON trusted_workspace_connections (source_workspace_id, status);
 

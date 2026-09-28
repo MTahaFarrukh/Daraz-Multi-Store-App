@@ -11,7 +11,7 @@ from src.category_attr_resolve import (
     resolve_required_category_attributes,
 )
 from src.category_validate import validate_draft_against_category
-from src.daraz_api import DarazApiError, DarazClient
+from src.daraz_api import DarazApiError
 from src.db.repo import get_repo
 from src.image_migrate import DarazImageMigrationService
 from src.product_clone import build_connected_clone_draft
@@ -20,7 +20,6 @@ from src.product_create_payload import (
     build_create_product_xml,
     redact_create_response,
 )
-from src.token_store import get_store as get_token_store
 
 
 def create_probe_enabled() -> bool:
@@ -70,14 +69,30 @@ def run_supervised_create(
     if not dest:
         return {"status": "BLOCKED", "reason": "Destination store not found"}
 
-    token_record = get_token_store(str(dest.get("store_id")))
-    if not token_record or not token_record.get("access_token"):
+    # Workspace-scoped encrypted store tokens only — never the legacy global vault.
+    try:
+        from src.ops import client_for_store
+        from src.token_refresh import refresh_store_tokens
+
+        try:
+            refresh_store_tokens(
+                store_ids=[str(dest.get("store_id") or dest.get("id"))],
+                within_minutes=30,
+                workspace_id=workspace_id,
+            )
+            dest = (
+                repo.get_store(workspace_id, destination_store_id)
+                or repo.get_store_by_uuid(workspace_id, destination_store_id)
+                or dest
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        client = client_for_store(dest)
+    except Exception as exc:  # noqa: BLE001
         return {
             "status": "BLOCKED",
-            "reason": "Destination store has no usable access token in token store",
+            "reason": f"Destination store has no usable workspace access token ({type(exc).__name__})",
         }
-
-    client = DarazClient(access_token=token_record["access_token"])
 
     # Build draft first (without live category) to know primary category
     base = build_connected_clone_draft(
@@ -166,6 +181,7 @@ def run_supervised_create(
             final_urls.append(r.migrated_url)
         else:
             img_errors.append(f"{r.source_url}:{r.status}:{r.error}")
+    draft.setdefault("media", {})
     draft["media"]["resolved_images"] = final_urls
     draft["media"]["image_strategy"] = {
         "strategies": strategies,

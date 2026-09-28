@@ -264,7 +264,9 @@ export function InventoryPage() {
                             <div className="inv-thumb inv-thumb-empty" />
                           )}
                           <div>
-                            <div>{row.product_name || "—"}</div>
+                            <div className="inv-title-truncate" title={row.product_name || undefined}>
+                              {row.product_name || "—"}
+                            </div>
                             <div className="muted-line" style={{ fontSize: "0.75rem" }}>
                               {row.daraz_item_id || ""}
                             </div>

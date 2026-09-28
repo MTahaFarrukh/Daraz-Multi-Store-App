@@ -288,6 +288,8 @@ def test_finance_sync_idempotent_partial_and_apis(tenancy_env):
         store_slug="fin-store",
         raw={
             "transaction_number": "TX-1",
+            "transaction_type": "Orders-Settlements",
+            "fee_type": "Commission",
             "amount": "500",
             "fee_amount": "25",
             "currency": "PKR",
@@ -309,10 +311,30 @@ def test_finance_sync_idempotent_partial_and_apis(tenancy_env):
     sum_api = client.get("/api/finance/summary", headers=headers)
     assert sum_api.status_code == 200
     body = sum_api.json()
-    assert body["gross_sales"] == 500.0
+    # Gross Sales is from orders (none seeded here) — NOT ledger amounts
+    assert body["gross_sales"] is None
+    assert body["completeness"]["finance_ledger_excluded_from_gross_sales"] is True
     assert body["known_fees"] == 25.0
     assert body["known_payouts"] == 400.0
     assert "profit" not in body
+
+    # Seed an order — Gross Sales follows orders only
+    repo.upsert_daraz_order(
+        {
+            "workspace_id": wid,
+            "store_id": store["id"],
+            "daraz_order_id": "fin-o1",
+            "order_number": "fin-o1",
+            "status_group": "pending",
+            "price": 999.0,
+            "created_at_daraz": "2026-03-01T00:00:00",
+        }
+    )
+    body2 = client.get("/api/finance/summary", headers=headers).json()
+    assert body2["gross_sales"] == 999.0
+    # Ledger amount 500 must NOT inflate Gross Sales
+    assert body2["gross_sales"] != 500.0
+    assert body2["gross_sales"] != 999.0 + 500.0
 
     tx_api = client.get("/api/finance/transactions?page=1&page_size=10", headers=headers)
     assert tx_api.status_code == 200

@@ -41,6 +41,8 @@ describe("capabilities helpers", () => {
   });
 
   it("formats audit actions for UI", () => {
-    expect(formatAuditAction("product.create.verified")).toContain("product");
+    expect(formatAuditAction("product.create.verified").toLowerCase()).toContain(
+      "product"
+    );
   });
 });

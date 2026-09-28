@@ -179,17 +179,22 @@ export function FinancePage() {
           label="Gross Sales"
           value={formatFinanceAmount(summary?.gross_sales)}
           unavailable={summary?.gross_sales == null}
-          hint="Known transaction amounts"
+          hint="From local orders — not ledger rows"
+          title="Canonical Gross Sales from order prices. Finance ledger amounts are never added."
         />
         <StatCard
           label="Known Fees"
           value={formatFinanceAmount(summary?.known_fees)}
           unavailable={summary?.known_fees == null}
+          hint="Mapped fee rows only — not a full P&L"
+          title="Only fees present on synced finance rows. Unknown transaction types are excluded. Not profit."
         />
         <StatCard
           label="Known Payouts"
           value={formatFinanceAmount(summary?.known_payouts)}
           unavailable={summary?.known_payouts == null}
+          hint="Synced payout amounts may be incomplete"
+          title="Sum of known payout amounts from Daraz payout status. Incomplete until all stores sync successfully."
         />
         <StatCard
           label="Last Synced"
@@ -199,6 +204,13 @@ export function FinancePage() {
               : "—"
           }
           unavailable={!summary?.last_synced}
+          hint={
+            lastSync?.partial || summary?.completeness?.level === "partial"
+              ? "Partial"
+              : notSynced
+                ? "Not synced"
+                : summary?.completeness?.level || undefined
+          }
         />
       </div>
 

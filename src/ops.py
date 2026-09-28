@@ -86,15 +86,6 @@ def _label_pdf_page_count(label: LabelDocument) -> int:
         return 0
 
 
-def _bulk_pages_match_targets(
-    pages: int, work: list[tuple[dict[str, Any], list[str], str | None]]
-) -> bool:
-    """True when PDF pages map 1:1 to orders or 1:1 to item ids."""
-    order_count = len(work)
-    item_count = sum(len(ids) for _t, ids, _pkg in work)
-    return pages == order_count or pages == item_count
-
-
 def _save_label_artifacts() -> bool:
     return get_env("SAVE_LABEL_ARTIFACTS", "").lower() in {"1", "true", "yes"}
 

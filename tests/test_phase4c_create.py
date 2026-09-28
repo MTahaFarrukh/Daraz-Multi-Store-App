@@ -461,11 +461,10 @@ def test_duplicate_safety_blocks_supervised(tenancy_env, monkeypatch):
         def query_category_brands(self, **_k):
             return {"module": [{"name": "No Brand", "brand_id": 1}]}
 
-    monkeypatch.setattr(pc, "DarazClient", lambda **kw: FakeClient())
+    monkeypatch.setattr("src.ops.client_for_store", lambda store: FakeClient())
     monkeypatch.setattr(
-        pc,
-        "get_token_store",
-        lambda sid: {"access_token": "tok", "store_id": sid},
+        "src.token_refresh.refresh_store_tokens",
+        lambda **kwargs: None,
     )
     out = run_supervised_create(
         wid,

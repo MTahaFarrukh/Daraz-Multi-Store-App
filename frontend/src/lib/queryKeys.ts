@@ -81,6 +81,30 @@ export const queryKeys = {
   productDefaults: (workspaceId: string) =>
     ["workspace", workspaceId, "product-defaults"] as const,
 
+  inventory: (workspaceId: string, filterKey: string) =>
+    ["workspace", workspaceId, "inventory", filterKey] as const,
+
+  inventorySummary: (workspaceId: string, filterKey: string) =>
+    ["workspace", workspaceId, "inventory-summary", filterKey] as const,
+
+  analytics: (workspaceId: string, year: number, month: number, storeId = "") =>
+    ["workspace", workspaceId, "analytics", year, month, storeId] as const,
+
+  financeSummary: (workspaceId: string, storeId = "") =>
+    ["workspace", workspaceId, "finance-summary", storeId] as const,
+
+  financeTransactions: (workspaceId: string, storeId: string, page: number) =>
+    ["workspace", workspaceId, "finance-tx", storeId, page] as const,
+
+  financePayouts: (workspaceId: string, storeId: string, page: number) =>
+    ["workspace", workspaceId, "finance-payouts", storeId, page] as const,
+
+  connections: (workspaceId: string) =>
+    ["workspace", workspaceId, "connections"] as const,
+
+  auditEvents: (workspaceId: string, filterKey: string) =>
+    ["workspace", workspaceId, "audit-events", filterKey] as const,
+
   cloneDraft: (
     workspaceId: string,
     sourceProductId: string,

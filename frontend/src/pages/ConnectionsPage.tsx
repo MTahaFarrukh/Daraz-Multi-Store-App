@@ -4,8 +4,10 @@ import { Api } from "@/lib/api";
 import { canManageConnections } from "@/lib/capabilities";
 import { useAuth } from "@/hooks/useAuth";
 import {
+  ConfirmDialog,
   ErrorBanner,
   PageHeader,
+  StatusBadge,
   SuccessBanner,
 } from "@/components/ui/Primitives";
 import type { TrustedConnection } from "@/types/api";
@@ -27,6 +29,13 @@ export function ConnectionsPage() {
   });
 
   const data = query.data;
+  const myCode = data?.workspace?.connection_code || workspace?.connection_code || "—";
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    message: string;
+    run: () => Promise<unknown>;
+    okLabel: string;
+  } | null>(null);
 
   async function refresh() {
     await qc.invalidateQueries({ queryKey: ["connections", workspace?.id] });
@@ -44,10 +53,18 @@ export function ConnectionsPage() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy("");
+      setConfirm(null);
     }
   }
 
-  const myCode = data?.workspace?.connection_code || workspace?.connection_code || "—";
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(myCode);
+      setOk("Connection code copied");
+    } catch {
+      setError("Could not copy code");
+    }
+  }
 
   const sections = useMemo(
     () => [
@@ -72,7 +89,12 @@ export function ConnectionsPage() {
         <p className="muted-line" style={{ marginTop: 0 }}>
           Share this code only with workspaces you trust. It is not a secret password.
         </p>
-        <p style={{ fontFamily: "monospace", fontSize: "1.05rem", margin: 0 }}>{myCode}</p>
+        <div className="row" style={{ gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+          <p style={{ fontFamily: "monospace", fontSize: "1.05rem", margin: 0 }}>{myCode}</p>
+          <button type="button" className="btn" onClick={() => void copyCode()} disabled={myCode === "—"}>
+            Copy
+          </button>
+        </div>
       </section>
 
       {canMutate ? (
@@ -126,12 +148,22 @@ export function ConnectionsPage() {
                     void run("Rejected", () => Api.rejectConnection(row.id))
                   }
                   onRevoke={() =>
-                    void run("Revoked", () => Api.revokeConnection(row.id))
+                    setConfirm({
+                      title: "Revoke connection?",
+                      message:
+                        "Revoking removes product-sharing permissions with this workspace. You can request again later.",
+                      okLabel: "Revoke",
+                      run: () => Api.revokeConnection(row.id),
+                    })
                   }
                   onPerms={(patch) =>
-                    void run("Permissions updated", () =>
-                      Api.updateConnectionPermissions(row.id, patch)
-                    )
+                    setConfirm({
+                      title: "Update permissions?",
+                      message:
+                        "Changing View/Copy Products affects what the peer workspace can do with your catalog.",
+                      okLabel: "Update",
+                      run: () => Api.updateConnectionPermissions(row.id, patch),
+                    })
                   }
                 />
               ))}
@@ -139,6 +171,18 @@ export function ConnectionsPage() {
           )}
         </section>
       ))}
+
+      <ConfirmDialog
+        open={Boolean(confirm)}
+        title={confirm?.title || ""}
+        message={confirm?.message || ""}
+        confirmLabel={confirm?.okLabel || "Confirm"}
+        danger={confirm?.okLabel === "Revoke"}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          if (confirm) void run(confirm.okLabel, confirm.run);
+        }}
+      />
     </div>
   );
 }
@@ -169,7 +213,28 @@ function ConnectionRow({
     "Workspace";
   return (
     <li style={{ marginBottom: "0.65rem" }}>
-      <strong>{peer}</strong> — {row.status}
+      <strong>{peer}</strong>{" "}
+      <StatusBadge
+        tone={
+          row.status === "ACCEPTED"
+            ? "ok"
+            : row.status === "PENDING"
+              ? "warn"
+              : row.status === "REVOKED" || row.status === "REJECTED"
+                ? "danger"
+                : "muted"
+        }
+      >
+        {row.status === "PENDING"
+          ? "Pending"
+          : row.status === "ACCEPTED"
+            ? "Accepted"
+            : row.status === "REJECTED"
+              ? "Rejected"
+              : row.status === "REVOKED"
+                ? "Revoked"
+                : row.status}
+      </StatusBadge>
       {kind === "connected" ? (
         <span className="muted-line">
           {" "}

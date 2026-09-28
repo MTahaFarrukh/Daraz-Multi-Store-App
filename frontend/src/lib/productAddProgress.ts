@@ -12,6 +12,7 @@ export type DestinationAttemptLike = {
 
 const PROGRESS_LABELS: Record<string, string> = {
   PREPARING: "Preparing",
+  ANALYZING: "Analyzing",
   VALIDATING: "Validating",
   PREPARING_IMAGES: "Preparing images",
   CREATING: "Creating",
