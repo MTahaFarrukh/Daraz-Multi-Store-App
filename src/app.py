@@ -117,18 +117,67 @@ def api_inventory(
     return rows
 
 @app.get("/api/product-create-attempts/{attempt_id}")
-def api_product_create_attempt(attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
+def api_product_create_attempt(
+    attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)
+) -> dict[str, Any]:
     attempt = get_repo().get_product_attempt(ctx.workspace_id, attempt_id)
-    if not attempt: raise HTTPException(status_code=404, detail="Product create attempt not found")
-    return attempt
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Product create attempt not found")
+    # Never expose raw Daraz create payloads / tokens
+    safe = dict(attempt)
+    safe.pop("daraz_response", None)
+    return safe
+
 
 @app.post("/api/product-create-attempts/{attempt_id}/reconcile")
-def api_reconcile_product_create_attempt(attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
-    try: require_capability(ctx.role, "product.retry")
-    except PermissionError as exc: raise HTTPException(status_code=403, detail=str(exc)) from exc
-    attempt = get_repo().get_product_attempt(ctx.workspace_id, attempt_id)
-    if not attempt: raise HTTPException(status_code=404, detail="Product create attempt not found")
-    return get_repo().update_product_attempt(ctx.workspace_id, attempt_id, state="NEEDS_RECONCILIATION", verification_state="UNVERIFIED") or attempt
+def api_reconcile_product_create_attempt(
+    attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)
+) -> dict[str, Any]:
+    try:
+        require_capability(ctx.role, "product.retry")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    from src.product_create_reconcile import reconcile_product_create_attempt
+
+    result = reconcile_product_create_attempt(
+        ctx.workspace_id,
+        attempt_id,
+        actor_user_id=ctx.user.id,
+    )
+    if result.get("status") == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail="Product create attempt not found")
+    attempt = result.get("attempt") or {}
+    if isinstance(attempt, dict):
+        attempt = {k: v for k, v in attempt.items() if k != "daraz_response"}
+        result = {**result, "attempt": attempt}
+    return result
+
+
+@app.post("/api/product-create-attempts/{attempt_id}/retry")
+def api_retry_product_create_attempt(
+    attempt_id: str,
+    execute: bool = Query(True),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    try:
+        require_capability(ctx.role, "product.retry")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    from src.product_create_reconcile import retry_product_create_attempt
+
+    result = retry_product_create_attempt(
+        ctx.workspace_id,
+        attempt_id,
+        actor_user_id=ctx.user.id,
+        execute=execute,
+    )
+    if result.get("status") == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail="Product create attempt not found")
+    attempt = result.get("attempt") or {}
+    if isinstance(attempt, dict):
+        attempt = {k: v for k, v in attempt.items() if k != "daraz_response"}
+        result = {**result, "attempt": attempt}
+    return result
 
 @app.get("/api/analytics/summary")
 def api_analytics_summary(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:

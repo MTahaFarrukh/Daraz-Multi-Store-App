@@ -2,7 +2,16 @@
 from __future__ import annotations
 from typing import Any
 
-SENSITIVE_KEYS = {"access_token", "refresh_token", "token", "authorization", "secret", "password"}
+SENSITIVE_KEYS = {
+    "access_token",
+    "refresh_token",
+    "token",
+    "authorization",
+    "secret",
+    "password",
+    "signed_url",
+    "payload",
+}
 
 def safe_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return {str(k): v for k, v in (metadata or {}).items() if str(k).lower() not in SENSITIVE_KEYS}

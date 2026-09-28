@@ -42,6 +42,11 @@ from src.public_daraz import (
     fetch_public_product,
     find_connected_owner_for_item,
 )
+from src.product_create_reconcile import (
+    apply_attempt_seller_skus,
+    build_generated_seller_skus,
+    build_source_identity,
+)
 
 
 def _store_label(store: dict[str, Any] | None) -> dict[str, Any]:
@@ -270,12 +275,16 @@ def _prepare_destination(
     gate_on: bool,
     variant_price_overrides: dict[str, float] | None = None,
     resume_item_id: str | None = None,
+    forced_attempt_id: str | None = None,
+    forced_seller_skus: Any = None,
 ) -> dict[str, Any]:
     """Validate one destination draft; optionally CreateProduct when gated+confirmed."""
     del confirm  # probe-only concept; kept for call-site compatibility
     t0 = time.perf_counter()
     timings: dict[str, float] = {}
     store_info = _store_label(dest)
+    if forced_seller_skus is not None:
+        apply_attempt_seller_skus(draft, forced_seller_skus)
     override_report = _apply_price_override(
         draft, price_override, variant_price_overrides
     )
@@ -569,6 +578,63 @@ def _prepare_destination(
     else:
         errors.append("category:PrimaryCategory unresolved")
 
+    # Skip expensive image migration when category/brand already blocks create.
+    blocking_pre_image = bool(
+        any(
+            str(e).startswith(
+                (
+                    "category_missing:",
+                    "category_invalid:",
+                    "category_attributes:",
+                    "category:",
+                    "brand:",
+                    "variant_schema_conflict:",
+                )
+            )
+            for e in errors
+        )
+        or brand_resolution.get("status") == "UNRESOLVED"
+        or (category_result is not None and not category_result.get("valid"))
+        or not primary
+    )
+    if blocking_pre_image:
+        draft.setdefault("validation", {})["errors"] = list(dict.fromkeys(errors))
+        draft["validation"]["can_create"] = False
+        draft.setdefault("media", {})["resolved_images"] = []
+        draft["media"]["image_strategy"] = {
+            "strategies": [],
+            "resolved_count": 0,
+            "errors": [],
+            "skipped": "preflight_blocked",
+        }
+        preview = build_create_product_payload_preview(draft)
+        return {
+            "store": store_info,
+            "status": "NEEDS_ATTENTION",
+            "creation_status": "NEEDS_ATTENTION",
+            "reason": "; ".join(draft["validation"]["errors"][:4])
+            or "validation_failed",
+            "validation": draft["validation"],
+            "category": category_result,
+            "brand_resolution": brand_resolution,
+            "used_no_brand": used_no_brand,
+            "category_resolution": draft.get("category_resolution")
+            or {
+                "category_id": primary,
+                "confidence": cat_res.get("confidence"),
+                "source": cat_res.get("source"),
+            },
+            "draft_preview": preview,
+            "price_override_report": override_report,
+            "variant_count": len(
+                [v for v in (draft.get("variants") or []) if isinstance(v, dict)]
+            ),
+            "timings_ms": {
+                **timings,
+                "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+            },
+        }
+
     media = draft.get("media") or {}
     source_images = list(
         media.get("product_images") or media.get("resolved_images") or []
@@ -666,19 +732,103 @@ def _prepare_destination(
         }
 
     repo = get_repo()
-    sku_values = [str(v.get("seller_sku") or "") for v in (draft.get("variants") or [])]
-    source_identity = str(draft.get("source_item_id") or draft.get("source_url") or draft.get("source_type") or "")
-    fingerprint = hashlib.sha256(json.dumps({"source": source_identity, "store": str(dest.get("id")), "skus": sku_values}, sort_keys=True).encode()).hexdigest()
-    attempt = repo.find_product_attempt(workspace_id, fingerprint)
-    if attempt and attempt.get("state") in {"CREATING", "CREATED_UNVERIFIED", "NEEDS_RECONCILIATION"}:
-        return {**result_base, "status": "NEEDS_ATTENTION", "creation_status": "NEEDS_RECONCILIATION", "reason": "product_create_attempt_requires_reconciliation", "attempt_id": attempt["id"], "timings_ms": {**timings, "dest_total": round((time.perf_counter() - t0) * 1000, 1)}}
+    generated_rows = (
+        build_generated_seller_skus(draft)
+        if forced_seller_skus is None
+        else build_generated_seller_skus(
+            {**draft, "variants": draft.get("variants") or []}
+        )
+    )
+    if forced_seller_skus is not None:
+        # After apply_attempt_seller_skus, rebuild from draft so source ids attach
+        generated_rows = build_generated_seller_skus(draft)
+        # Prefer the exact persisted list (stable seller_sku values)
+        from src.product_create_reconcile import normalize_generated_seller_skus
+
+        forced_rows = normalize_generated_seller_skus(forced_seller_skus)
+        if forced_rows:
+            # Merge source ids from draft-derived rows when available
+            by_sku = {r["seller_sku"]: r.get("source_daraz_sku_id") for r in generated_rows}
+            generated_rows = [
+                {
+                    "seller_sku": r["seller_sku"],
+                    "source_daraz_sku_id": r.get("source_daraz_sku_id")
+                    or by_sku.get(r["seller_sku"]),
+                }
+                for r in forced_rows
+            ]
+    sku_values = [r["seller_sku"] for r in generated_rows]
+    source_identity = build_source_identity(draft)
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "source": source_identity,
+                "store": str(dest.get("id")),
+                "skus": sku_values,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    if forced_attempt_id:
+        attempt = repo.get_product_attempt(workspace_id, str(forced_attempt_id))
+    else:
+        attempt = repo.find_product_attempt(workspace_id, fingerprint)
+    if attempt and attempt.get("state") == "VERIFIED":
+        return {
+            **result_base,
+            "status": "ALREADY_EXISTS",
+            "creation_status": "VERIFIED",
+            "reason": "product_create_attempt_already_verified",
+            "attempt_id": attempt["id"],
+            "item_id": attempt.get("destination_item_id"),
+            "timings_ms": {
+                **timings,
+                "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+            },
+        }
+    if attempt and attempt.get("state") in {
+        "CREATING",
+        "CREATED_UNVERIFIED",
+        "NEEDS_RECONCILIATION",
+    }:
+        # Allow continuation only when this call owns the forced attempt (retry
+        # already transitioned to CREATING). Otherwise block.
+        if not (
+            forced_attempt_id
+            and str(attempt.get("id")) == str(forced_attempt_id)
+            and attempt.get("state") == "CREATING"
+        ):
+            return {
+                **result_base,
+                "status": "NEEDS_ATTENTION",
+                "creation_status": "NEEDS_RECONCILIATION",
+                "reason": "product_create_attempt_requires_reconciliation",
+                "attempt_id": attempt["id"],
+                "timings_ms": {
+                    **timings,
+                    "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+                },
+            }
     if not attempt:
-        attempt = repo.create_product_attempt({
-            "workspace_id": workspace_id, "source_type": draft.get("source_type") or "unknown",
-            "source_identity": source_identity, "destination_store_id": str(dest.get("id")),
-            "request_fingerprint": fingerprint, "state": "PREPARING",
-            "generated_seller_skus": sku_values, "verification_state": "UNVERIFIED",
-        })
+        attempt = repo.create_product_attempt(
+            {
+                "workspace_id": workspace_id,
+                "source_type": draft.get("source_type") or "unknown",
+                "source_identity": source_identity,
+                "destination_store_id": str(dest.get("id")),
+                "request_fingerprint": fingerprint,
+                "state": "PREPARING",
+                "generated_seller_skus": generated_rows,
+                "verification_state": "UNVERIFIED",
+            }
+        )
+    else:
+        # Keep exact SKUs on the attempt (never regenerate)
+        repo.update_product_attempt(
+            workspace_id,
+            attempt["id"],
+            generated_seller_skus=generated_rows,
+        )
     repo.update_product_attempt(workspace_id, attempt["id"], state="CREATING")
 
     t_create = time.perf_counter()
@@ -731,7 +881,14 @@ def _prepare_destination(
 
     timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
     item_id = _extract_item_id_from_create(resp)
-    repo.update_product_attempt(workspace_id, attempt["id"], state="CREATED_UNVERIFIED", destination_item_id=str(item_id) if item_id else None, daraz_response=redact_create_response(resp))
+    repo.update_product_attempt(
+        workspace_id,
+        attempt["id"],
+        state="CREATED_UNVERIFIED",
+        destination_item_id=str(item_id) if item_id else None,
+        daraz_response=redact_create_response(resp),
+        generated_seller_skus=generated_rows,
+    )
 
     t_sp = time.perf_counter()
     special = _apply_special_prices(client, draft)
@@ -743,7 +900,26 @@ def _prepare_destination(
     post = _post_create_status(client, item_id)
     fidelity = verify_pricing_fidelity(draft, post.get("raw"))
     timings["verification_ms"] = round((time.perf_counter() - t_ver) * 1000, 1)
-    repo.update_product_attempt(workspace_id, attempt["id"], state="VERIFIED" if post.get("raw") else "CREATED_UNVERIFIED", verification_state="VERIFIED" if post.get("raw") else "UNVERIFIED", destination_item_id=str(item_id) if item_id else None)
+    mapping: dict[str, Any] = {}
+    raw_item = post.get("raw") if isinstance(post, dict) else None
+    if isinstance(raw_item, dict):
+        from src.product_create_reconcile import _sku_mapping_from_product
+
+        data = (
+            raw_item.get("data")
+            if isinstance(raw_item.get("data"), dict)
+            else raw_item
+        )
+        if isinstance(data, dict):
+            mapping = _sku_mapping_from_product(data, generated_rows)
+    repo.update_product_attempt(
+        workspace_id,
+        attempt["id"],
+        state="VERIFIED" if post.get("raw") else "CREATED_UNVERIFIED",
+        verification_state="VERIFIED" if post.get("raw") else "UNVERIFIED",
+        destination_item_id=str(item_id) if item_id else None,
+        destination_sku_mapping=mapping or None,
+    )
 
     catalog_upsert: dict[str, Any] = {"ok": False}
     if item_id:
@@ -883,6 +1059,8 @@ def add_product_from_public_url(
     allow_duplicates: bool = False,
     edit_before: bool = False,
     resume_by_store: dict[str, str] | None = None,
+    forced_attempt_id: str | None = None,
+    forced_seller_skus: Any = None,
 ) -> dict[str, Any]:
     """Fetch public URL once → prepare / create on each destination.
 
@@ -1035,6 +1213,8 @@ def add_product_from_public_url(
                 confirm=True,
                 gate_on=gate_on,
                 resume_item_id=resume_id,
+                forced_attempt_id=forced_attempt_id,
+                forced_seller_skus=forced_seller_skus,
             )
         )
 
@@ -1069,6 +1249,8 @@ def add_product_from_connected(
     allow_duplicates: bool = False,
     edit_before: bool = False,
     resume_by_store: dict[str, str] | None = None,
+    forced_attempt_id: str | None = None,
+    forced_seller_skus: Any = None,
 ) -> dict[str, Any]:
     """Fetch connected item once → prepare / create on each destination."""
     del confirm
@@ -1185,6 +1367,8 @@ def add_product_from_connected(
                 confirm=True,
                 gate_on=gate_on,
                 resume_item_id=resume_id,
+                forced_attempt_id=forced_attempt_id,
+                forced_seller_skus=forced_seller_skus,
             )
         )
 

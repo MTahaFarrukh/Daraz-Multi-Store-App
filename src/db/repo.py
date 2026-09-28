@@ -1491,24 +1491,96 @@ class PostgresTenancyRepo:
     def find_product_attempt(self, workspace_id: str, fingerprint: str) -> dict[str, Any] | None:
         from src.db.connection import connect
         with connect() as conn:
-            row = conn.execute("SELECT id,workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,destination_item_id,verification_state,last_error,retry_count,created_at,updated_at FROM product_create_attempts WHERE workspace_id=%s AND request_fingerprint=%s", (workspace_id, fingerprint)).fetchone()
-        if not row: return None
-        return {"id": str(row[0]), "workspace_id": str(row[1]), "source_type": row[2], "source_identity": row[3], "destination_store_id": str(row[4]), "request_fingerprint": row[5], "state": row[6], "generated_seller_skus": row[7], "destination_item_id": row[8], "verification_state": row[9], "last_error": row[10], "retry_count": row[11], "created_at": row[12].isoformat(), "updated_at": row[13].isoformat()}
+            row = conn.execute(
+                "SELECT id,workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,destination_item_id,verification_state,last_error,retry_count,created_at,updated_at,destination_sku_mapping,daraz_response FROM product_create_attempts WHERE workspace_id=%s AND request_fingerprint=%s",
+                (workspace_id, fingerprint),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "source_type": row[2],
+            "source_identity": row[3],
+            "destination_store_id": str(row[4]),
+            "request_fingerprint": row[5],
+            "state": row[6],
+            "generated_seller_skus": row[7],
+            "destination_item_id": row[8],
+            "verification_state": row[9],
+            "last_error": row[10],
+            "retry_count": row[11],
+            "created_at": row[12].isoformat(),
+            "updated_at": row[13].isoformat(),
+            "destination_sku_mapping": row[14] or {},
+            "daraz_response": row[15],
+        }
 
     def get_product_attempt(self, workspace_id: str, attempt_id: str) -> dict[str, Any] | None:
         from src.db.connection import connect
         with connect() as conn:
-            row = conn.execute("SELECT id,workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,destination_item_id,verification_state,last_error,retry_count,created_at,updated_at FROM product_create_attempts WHERE workspace_id=%s AND id=%s", (workspace_id, attempt_id)).fetchone()
-        if not row: return None
-        return self.find_product_attempt(workspace_id, row[5])
-
+            row = conn.execute(
+                "SELECT id,workspace_id,source_type,source_identity,destination_store_id,request_fingerprint,state,generated_seller_skus,destination_item_id,verification_state,last_error,retry_count,created_at,updated_at,destination_sku_mapping,daraz_response FROM product_create_attempts WHERE workspace_id=%s AND id=%s",
+                (workspace_id, attempt_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "source_type": row[2],
+            "source_identity": row[3],
+            "destination_store_id": str(row[4]),
+            "request_fingerprint": row[5],
+            "state": row[6],
+            "generated_seller_skus": row[7],
+            "destination_item_id": row[8],
+            "verification_state": row[9],
+            "last_error": row[10],
+            "retry_count": row[11],
+            "created_at": row[12].isoformat(),
+            "updated_at": row[13].isoformat(),
+            "destination_sku_mapping": row[14] or {},
+            "daraz_response": row[15],
+        }
     def update_product_attempt(self, workspace_id: str, attempt_id: str, **fields: Any) -> dict[str, Any] | None:
         from src.db.connection import connect
-        allowed = {k: v for k, v in fields.items() if k in {"state","destination_item_id","verification_state","last_error","retry_count"}}
-        if not allowed: return self.get_product_attempt(workspace_id, attempt_id)
-        sets = ", ".join(f"{k}=%s" for k in allowed)
+        allowed = {
+            k: v
+            for k, v in fields.items()
+            if k
+            in {
+                "state",
+                "destination_item_id",
+                "verification_state",
+                "last_error",
+                "retry_count",
+                "generated_seller_skus",
+                "destination_sku_mapping",
+                "daraz_response",
+            }
+            and v is not None
+        }
+        # Allow clearing last_error explicitly
+        if "last_error" in fields and fields["last_error"] is None:
+            allowed["last_error"] = None
+        if not allowed:
+            return self.get_product_attempt(workspace_id, attempt_id)
+        sets_parts = []
+        values: list[Any] = []
+        for k, v in allowed.items():
+            if k in {"generated_seller_skus", "destination_sku_mapping", "daraz_response"}:
+                sets_parts.append(f"{k}=%s::jsonb")
+                values.append(json.dumps(v if v is not None else ({} if k != "generated_seller_skus" else [])))
+            else:
+                sets_parts.append(f"{k}=%s")
+                values.append(v)
         with connect() as conn:
-            conn.execute(f"UPDATE product_create_attempts SET {sets}, updated_at=NOW() WHERE workspace_id=%s AND id=%s", (*allowed.values(), workspace_id, attempt_id)); conn.commit()
+            conn.execute(
+                f"UPDATE product_create_attempts SET {', '.join(sets_parts)}, updated_at=NOW() WHERE workspace_id=%s AND id=%s",
+                (*values, workspace_id, attempt_id),
+            )
+            conn.commit()
         return self.get_product_attempt(workspace_id, attempt_id)
 
     """Postgres-backed tenancy repository."""
