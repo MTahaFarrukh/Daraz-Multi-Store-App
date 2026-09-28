@@ -1193,4 +1193,88 @@ table.data tbody tr:hover {
     flex-direction: column;
     align-items: stretch;
   }
+
+  .analytics-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Batch 5 — Inventory / Analytics / Finance */
+.inv-thumb {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  background: var(--surface-muted, #f3f6f7);
+}
+
+.inv-thumb-empty {
+  display: inline-block;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.simple-chart {
+  width: 100%;
+  height: auto;
+  max-height: 140px;
+}
+
+.simple-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.simple-bar-row {
+  display: grid;
+  grid-template-columns: minmax(4rem, 7rem) 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.82rem;
+}
+
+.simple-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.simple-bar-track {
+  height: 0.55rem;
+  background: var(--surface-muted, #e8eef0);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.simple-bar-fill {
+  height: 100%;
+  background: var(--teal-deep);
+  border-radius: 999px;
+}
+
+.simple-bar-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.chart-empty {
+  min-height: 4rem;
+  display: flex;
+  align-items: center;
+}
+
+.banner-warn {
+  background: #fff7e8;
+  border: 1px solid #e6c98a;
+  color: #7a5a12;
+  padding: 0.65rem 0.85rem;
+  border-radius: var(--radius-sm);
 }

@@ -9,6 +9,8 @@ import {
   PageHeader,
   SuccessBanner,
 } from "@/components/ui/Primitives";
+import { AuditActivityPanel } from "@/pages/AuditActivityPanel";
+import { canViewAudit } from "@/lib/capabilities";
 
 export function SettingsPage() {
   const { me } = useAuth();
@@ -84,6 +86,12 @@ export function SettingsPage() {
         <p style={{ margin: "0 0 0.35rem" }}>
           <strong>Role:</strong> {me?.workspace.role || "—"}
         </p>
+        <p style={{ margin: "0 0 0.35rem" }}>
+          <strong>Connection code:</strong>{" "}
+          <span style={{ fontFamily: "monospace" }}>
+            {me?.workspace.connection_code || "—"}
+          </span>
+        </p>
         <p style={{ margin: 0, fontFamily: "monospace", fontSize: "0.78rem" }}>
           {me?.workspace.id}
         </p>
@@ -135,6 +143,8 @@ export function SettingsPage() {
           never shown in the browser.
         </p>
       </section>
+
+      {canViewAudit(me?.workspace) ? <AuditActivityPanel /> : null}
     </div>
   );
 }

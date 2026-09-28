@@ -16,6 +16,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from src.authorization import (
+    can_view_audit,
+    capabilities_for_role,
+    enforce_capability,
+    require_capability,
+)
+from src.route_audit import audit_mutation, audit_product_create_result
+from src.audit_log import sanitize_audit_row
 from src.auth import (
     AuthUser,
     WorkspaceContext,
@@ -50,7 +58,6 @@ from src.print_job import (
 from src.print_safety import validate_print_targets
 from src.token_refresh import refresh_store_tokens
 from src.token_store import build_token_record, sanitize_store_view
-from src.authorization import require_capability
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,23 +105,90 @@ app = FastAPI(
 )
 
 @app.get("/api/audit-events")
-def api_audit_events(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
-    try:
-        require_capability(ctx.role, "workspace.read")
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+def api_audit_events(
+    action: str | None = Query(None),
+    actor: str | None = Query(None, description="Actor user id"),
+    entity_type: str | None = Query(None),
+    since: str | None = Query(None, description="ISO timestamp lower bound"),
+    until: str | None = Query(None, description="ISO timestamp upper bound"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    if not can_view_audit(ctx.role):
+        raise HTTPException(status_code=403, detail="Insufficient workspace capability")
     repo = get_repo()
-    rows = repo.list_audit_events(ctx.workspace_id) if hasattr(repo, "list_audit_events") else []
-    return {"items": rows}
+    page = repo.list_audit_events(
+        ctx.workspace_id,
+        action=action,
+        actor_user_id=actor,
+        entity_type=entity_type,
+        since=since,
+        until=until,
+        limit=limit,
+        offset=offset,
+    )
+    items = [sanitize_audit_row(r) for r in (page.get("items") or [])]
+    return {
+        "items": [i for i in items if i],
+        "total": page.get("total", len(items)),
+        "limit": page.get("limit", limit),
+        "offset": page.get("offset", offset),
+    }
+
+
+class FinanceSyncBody(BaseModel):
+    store_ids: list[str] = Field(default_factory=list)
+    lookback_days: int = Field(default=30, ge=1, le=90)
+
 
 @app.get("/api/inventory")
 def api_inventory(
-    store_id: str | None = None, search: str | None = None,
-    status: str | None = None, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+    store_id: str | None = None,
+    search: str | None = None,
+    status: str | None = None,
+    low_stock: bool = False,
+    low_stock_threshold: int = Query(5, ge=0, le=1000),
+    sort: str = Query("product"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    # Legacy offsets still accepted (converted to page).
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int | None = Query(None, ge=0),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict[str, Any]:
-    rows = get_repo().list_daraz_products(ctx.workspace_id, {"store_id": store_id, "search": search, "status": status, "limit": limit, "offset": offset})
-    return rows
+    from src.inventory import list_inventory
+
+    if limit is not None and offset is not None:
+        page_size = limit
+        page = (offset // limit) + 1 if limit else 1
+    return list_inventory(
+        ctx.workspace_id,
+        store_id=store_id,
+        status=status,
+        search=search,
+        low_stock=low_stock,
+        low_stock_threshold=low_stock_threshold,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@app.get("/api/inventory/summary")
+def api_inventory_summary(
+    store_id: str | None = None,
+    low_stock_threshold: int = Query(5, ge=0, le=1000),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    from src.inventory import inventory_summary
+
+    return inventory_summary(
+        ctx.workspace_id,
+        store_id=store_id,
+        low_stock_threshold=low_stock_threshold,
+    )
+
 
 @app.get("/api/product-create-attempts/{attempt_id}")
 def api_product_create_attempt(
@@ -133,10 +207,7 @@ def api_product_create_attempt(
 def api_reconcile_product_create_attempt(
     attempt_id: str, ctx: WorkspaceContext = Depends(get_workspace_context)
 ) -> dict[str, Any]:
-    try:
-        require_capability(ctx.role, "product.retry")
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    enforce_capability(ctx.role, "product.retry")
     from src.product_create_reconcile import reconcile_product_create_attempt
 
     result = reconcile_product_create_attempt(
@@ -146,6 +217,14 @@ def api_reconcile_product_create_attempt(
     )
     if result.get("status") == "NOT_FOUND":
         raise HTTPException(status_code=404, detail="Product create attempt not found")
+    audit_mutation(
+        workspace_id=ctx.workspace_id,
+        actor_user_id=ctx.user.id,
+        action="product.reconcile.result",
+        entity_type="product_create_attempt",
+        entity_id=str(attempt_id),
+        metadata={"status": result.get("status"), "reason": result.get("reason")},
+    )
     attempt = result.get("attempt") or {}
     if isinstance(attempt, dict):
         attempt = {k: v for k, v in attempt.items() if k != "daraz_response"}
@@ -159,10 +238,7 @@ def api_retry_product_create_attempt(
     execute: bool = Query(True),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict[str, Any]:
-    try:
-        require_capability(ctx.role, "product.retry")
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    enforce_capability(ctx.role, "product.retry")
     from src.product_create_reconcile import retry_product_create_attempt
 
     result = retry_product_create_attempt(
@@ -173,6 +249,14 @@ def api_retry_product_create_attempt(
     )
     if result.get("status") == "NOT_FOUND":
         raise HTTPException(status_code=404, detail="Product create attempt not found")
+    audit_mutation(
+        workspace_id=ctx.workspace_id,
+        actor_user_id=ctx.user.id,
+        action="product.retry.result",
+        entity_type="product_create_attempt",
+        entity_id=str(attempt_id),
+        metadata={"status": result.get("status"), "reason": result.get("reason")},
+    )
     attempt = result.get("attempt") or {}
     if isinstance(attempt, dict):
         attempt = {k: v for k, v in attempt.items() if k != "daraz_response"}
@@ -180,13 +264,79 @@ def api_retry_product_create_attempt(
     return result
 
 @app.get("/api/analytics/summary")
-def api_analytics_summary(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict[str, Any]:
-    repo = get_repo(); orders = repo.list_orders(ctx.workspace_id, {"limit": 10000}).get("items", [])
-    by_status: dict[str, int] = {}
-    for order in orders:
-        key = str(order.get("status_group") or "other"); by_status[key] = by_status.get(key, 0) + 1
-    gross = sum(float(o.get("price") or 0) for o in orders)
-    return {"gross_sales": gross, "order_count": len(orders), "status_distribution": by_status, "label": "Gross Sales"}
+def api_analytics_summary(
+    year: int | None = Query(None, ge=2000, le=2100),
+    month: int | None = Query(None, ge=1, le=12),
+    store_id: str | None = None,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    from src.analytics_service import analytics_dashboard
+
+    return analytics_dashboard(
+        ctx.workspace_id, year=year, month=month, store_id=store_id
+    )
+
+
+@app.post("/api/finance/sync")
+def api_finance_sync(
+    body: FinanceSyncBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    enforce_capability(ctx.role, "finance.sync")
+    from src.finance_sync import sync_finance
+
+    if not body.store_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No stores selected. Pick at least one store. Empty selection is not all stores.",
+        )
+    try:
+        return sync_finance(
+            ctx.workspace_id,
+            store_ids=body.store_ids,
+            actor_user_id=ctx.user.id,
+            lookback_days=body.lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/finance/summary")
+def api_finance_summary(
+    store_id: str | None = None,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    enforce_capability(ctx.role, "finance.read")
+    from src.finance_sync import finance_summary
+
+    return finance_summary(ctx.workspace_id, store_id=store_id)
+
+
+@app.get("/api/finance/transactions")
+def api_finance_transactions(
+    store_id: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    enforce_capability(ctx.role, "finance.read")
+    return get_repo().list_finance_transactions(
+        ctx.workspace_id, store_id=store_id, page=page, page_size=page_size
+    )
+
+
+@app.get("/api/finance/payouts")
+def api_finance_payouts(
+    store_id: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict[str, Any]:
+    enforce_capability(ctx.role, "finance.read")
+    return get_repo().list_finance_payouts(
+        ctx.workspace_id, store_id=store_id, page=page, page_size=page_size
+    )
+
 
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -310,11 +460,21 @@ def api_public_config() -> dict:
 def api_me(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
     repo = get_repo()
     memberships = repo.list_memberships(ctx.user.id)
+    caps = sorted(capabilities_for_role(ctx.role))
+    connection_code = None
+    try:
+        from src.workspace_connections import ensure_workspace_connection_code
+
+        connection_code = ensure_workspace_connection_code(ctx.workspace_id)
+    except Exception:  # noqa: BLE001
+        connection_code = None
     return {
         "user": {"id": ctx.user.id, "email": ctx.user.email},
         "workspace": {
             "id": ctx.workspace_id,
             "role": ctx.role,
+            "connection_code": connection_code,
+            "capabilities": caps,
         },
         "memberships": memberships,
     }
@@ -367,6 +527,7 @@ def api_import_legacy_stores(
 @app.get("/api/oauth/start")
 def api_oauth_start(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
     """Return a Daraz authorize URL bound to the current workspace."""
+    enforce_capability(ctx.role, "store.manage")
     app_key = require_env("DARAZ_APP_KEY")
     redirect_uri = get_env("DARAZ_REDIRECT_URI", DEFAULT_REDIRECT_URI)
     authorize_base = get_env("DARAZ_OAUTH_AUTHORIZE", DEFAULT_OAUTH_AUTHORIZE)
@@ -419,6 +580,17 @@ def oauth_callback(
             workspace_id[:8],
             record.get("store_id", ""),
             record.get("account", ""),
+        )
+        audit_mutation(
+            workspace_id=workspace_id,
+            actor_user_id=user_id,
+            action="store.connect.success",
+            entity_type="daraz_store",
+            entity_id=str(record.get("id") or record.get("store_id")),
+            metadata={
+                "store_id": record.get("store_id"),
+                "status": "connected",
+            },
         )
         accept = request.headers.get("accept", "")
         if "application/json" in accept and "text/html" not in accept:
@@ -483,9 +655,18 @@ def api_rename_store(
     body: RenameStoreBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "store.manage")
     try:
         record = get_repo().update_store_display_name(
             ctx.workspace_id, store_id, body.display_name
+        )
+        audit_mutation(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            action="store.rename",
+            entity_type="daraz_store",
+            entity_id=str(record.get("id") or store_id),
+            metadata={"store_id": store_id, "display_name": body.display_name},
         )
         return {"store": sanitize_store_view(record)}
     except ValueError as exc:
@@ -504,6 +685,7 @@ def api_refresh_tokens(
     force: bool = Query(False),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "store.manage")
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
         results = refresh_store_tokens(
@@ -511,6 +693,19 @@ def api_refresh_tokens(
             store_ids=store_ids,
             force=force,
             workspace_id=ctx.workspace_id,
+        )
+        audit_mutation(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            action="store.refresh",
+            entity_type="daraz_store",
+            entity_id=store_id,
+            metadata={
+                "store_ids": store_ids or ([store_id] if store_id else None),
+                "force": force,
+                "result_count": len(results),
+                "statuses": [r.get("status") for r in results[:20]],
+            },
         )
         return {"results": results}
     except ValueError as exc:
@@ -542,6 +737,7 @@ def api_create_group(
     body: StoreGroupBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "store.manage")
     repo = get_repo()
     # Validate store IDs belong to workspace
     for sid in body.store_ids:
@@ -549,6 +745,14 @@ def api_create_group(
             raise HTTPException(status_code=400, detail=f"Unknown store: {sid}")
     try:
         group = repo.create_group(ctx.workspace_id, body.name, body.store_ids)
+        audit_mutation(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            action="store.group.create",
+            entity_type="store_group",
+            entity_id=str(group.get("id")),
+            metadata={"name": body.name, "store_count": len(body.store_ids)},
+        )
         return {"group": group}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -560,6 +764,7 @@ def api_update_group(
     body: StoreGroupUpdateBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "store.manage")
     repo = get_repo()
     if body.store_ids is not None:
         for sid in body.store_ids:
@@ -572,6 +777,14 @@ def api_update_group(
             name=body.name,
             store_ids=body.store_ids,
         )
+        audit_mutation(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            action="store.group.update",
+            entity_type="store_group",
+            entity_id=str(group_id),
+            metadata={"name": body.name},
+        )
         return {"group": group}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -582,8 +795,17 @@ def api_delete_group(
     group_id: str,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "store.manage")
     try:
         get_repo().delete_group(ctx.workspace_id, group_id)
+        audit_mutation(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            action="store.group.delete",
+            entity_type="store_group",
+            entity_id=str(group_id),
+            metadata={},
+        )
         return {"ok": True}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -599,6 +821,7 @@ def api_import_browser_profiles(
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
     """One-time import from browser localStorage multistore_vendor_v1 profiles."""
+    enforce_capability(ctx.role, "store.manage")
     repo = get_repo()
     imported = []
     skipped = []
@@ -1025,10 +1248,9 @@ def api_print_labels_orders(
     wait: bool = Query(False, description="Block until done (local dev only)"),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    try:
-        require_capability(ctx.role, "shipping.reprint" if body.allow_reprint else "shipping.print")
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    enforce_capability(
+        ctx.role, "shipping.reprint" if body.allow_reprint else "shipping.print"
+    )
     import threading
     import time as _time
 
@@ -1045,6 +1267,21 @@ def api_print_labels_orders(
     if not order_ids:
         raise HTTPException(status_code=400, detail="No orders selected")
     selection_ms = (_time.perf_counter() - t_parse) * 1000
+
+    action = (
+        "shipping.reprint.requested" if body.allow_reprint else "shipping.print.requested"
+    )
+    audit_mutation(
+        workspace_id=ctx.workspace_id,
+        actor_user_id=ctx.user.id,
+        action=action,
+        entity_type="print_job",
+        entity_id=None,
+        metadata={
+            "order_count": len(order_ids),
+            "allow_reprint": bool(body.allow_reprint),
+        },
+    )
 
     def run_print(job_id: str) -> dict[str, Any]:
         out_path = job_pdf_path(ctx.workspace_id, job_id)
@@ -1093,17 +1330,61 @@ def api_print_labels_orders(
             # Progress updates happen inside print_labels_for_orders (immediate Gathering…)
             result = run_print(job_id)
             complete_print_job(job_id, result)
+            audit_mutation(
+                workspace_id=ctx.workspace_id,
+                actor_user_id=ctx.user.id,
+                action="shipping.print.completed",
+                entity_type="print_job",
+                entity_id=str(job_id),
+                metadata={
+                    "status": "completed",
+                    "labels": (result or {}).get("labels"),
+                    "pages": (result or {}).get("pages"),
+                },
+            )
         except ValueError as exc:
             fail_print_job(job_id, str(exc))
+            audit_mutation(
+                workspace_id=ctx.workspace_id,
+                actor_user_id=ctx.user.id,
+                action="shipping.print.failed",
+                entity_type="print_job",
+                entity_id=str(job_id),
+                metadata={"status": "failed", "error_code": "value_error"},
+            )
         except LabelProcessingError as exc:
             logger.exception("Label PDF merge failed")
             fail_print_job(job_id, str(exc))
+            audit_mutation(
+                workspace_id=ctx.workspace_id,
+                actor_user_id=ctx.user.id,
+                action="shipping.print.failed",
+                entity_type="print_job",
+                entity_id=str(job_id),
+                metadata={"status": "failed", "error_code": "label_processing"},
+            )
         except DarazApiError as exc:
             logger.exception("Daraz API error during print")
             fail_print_job(job_id, str(exc))
+            audit_mutation(
+                workspace_id=ctx.workspace_id,
+                actor_user_id=ctx.user.id,
+                action="shipping.print.failed",
+                entity_type="print_job",
+                entity_id=str(job_id),
+                metadata={"status": "failed", "error_code": str(exc.code or "daraz")},
+            )
         except Exception as exc:
             logger.exception("Unexpected print job failure")
             fail_print_job(job_id, f"{type(exc).__name__}: {exc}")
+            audit_mutation(
+                workspace_id=ctx.workspace_id,
+                actor_user_id=ctx.user.id,
+                action="shipping.print.failed",
+                entity_type="print_job",
+                entity_id=str(job_id),
+                metadata={"status": "failed", "error_code": type(exc).__name__},
+            )
 
     # Start worker immediately in a daemon thread so hydrate/Daraz never delays the HTTP
     # response. FastAPI BackgroundTasks only run after the response is sent; a thread
@@ -1143,12 +1424,32 @@ def api_print_labels(
     wait: bool = Query(False, description="Block until done (local dev only)"),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(
+        ctx.role, "shipping.reprint" if allow_reprint else "shipping.print"
+    )
     if reuse_saved:
         raise HTTPException(status_code=400, detail="Saved-label reuse is unavailable. Use an owned print job download.")
     try:
         store_id, store_ids = _parse_store_ids(store, stores)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    audit_mutation(
+        workspace_id=ctx.workspace_id,
+        actor_user_id=ctx.user.id,
+        action=(
+            "shipping.reprint.requested"
+            if allow_reprint
+            else "shipping.print.requested"
+        ),
+        entity_type="print_job",
+        metadata={
+            "store_id": store_id,
+            "store_ids": store_ids,
+            "allow_reprint": allow_reprint,
+            "legacy": True,
+        },
+    )
 
     get_one, list_all = _workspace_store_fns(ctx.workspace_id)
 
@@ -1556,6 +1857,7 @@ def api_products_sync(
     store_ids: str | None = Query(None),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "product.create")
     from src.product_sync import sync_workspace_products
 
     payload = body or ProductSyncBody()
@@ -1588,8 +1890,17 @@ def api_put_product_defaults(
     body: ProductDefaultsBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
+    enforce_capability(ctx.role, "settings.manage")
     payload = body.model_dump(exclude_none=True)
     defaults = get_repo().upsert_product_defaults(ctx.workspace_id, payload)
+    audit_mutation(
+        workspace_id=ctx.workspace_id,
+        actor_user_id=ctx.user.id,
+        action="settings.product_defaults.changed",
+        entity_type="product_defaults",
+        entity_id=ctx.workspace_id,
+        metadata={"keys": sorted(payload.keys())},
+    )
     return {"defaults": defaults}
 
 
@@ -1692,17 +2003,14 @@ def api_add_product_from_url(
     body: AddFromUrlBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    try:
-        require_capability(ctx.role, "product.create")
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
     """One-click add from public Daraz URL → multi-store (create gated)."""
+    enforce_capability(ctx.role, "product.create")
     from src.product_add import add_product_from_public_url
     from src.product_fetch import ProductFetchError
     from src.public_daraz import PublicDarazError
 
     try:
-        return add_product_from_public_url(
+        result = add_product_from_public_url(
             ctx.workspace_id,
             body.url,
             body.destination_store_ids,
@@ -1714,6 +2022,13 @@ def api_add_product_from_url(
             edit_before=body.edit_before,
             resume_by_store=body.resume_by_store,
         )
+        audit_product_create_result(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            result=result,
+            source="public_url",
+        )
+        return result
     except (PublicDarazError, ProductFetchError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1723,16 +2038,13 @@ def api_add_product_from_connected(
     body: AddFromConnectedBody,
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    try:
-        require_capability(ctx.role, "product.create")
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
     """One-click add from connected Item ID → multi-store (create gated)."""
+    enforce_capability(ctx.role, "product.create")
     from src.product_add import add_product_from_connected
     from src.product_fetch import ProductFetchError
 
     try:
-        return add_product_from_connected(
+        result = add_product_from_connected(
             ctx.workspace_id,
             body.source_store_id,
             body.daraz_item_id,
@@ -1745,6 +2057,13 @@ def api_add_product_from_connected(
             edit_before=body.edit_before,
             resume_by_store=body.resume_by_store,
         )
+        audit_product_create_result(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            result=result,
+            source="connected",
+        )
+        return result
     except (ProductFetchError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1814,6 +2133,143 @@ def api_product_create_probe_for_id(
         code = 403 if "ALLOW_PRODUCT_CREATE_PROBE" in reason else 400
         raise HTTPException(status_code=code, detail=reason)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Trusted workspace connections
+# ---------------------------------------------------------------------------
+
+
+class ConnectionRequestBody(BaseModel):
+    target_connection_code: str = Field(..., min_length=4, max_length=64)
+
+
+class ConnectionPermissionsBody(BaseModel):
+    view_products: bool | None = None
+    copy_products: bool | None = None
+
+
+def _connection_http(exc: Exception) -> HTTPException:
+    from src.workspace_connections import ConnectionError
+
+    if isinstance(exc, ConnectionError):
+        code = getattr(exc, "code", "")
+        status = 404 if code in {"target_not_found", "not_found"} else 400
+        if code in {"forbidden", "not_target", "requester_cannot_accept", "not_grantor"}:
+            status = 403
+        return HTTPException(status_code=status, detail={"error": code, "message": str(exc)})
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/connections")
+def api_list_connections(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
+    enforce_capability(ctx.role, "workspace.read")
+    from src.workspace_connections import list_connections
+
+    return list_connections(ctx.workspace_id)
+
+
+@app.post("/api/connections/request")
+def api_request_connection(
+    body: ConnectionRequestBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "connections.manage")
+    from src.workspace_connections import ConnectionError, request_connection
+
+    try:
+        return {
+            "connection": request_connection(
+                source_workspace_id=ctx.workspace_id,
+                actor_user_id=ctx.user.id,
+                target_connection_code=body.target_connection_code,
+            )
+        }
+    except ConnectionError as exc:
+        raise _connection_http(exc) from exc
+
+
+@app.post("/api/connections/{connection_id}/accept")
+def api_accept_connection(
+    connection_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "connections.manage")
+    from src.workspace_connections import ConnectionError, accept_connection
+
+    try:
+        return {
+            "connection": accept_connection(
+                workspace_id=ctx.workspace_id,
+                connection_id=connection_id,
+                actor_user_id=ctx.user.id,
+            )
+        }
+    except ConnectionError as exc:
+        raise _connection_http(exc) from exc
+
+
+@app.post("/api/connections/{connection_id}/reject")
+def api_reject_connection(
+    connection_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "connections.manage")
+    from src.workspace_connections import ConnectionError, reject_connection
+
+    try:
+        return {
+            "connection": reject_connection(
+                workspace_id=ctx.workspace_id,
+                connection_id=connection_id,
+                actor_user_id=ctx.user.id,
+            )
+        }
+    except ConnectionError as exc:
+        raise _connection_http(exc) from exc
+
+
+@app.post("/api/connections/{connection_id}/revoke")
+def api_revoke_connection(
+    connection_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "connections.manage")
+    from src.workspace_connections import ConnectionError, revoke_connection
+
+    try:
+        return {
+            "connection": revoke_connection(
+                workspace_id=ctx.workspace_id,
+                connection_id=connection_id,
+                actor_user_id=ctx.user.id,
+            )
+        }
+    except ConnectionError as exc:
+        raise _connection_http(exc) from exc
+
+
+@app.patch("/api/connections/{connection_id}/permissions")
+def api_patch_connection_permissions(
+    connection_id: str,
+    body: ConnectionPermissionsBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "connections.manage")
+    from src.workspace_connections import ConnectionError, update_permissions
+
+    try:
+        return {
+            "connection": update_permissions(
+                workspace_id=ctx.workspace_id,
+                connection_id=connection_id,
+                actor_user_id=ctx.user.id,
+                view_products=body.view_products,
+                copy_products=body.copy_products,
+            )
+        }
+    except ConnectionError as exc:
+        raise _connection_http(exc) from exc
 
 
 # Legacy download paths — intentionally disabled (no unauthenticated PDF access).

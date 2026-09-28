@@ -6,7 +6,12 @@ export type PublicConfig = {
 
 export type MeResponse = {
   user: { id: string; email: string | null };
-  workspace: { id: string; role: string };
+  workspace: {
+    id: string;
+    role: string;
+    connection_code?: string | null;
+    capabilities?: string[];
+  };
   memberships: Array<{
     workspace_id: string;
     user_id: string;
@@ -14,6 +19,45 @@ export type MeResponse = {
     workspace_name?: string;
     created_at?: string | null;
   }>;
+};
+
+export type AuditEvent = {
+  id: string;
+  workspace_id?: string;
+  actor_user_id?: string | null;
+  action: string;
+  entity_type: string;
+  entity_id?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type TrustedConnection = {
+  id: string;
+  status: string;
+  direction: "incoming" | "outgoing" | string;
+  peer_workspace?: {
+    id?: string | null;
+    name?: string | null;
+    connection_code?: string | null;
+  };
+  view_products: boolean;
+  copy_products: boolean;
+  requested_by_user_id?: string | null;
+  responded_by_user_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ConnectionsResponse = {
+  workspace?: {
+    id?: string | null;
+    name?: string | null;
+    connection_code?: string | null;
+  };
+  incoming: TrustedConnection[];
+  outgoing: TrustedConnection[];
+  connected: TrustedConnection[];
 };
 
 export type BootstrapResponse = {
@@ -476,4 +520,133 @@ export type AddProductResponse = {
   draft_result?: ProductCloneDraftResponse & Record<string, unknown>;
   destination_store_ids?: string[];
   timings_ms?: Record<string, number | string>;
+};
+
+export type InventorySku = {
+  variant_id?: string;
+  product_id?: string;
+  store_id?: string | null;
+  store_uuid?: string | null;
+  store_display_name?: string | null;
+  product_name?: string | null;
+  thumbnail_url?: string | null;
+  seller_sku?: string | null;
+  variant_label?: string | null;
+  price?: number | null;
+  quantity?: number | null;
+  stock_badge?: string | null;
+  listing_status?: string | null;
+  daraz_item_id?: string | null;
+  last_synced?: string | null;
+  detail_complete?: boolean | null;
+};
+
+export type InventoryListResponse = {
+  items: InventorySku[];
+  total: number;
+  page: number;
+  page_size: number;
+  low_stock_threshold?: number;
+};
+
+export type InventorySummary = {
+  total_listings: number;
+  total_skus: number;
+  active_listings: number;
+  known_low_stock_skus: number;
+  out_of_stock_skus: number;
+  unknown_quantity_skus?: number;
+  low_stock_threshold?: number;
+};
+
+export type AnalyticsDashboard = {
+  month: string;
+  previous_month?: string;
+  label?: string;
+  metric_notes?: Record<string, string>;
+  summary: {
+    orders: number;
+    gross_sales: number;
+    average_order_value?: number | null;
+    previous_orders?: number;
+    previous_gross_sales?: number;
+    mom_orders_pct?: number | null;
+    mom_gross_sales_pct?: number | null;
+    store_count?: number;
+    active_stores?: number;
+  };
+  orders_over_time: Array<{ date: string; orders: number }>;
+  gross_sales_over_time: Array<{ date: string; gross_sales: number }>;
+  status_distribution: Array<{ status: string; count: number }>;
+  store_comparison: Array<{
+    store_id?: string | null;
+    store_display_name?: string | null;
+    orders: number;
+    gross_sales: number;
+  }>;
+  top_stores_by_orders?: Array<{
+    store_id?: string | null;
+    store_display_name?: string | null;
+    orders: number;
+    gross_sales: number;
+  }>;
+};
+
+export type FinanceSummary = {
+  gross_sales?: number | null;
+  known_fees?: number | null;
+  known_payouts?: number | null;
+  transaction_count?: number;
+  payout_count?: number;
+  last_synced?: string | null;
+  completeness?: Record<string, boolean>;
+  metric_notes?: Record<string, string>;
+};
+
+export type FinanceTransaction = {
+  id?: string;
+  store_id?: string;
+  store_slug?: string | null;
+  source_transaction_id?: string;
+  order_no?: string | null;
+  order_item_no?: string | null;
+  transaction_type?: string | null;
+  fee_type?: string | null;
+  amount?: number | null;
+  fee_amount?: number | null;
+  currency?: string | null;
+  payout_status?: string | null;
+  transaction_at?: string | null;
+  synced_at?: string | null;
+};
+
+export type FinancePayout = {
+  id?: string;
+  store_id?: string;
+  store_slug?: string | null;
+  source_payout_id?: string;
+  statement_number?: string | null;
+  status?: string | null;
+  payout_amount?: number | null;
+  fees_total?: number | null;
+  currency?: string | null;
+  created_at_source?: string | null;
+  synced_at?: string | null;
+};
+
+export type FinanceSyncResponse = {
+  status: string;
+  transactions_synced?: number;
+  payouts_synced?: number;
+  store_results?: Array<{
+    store_id?: string;
+    status?: string;
+    error_code?: string;
+    transactions?: number;
+    payouts?: number;
+  }>;
+  date_from?: string;
+  date_to?: string;
+  synced_at?: string;
+  partial?: boolean;
 };

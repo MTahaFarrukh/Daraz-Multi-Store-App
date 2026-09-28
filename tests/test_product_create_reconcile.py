@@ -519,6 +519,8 @@ def test_audit_events_no_sensitive_fields(tenancy_env):
         cf.return_value = mock
         reconcile_product_create_attempt(wid, att["id"], actor_user_id="actor-1")
     events = tenancy_env.list_audit_events(wid)
+    if isinstance(events, dict):
+        events = events.get("items") or []
     assert events
     for ev in events:
         meta = ev.get("metadata") or {}

@@ -21,6 +21,21 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _pg_connection_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(row[0]),
+        "source_workspace_id": str(row[1]),
+        "destination_workspace_id": str(row[2]),
+        "status": row[3],
+        "view_products": bool(row[4]),
+        "copy_products": bool(row[5]),
+        "requested_by_user_id": str(row[6]) if row[6] else None,
+        "responded_by_user_id": str(row[7]) if row[7] else None,
+        "created_at": row[8].isoformat() if hasattr(row[8], "isoformat") else row[8],
+        "updated_at": row[9].isoformat() if hasattr(row[9], "isoformat") else row[9],
+    }
+
+
 def _parse_ts(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
@@ -427,6 +442,9 @@ class MemoryTenancyRepo:
         self.product_defaults: dict[str, dict[str, Any]] = {}  # workspace_id â†’ row
         self.product_attempts: dict[str, dict[str, Any]] = {}
         self.audit_events: dict[str, dict[str, Any]] = {}
+        self.connections: dict[str, dict[str, Any]] = {}
+        self.finance_transactions: dict[str, dict[str, Any]] = {}
+        self.finance_payouts: dict[str, dict[str, Any]] = {}
 
     def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -434,9 +452,283 @@ class MemoryTenancyRepo:
             self.audit_events[row["id"]] = row
             return deepcopy(row)
 
-    def list_audit_events(self, workspace_id: str) -> list[dict[str, Any]]:
+    def list_audit_events(
+        self,
+        workspace_id: str,
+        *,
+        action: str | None = None,
+        actor_user_id: str | None = None,
+        entity_type: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         with self._lock:
-            return [deepcopy(r) for r in self.audit_events.values() if str(r.get("workspace_id")) == str(workspace_id)]
+            rows = [
+                deepcopy(r)
+                for r in self.audit_events.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+            ]
+        if action:
+            rows = [r for r in rows if r.get("action") == action]
+        if actor_user_id:
+            rows = [r for r in rows if str(r.get("actor_user_id")) == str(actor_user_id)]
+        if entity_type:
+            rows = [r for r in rows if r.get("entity_type") == entity_type]
+        if since:
+            rows = [r for r in rows if str(r.get("created_at") or "") >= since]
+        if until:
+            rows = [r for r in rows if str(r.get("created_at") or "") <= until]
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        total = len(rows)
+        limit = max(1, min(int(limit or 50), 200))
+        offset = max(0, int(offset or 0))
+        return {"items": rows[offset : offset + limit], "total": total, "limit": limit, "offset": offset}
+
+    def get_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.workspaces.get(str(workspace_id))
+            return deepcopy(row) if row else None
+
+    def set_workspace_connection_code(self, workspace_id: str, code: str) -> dict[str, Any]:
+        with self._lock:
+            ws = self.workspaces.get(str(workspace_id))
+            if not ws:
+                raise ValueError("Workspace not found")
+            ws["connection_code"] = str(code).strip().upper()
+            return deepcopy(ws)
+
+    def get_workspace_by_connection_code(self, code: str) -> dict[str, Any] | None:
+        needle = str(code or "").strip().upper()
+        with self._lock:
+            for ws in self.workspaces.values():
+                if str(ws.get("connection_code") or "").upper() == needle:
+                    return deepcopy(ws)
+        return None
+
+    def set_member_role(
+        self, workspace_id: str, user_id: str, role: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            for m in self.members:
+                if (
+                    str(m.get("workspace_id")) == str(workspace_id)
+                    and str(m.get("user_id")) == str(user_id)
+                ):
+                    m["role"] = str(role).strip().lower()
+                    return deepcopy(m)
+        return None
+
+    def add_member(
+        self, workspace_id: str, user_id: str, role: str = "member"
+    ) -> dict[str, Any]:
+        with self._lock:
+            for m in self.members:
+                if (
+                    str(m.get("workspace_id")) == str(workspace_id)
+                    and str(m.get("user_id")) == str(user_id)
+                ):
+                    m["role"] = str(role).strip().lower()
+                    return deepcopy(m)
+            row = {
+                "workspace_id": str(workspace_id),
+                "user_id": str(user_id),
+                "role": str(role).strip().lower(),
+                "created_at": _now().isoformat(),
+            }
+            self.members.append(row)
+            return deepcopy(row)
+
+    def create_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            now = _now().isoformat()
+            row = {
+                "id": _uuid(),
+                "created_at": now,
+                "updated_at": now,
+                "status": "PENDING",
+                "view_products": False,
+                "copy_products": False,
+                **deepcopy(payload),
+            }
+            # Enforce uniqueness of direction pair
+            for existing in self.connections.values():
+                if (
+                    str(existing.get("source_workspace_id"))
+                    == str(row.get("source_workspace_id"))
+                    and str(existing.get("destination_workspace_id"))
+                    == str(row.get("destination_workspace_id"))
+                ):
+                    raise ValueError("connection_pair_exists")
+            self.connections[row["id"]] = row
+            return deepcopy(row)
+
+    def get_connection(self, connection_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.connections.get(str(connection_id))
+            return deepcopy(row) if row else None
+
+    def get_connection_between(
+        self, source_workspace_id: str, destination_workspace_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            for row in self.connections.values():
+                if (
+                    str(row.get("source_workspace_id")) == str(source_workspace_id)
+                    and str(row.get("destination_workspace_id"))
+                    == str(destination_workspace_id)
+                ):
+                    return deepcopy(row)
+        return None
+
+    def list_connections_for_workspace(self, workspace_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                deepcopy(r)
+                for r in self.connections.values()
+                if str(r.get("source_workspace_id")) == str(workspace_id)
+                or str(r.get("destination_workspace_id")) == str(workspace_id)
+            ]
+
+    def update_connection(self, connection_id: str, **fields: Any) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.connections.get(str(connection_id))
+            if not row:
+                return None
+            for k, v in fields.items():
+                if v is not None or k in {
+                    "responded_by_user_id",
+                    "view_products",
+                    "copy_products",
+                }:
+                    row[k] = deepcopy(v)
+            row["updated_at"] = _now().isoformat()
+            return deepcopy(row)
+
+    def upsert_finance_transaction(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            key = (
+                f"{payload.get('workspace_id')}|{payload.get('store_id')}|"
+                f"{payload.get('source_transaction_id')}"
+            )
+            existing = None
+            for row in self.finance_transactions.values():
+                if (
+                    str(row.get("workspace_id")) == str(payload.get("workspace_id"))
+                    and str(row.get("store_id")) == str(payload.get("store_id"))
+                    and str(row.get("source_transaction_id"))
+                    == str(payload.get("source_transaction_id"))
+                ):
+                    existing = row
+                    break
+            now = _now().isoformat()
+            if existing:
+                existing.update(deepcopy(payload))
+                existing["updated_at"] = now
+                existing["synced_at"] = payload.get("synced_at") or now
+                return deepcopy(existing)
+            row = {
+                "id": _uuid(),
+                "created_at": now,
+                "updated_at": now,
+                **deepcopy(payload),
+            }
+            self.finance_transactions[row["id"]] = row
+            return deepcopy(row)
+
+    def upsert_finance_payout(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            existing = None
+            for row in self.finance_payouts.values():
+                if (
+                    str(row.get("workspace_id")) == str(payload.get("workspace_id"))
+                    and str(row.get("store_id")) == str(payload.get("store_id"))
+                    and str(row.get("source_payout_id"))
+                    == str(payload.get("source_payout_id"))
+                ):
+                    existing = row
+                    break
+            now = _now().isoformat()
+            if existing:
+                existing.update(deepcopy(payload))
+                existing["updated_at"] = now
+                existing["synced_at"] = payload.get("synced_at") or now
+                return deepcopy(existing)
+            row = {
+                "id": _uuid(),
+                "created_at": now,
+                "updated_at": now,
+                **deepcopy(payload),
+            }
+            self.finance_payouts[row["id"]] = row
+            return deepcopy(row)
+
+    def list_finance_transactions(
+        self,
+        workspace_id: str,
+        *,
+        store_id: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        store_uuid = None
+        if store_id:
+            st = self.get_store(workspace_id, store_id) or self.get_store_by_uuid(
+                workspace_id, store_id
+            )
+            store_uuid = str(st["id"]) if st else store_id
+        with self._lock:
+            rows = [
+                deepcopy(r)
+                for r in self.finance_transactions.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+                and (store_uuid is None or str(r.get("store_id")) == store_uuid)
+            ]
+        rows.sort(key=lambda r: str(r.get("transaction_at") or r.get("synced_at") or ""), reverse=True)
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 200))
+        total = len(rows)
+        start = (page - 1) * page_size
+        return {
+            "items": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def list_finance_payouts(
+        self,
+        workspace_id: str,
+        *,
+        store_id: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        store_uuid = None
+        if store_id:
+            st = self.get_store(workspace_id, store_id) or self.get_store_by_uuid(
+                workspace_id, store_id
+            )
+            store_uuid = str(st["id"]) if st else store_id
+        with self._lock:
+            rows = [
+                deepcopy(r)
+                for r in self.finance_payouts.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+                and (store_uuid is None or str(r.get("store_id")) == store_uuid)
+            ]
+        rows.sort(key=lambda r: str(r.get("created_at_source") or r.get("synced_at") or ""), reverse=True)
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 200))
+        total = len(rows)
+        start = (page - 1) * page_size
+        return {
+            "items": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -474,7 +766,12 @@ class MemoryTenancyRepo:
                     "created": False,
                 }
             wid = _uuid()
-            ws = {"id": wid, "name": name, "created_at": _now().isoformat()}
+            ws = {
+                "id": wid,
+                "name": name,
+                "created_at": _now().isoformat(),
+                "connection_code": "WS-" + wid.replace("-", "")[:10].upper(),
+            }
             member = {
                 "workspace_id": wid,
                 "user_id": user_id,
@@ -1537,6 +1834,424 @@ class PostgresTenancyRepo:
                 VALUES (%s,%s,%s,%s,%s,%s::jsonb) RETURNING id,created_at""",
                 (payload["workspace_id"], payload.get("actor_user_id"), payload["action"], payload["entity_type"], payload.get("entity_id"), json.dumps(payload.get("metadata") or {}))).fetchone(); conn.commit()
         return {**payload, "id": str(row[0]), "created_at": row[1].isoformat()}
+
+    def list_audit_events(
+        self,
+        workspace_id: str,
+        *,
+        action: str | None = None,
+        actor_user_id: str | None = None,
+        entity_type: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        limit = max(1, min(int(limit or 50), 200))
+        offset = max(0, int(offset or 0))
+        clauses = ["workspace_id = %s"]
+        params: list[Any] = [workspace_id]
+        if action:
+            clauses.append("action = %s")
+            params.append(action)
+        if actor_user_id:
+            clauses.append("actor_user_id = %s")
+            params.append(actor_user_id)
+        if entity_type:
+            clauses.append("entity_type = %s")
+            params.append(entity_type)
+        if since:
+            clauses.append("created_at >= %s::timestamptz")
+            params.append(since)
+        if until:
+            clauses.append("created_at <= %s::timestamptz")
+            params.append(until)
+        where = " AND ".join(clauses)
+        with connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM workspace_audit_events WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT id, workspace_id, actor_user_id, action, entity_type, entity_id,
+                           metadata, created_at
+                    FROM workspace_audit_events
+                    WHERE {where}
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s""",
+                tuple(params + [limit, offset]),
+            ).fetchall()
+        items = [
+            {
+                "id": str(r[0]),
+                "workspace_id": str(r[1]),
+                "actor_user_id": str(r[2]) if r[2] else None,
+                "action": r[3],
+                "entity_type": r[4],
+                "entity_id": r[5],
+                "metadata": r[6] if isinstance(r[6], dict) else (r[6] or {}),
+                "created_at": r[7].isoformat() if hasattr(r[7], "isoformat") else r[7],
+            }
+            for r in rows
+        ]
+        return {"items": items, "total": int(total), "limit": limit, "offset": offset}
+
+    def get_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT id, name, created_at, connection_code FROM workspaces WHERE id = %s",
+                (workspace_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row[0]),
+            "name": row[1],
+            "created_at": row[2].isoformat() if hasattr(row[2], "isoformat") else row[2],
+            "connection_code": row[3],
+        }
+
+    def set_workspace_connection_code(self, workspace_id: str, code: str) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """UPDATE workspaces SET connection_code = %s
+                   WHERE id = %s
+                   RETURNING id, name, created_at, connection_code""",
+                (str(code).strip().upper(), workspace_id),
+            ).fetchone()
+            conn.commit()
+        if not row:
+            raise ValueError("Workspace not found")
+        return {
+            "id": str(row[0]),
+            "name": row[1],
+            "created_at": row[2].isoformat() if hasattr(row[2], "isoformat") else row[2],
+            "connection_code": row[3],
+        }
+
+    def get_workspace_by_connection_code(self, code: str) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, name, created_at, connection_code FROM workspaces
+                   WHERE UPPER(connection_code) = %s""",
+                (str(code or "").strip().upper(),),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row[0]),
+            "name": row[1],
+            "created_at": row[2].isoformat() if hasattr(row[2], "isoformat") else row[2],
+            "connection_code": row[3],
+        }
+
+    def create_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """INSERT INTO trusted_workspace_connections
+                   (source_workspace_id, destination_workspace_id, status,
+                    view_products, copy_products, requested_by_user_id)
+                   VALUES (%s,%s,%s,%s,%s,%s)
+                   RETURNING id, source_workspace_id, destination_workspace_id, status,
+                             view_products, copy_products, requested_by_user_id,
+                             responded_by_user_id, created_at, updated_at""",
+                (
+                    payload["source_workspace_id"],
+                    payload["destination_workspace_id"],
+                    payload.get("status") or "PENDING",
+                    bool(payload.get("view_products")),
+                    bool(payload.get("copy_products")),
+                    payload.get("requested_by_user_id"),
+                ),
+            ).fetchone()
+            conn.commit()
+        return _pg_connection_row(row)
+
+    def get_connection(self, connection_id: str) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, source_workspace_id, destination_workspace_id, status,
+                          view_products, copy_products, requested_by_user_id,
+                          responded_by_user_id, created_at, updated_at
+                   FROM trusted_workspace_connections WHERE id = %s""",
+                (connection_id,),
+            ).fetchone()
+        return _pg_connection_row(row) if row else None
+
+    def get_connection_between(
+        self, source_workspace_id: str, destination_workspace_id: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, source_workspace_id, destination_workspace_id, status,
+                          view_products, copy_products, requested_by_user_id,
+                          responded_by_user_id, created_at, updated_at
+                   FROM trusted_workspace_connections
+                   WHERE source_workspace_id = %s AND destination_workspace_id = %s""",
+                (source_workspace_id, destination_workspace_id),
+            ).fetchone()
+        return _pg_connection_row(row) if row else None
+
+    def list_connections_for_workspace(self, workspace_id: str) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT id, source_workspace_id, destination_workspace_id, status,
+                          view_products, copy_products, requested_by_user_id,
+                          responded_by_user_id, created_at, updated_at
+                   FROM trusted_workspace_connections
+                   WHERE source_workspace_id = %s OR destination_workspace_id = %s
+                   ORDER BY updated_at DESC""",
+                (workspace_id, workspace_id),
+            ).fetchall()
+        return [_pg_connection_row(r) for r in rows]
+
+    def update_connection(self, connection_id: str, **fields: Any) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        allowed = {
+            "status",
+            "view_products",
+            "copy_products",
+            "requested_by_user_id",
+            "responded_by_user_id",
+        }
+        sets = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            sets.append(f"{k} = %s")
+            params.append(v)
+        if not sets:
+            return self.get_connection(connection_id)
+        sets.append("updated_at = NOW()")
+        params.append(connection_id)
+        with connect() as conn:
+            row = conn.execute(
+                f"""UPDATE trusted_workspace_connections
+                    SET {', '.join(sets)}
+                    WHERE id = %s
+                    RETURNING id, source_workspace_id, destination_workspace_id, status,
+                              view_products, copy_products, requested_by_user_id,
+                              responded_by_user_id, created_at, updated_at""",
+                tuple(params),
+            ).fetchone()
+            conn.commit()
+        return _pg_connection_row(row) if row else None
+
+    def upsert_finance_transaction(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """INSERT INTO finance_transactions
+                   (workspace_id, store_id, store_slug, source_transaction_id, order_no,
+                    order_item_no, transaction_type, fee_type, amount, fee_amount,
+                    currency, payout_status, transaction_at, statement, synced_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (workspace_id, store_id, source_transaction_id) DO UPDATE SET
+                     order_no=EXCLUDED.order_no, order_item_no=EXCLUDED.order_item_no,
+                     transaction_type=EXCLUDED.transaction_type, fee_type=EXCLUDED.fee_type,
+                     amount=EXCLUDED.amount, fee_amount=EXCLUDED.fee_amount,
+                     currency=EXCLUDED.currency, payout_status=EXCLUDED.payout_status,
+                     transaction_at=EXCLUDED.transaction_at, statement=EXCLUDED.statement,
+                     synced_at=EXCLUDED.synced_at, updated_at=NOW()
+                   RETURNING id""",
+                (
+                    payload["workspace_id"],
+                    payload["store_id"],
+                    payload.get("store_slug"),
+                    payload["source_transaction_id"],
+                    payload.get("order_no"),
+                    payload.get("order_item_no"),
+                    payload.get("transaction_type"),
+                    payload.get("fee_type"),
+                    payload.get("amount"),
+                    payload.get("fee_amount"),
+                    payload.get("currency") or "PKR",
+                    payload.get("payout_status"),
+                    payload.get("transaction_at"),
+                    payload.get("statement"),
+                    payload.get("synced_at"),
+                ),
+            ).fetchone()
+            conn.commit()
+        return {**payload, "id": str(row[0])}
+
+    def upsert_finance_payout(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """INSERT INTO finance_payouts
+                   (workspace_id, store_id, store_slug, source_payout_id, statement_number,
+                    status, payout_amount, item_revenue, fees_total, currency,
+                    created_at_source, updated_at_source, synced_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (workspace_id, store_id, source_payout_id) DO UPDATE SET
+                     statement_number=EXCLUDED.statement_number, status=EXCLUDED.status,
+                     payout_amount=EXCLUDED.payout_amount, item_revenue=EXCLUDED.item_revenue,
+                     fees_total=EXCLUDED.fees_total, currency=EXCLUDED.currency,
+                     created_at_source=EXCLUDED.created_at_source,
+                     updated_at_source=EXCLUDED.updated_at_source,
+                     synced_at=EXCLUDED.synced_at, updated_at=NOW()
+                   RETURNING id""",
+                (
+                    payload["workspace_id"],
+                    payload["store_id"],
+                    payload.get("store_slug"),
+                    payload["source_payout_id"],
+                    payload.get("statement_number"),
+                    payload.get("status"),
+                    payload.get("payout_amount"),
+                    payload.get("item_revenue"),
+                    payload.get("fees_total"),
+                    payload.get("currency") or "PKR",
+                    payload.get("created_at_source"),
+                    payload.get("updated_at_source"),
+                    payload.get("synced_at"),
+                ),
+            ).fetchone()
+            conn.commit()
+        return {**payload, "id": str(row[0])}
+
+    def list_finance_transactions(
+        self,
+        workspace_id: str,
+        *,
+        store_id: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 200))
+        store_uuid = None
+        if store_id:
+            st = self.get_store(workspace_id, store_id) or self.get_store_by_uuid(
+                workspace_id, store_id
+            )
+            store_uuid = str(st["id"]) if st else None
+        clauses = ["workspace_id = %s"]
+        params: list[Any] = [workspace_id]
+        if store_uuid:
+            clauses.append("store_id = %s")
+            params.append(store_uuid)
+        where = " AND ".join(clauses)
+        with connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM finance_transactions WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT id, workspace_id, store_id, store_slug, source_transaction_id,
+                           order_no, order_item_no, transaction_type, fee_type, amount,
+                           fee_amount, currency, payout_status, transaction_at, statement,
+                           synced_at
+                    FROM finance_transactions WHERE {where}
+                    ORDER BY COALESCE(transaction_at, synced_at::text) DESC
+                    LIMIT %s OFFSET %s""",
+                tuple(params + [page_size, (page - 1) * page_size]),
+            ).fetchall()
+        items = [
+            {
+                "id": str(r[0]),
+                "workspace_id": str(r[1]),
+                "store_id": str(r[2]),
+                "store_slug": r[3],
+                "source_transaction_id": r[4],
+                "order_no": r[5],
+                "order_item_no": r[6],
+                "transaction_type": r[7],
+                "fee_type": r[8],
+                "amount": float(r[9]) if r[9] is not None else None,
+                "fee_amount": float(r[10]) if r[10] is not None else None,
+                "currency": r[11],
+                "payout_status": r[12],
+                "transaction_at": r[13],
+                "statement": r[14],
+                "synced_at": r[15].isoformat() if hasattr(r[15], "isoformat") else r[15],
+            }
+            for r in rows
+        ]
+        return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+
+    def list_finance_payouts(
+        self,
+        workspace_id: str,
+        *,
+        store_id: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 200))
+        store_uuid = None
+        if store_id:
+            st = self.get_store(workspace_id, store_id) or self.get_store_by_uuid(
+                workspace_id, store_id
+            )
+            store_uuid = str(st["id"]) if st else None
+        clauses = ["workspace_id = %s"]
+        params: list[Any] = [workspace_id]
+        if store_uuid:
+            clauses.append("store_id = %s")
+            params.append(store_uuid)
+        where = " AND ".join(clauses)
+        with connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM finance_payouts WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT id, workspace_id, store_id, store_slug, source_payout_id,
+                           statement_number, status, payout_amount, item_revenue, fees_total,
+                           currency, created_at_source, updated_at_source, synced_at
+                    FROM finance_payouts WHERE {where}
+                    ORDER BY COALESCE(created_at_source, synced_at::text) DESC
+                    LIMIT %s OFFSET %s""",
+                tuple(params + [page_size, (page - 1) * page_size]),
+            ).fetchall()
+        items = [
+            {
+                "id": str(r[0]),
+                "workspace_id": str(r[1]),
+                "store_id": str(r[2]),
+                "store_slug": r[3],
+                "source_payout_id": r[4],
+                "statement_number": r[5],
+                "status": r[6],
+                "payout_amount": float(r[7]) if r[7] is not None else None,
+                "item_revenue": float(r[8]) if r[8] is not None else None,
+                "fees_total": float(r[9]) if r[9] is not None else None,
+                "currency": r[10],
+                "created_at_source": r[11],
+                "updated_at_source": r[12],
+                "synced_at": r[13].isoformat() if hasattr(r[13], "isoformat") else r[13],
+            }
+            for r in rows
+        ]
+        return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+
     def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         from src.db.connection import connect
         with connect() as conn:
@@ -3384,6 +4099,198 @@ class PostgresTenancyRepo:
                 (workspace_id, product_id),
             ).fetchall()
         return [self._variant_row(r) for r in rows]
+
+    def list_inventory_skus(
+        self,
+        workspace_id: str,
+        *,
+        store_id: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        low_stock: bool = False,
+        low_stock_threshold: int = 5,
+        sort: str = "product",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+        from src.inventory import _sale_props_label, _thumb, stock_badge
+
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 200))
+        threshold = max(0, int(low_stock_threshold))
+        store_uuid = None
+        if store_id:
+            st = self.get_store(workspace_id, store_id) or self.get_store_by_uuid(
+                workspace_id, store_id
+            )
+            store_uuid = str(st["id"]) if st else None
+
+        where = ["v.workspace_id = %s"]
+        params: list[Any] = [workspace_id]
+        if store_uuid:
+            where.append("v.store_id = %s")
+            params.append(store_uuid)
+        if status:
+            where.append("lower(COALESCE(p.status_raw, v.status_raw, '')) = %s")
+            params.append(str(status).strip().lower())
+        if search and search.strip():
+            like = f"%{search.strip()}%"
+            where.append(
+                """(
+                    COALESCE(p.title, '') ILIKE %s
+                    OR COALESCE(p.title_en, '') ILIKE %s
+                    OR COALESCE(v.seller_sku, '') ILIKE %s
+                    OR COALESCE(p.daraz_item_id, '') ILIKE %s
+                )"""
+            )
+            params.extend([like, like, like, like])
+        if low_stock:
+            where.append(
+                "v.quantity IS NOT NULL AND v.quantity > 0 AND v.quantity <= %s"
+            )
+            params.append(threshold)
+
+        sort_key = (sort or "product").lower()
+        order_map = {
+            "product": "lower(COALESCE(p.title_en, p.title, '')) ASC NULLS LAST",
+            "quantity": "v.quantity ASC NULLS LAST",
+            "quantity_asc": "v.quantity ASC NULLS LAST",
+            "quantity_desc": "v.quantity DESC NULLS LAST",
+            "price": "v.price ASC NULLS LAST",
+            "price_asc": "v.price ASC NULLS LAST",
+            "price_desc": "v.price DESC NULLS LAST",
+            "last_synced": "COALESCE(v.synced_at, p.detail_synced_at, p.synced_at) DESC NULLS LAST",
+            "last_synced_desc": "COALESCE(v.synced_at, p.detail_synced_at, p.synced_at) DESC NULLS LAST",
+            "synced": "COALESCE(v.synced_at, p.detail_synced_at, p.synced_at) DESC NULLS LAST",
+        }
+        order_sql = order_map.get(sort_key, order_map["product"])
+        where_sql = " AND ".join(where)
+        offset = (page - 1) * page_size
+        with connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM daraz_product_variants v
+                JOIN daraz_products p ON p.id = v.product_id
+                WHERE {where_sql}
+                """,
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT
+                    v.id, p.id, s.store_id, s.id,
+                    COALESCE(s.display_name, s.store_name, s.store_id),
+                    COALESCE(p.title_en, p.title, 'Product'),
+                    v.seller_sku, v.sale_props_json, v.price, v.quantity,
+                    COALESCE(p.status_raw, v.status_raw),
+                    p.daraz_item_id, v.daraz_sku_id,
+                    COALESCE(v.synced_at, p.detail_synced_at, p.synced_at),
+                    p.detail_complete, v.images_json, p.images_json
+                FROM daraz_product_variants v
+                JOIN daraz_products p ON p.id = v.product_id
+                JOIN daraz_stores s ON s.id = v.store_id
+                WHERE {where_sql}
+                ORDER BY {order_sql}, v.id ASC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            ).fetchall()
+
+        items = []
+        for r in rows:
+            qty = int(r[9]) if r[9] is not None else None
+            product_images = self._json_maybe(r[16]) or []
+            variant_images = self._json_maybe(r[15]) or []
+            sale_props = self._json_maybe(r[7]) or {}
+            product = {"images_json": product_images}
+            variant = {"images_json": variant_images, "sale_props_json": sale_props}
+            last = r[13]
+            items.append(
+                {
+                    "variant_id": str(r[0]),
+                    "product_id": str(r[1]),
+                    "store_id": r[2],
+                    "store_uuid": str(r[3]),
+                    "store_display_name": r[4],
+                    "product_name": r[5],
+                    "thumbnail_url": _thumb(product, variant),
+                    "seller_sku": r[6],
+                    "variant_label": _sale_props_label(sale_props),
+                    "price": float(r[8]) if r[8] is not None else None,
+                    "quantity": qty,
+                    "stock_badge": stock_badge(qty, low_stock_threshold=threshold),
+                    "listing_status": r[10],
+                    "daraz_item_id": r[11],
+                    "daraz_sku_id": r[12],
+                    "last_synced": last.isoformat() if hasattr(last, "isoformat") else last,
+                    "detail_complete": bool(r[14]),
+                }
+            )
+        return {
+            "items": items,
+            "total": int(total),
+            "page": page,
+            "page_size": page_size,
+            "low_stock_threshold": threshold,
+        }
+
+    def inventory_summary(
+        self,
+        workspace_id: str,
+        *,
+        store_id: str | None = None,
+        low_stock_threshold: int = 5,
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        threshold = max(0, int(low_stock_threshold))
+        store_uuid = None
+        if store_id:
+            st = self.get_store(workspace_id, store_id) or self.get_store_by_uuid(
+                workspace_id, store_id
+            )
+            store_uuid = str(st["id"]) if st else None
+        where = ["v.workspace_id = %s"]
+        params: list[Any] = [workspace_id]
+        if store_uuid:
+            where.append("v.store_id = %s")
+            params.append(store_uuid)
+        where_sql = " AND ".join(where)
+        with connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    COUNT(DISTINCT v.product_id)::int,
+                    COUNT(*)::int,
+                    COUNT(DISTINCT v.product_id) FILTER (
+                        WHERE lower(COALESCE(p.status_raw, '')) IN ('active', 'live')
+                    )::int,
+                    COUNT(*) FILTER (
+                        WHERE v.quantity IS NOT NULL
+                          AND v.quantity > 0
+                          AND v.quantity <= %s
+                    )::int,
+                    COUNT(*) FILTER (
+                        WHERE v.quantity IS NOT NULL AND v.quantity <= 0
+                    )::int,
+                    COUNT(*) FILTER (WHERE v.quantity IS NULL)::int
+                FROM daraz_product_variants v
+                JOIN daraz_products p ON p.id = v.product_id
+                WHERE {where_sql}
+                """,
+                tuple([threshold] + params),
+            ).fetchone()
+        return {
+            "total_listings": int(row[0] or 0),
+            "total_skus": int(row[1] or 0),
+            "active_listings": int(row[2] or 0),
+            "known_low_stock_skus": int(row[3] or 0),
+            "out_of_stock_skus": int(row[4] or 0),
+            "unknown_quantity_skus": int(row[5] or 0),
+            "low_stock_threshold": threshold,
+        }
 
     def replace_product_variants(
         self, workspace_id: str, product_id: str, variants: list[dict[str, Any]]

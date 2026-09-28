@@ -26,6 +26,16 @@ import type {
   StoreGroup,
   StoreView,
   UnifiedOrder,
+  AuditEvent,
+  ConnectionsResponse,
+  TrustedConnection,
+  InventoryListResponse,
+  InventorySummary,
+  AnalyticsDashboard,
+  FinanceSummary,
+  FinanceTransaction,
+  FinancePayout,
+  FinanceSyncResponse,
 } from "@/types/api";
 
 function buildOrdersQs(params: OrderListParams): string {
@@ -304,6 +314,64 @@ export const Api = {
       { method: "POST" }
     ),
 
+  listAuditEvents: (params?: {
+    action?: string;
+    actor?: string;
+    entity_type?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<{
+      items: AuditEvent[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>(`/api/audit-events${suffix}`);
+  },
+
+  listConnections: () => api<ConnectionsResponse>("/api/connections"),
+
+  requestConnection: (target_connection_code: string) =>
+    api<{ connection: TrustedConnection }>("/api/connections/request", {
+      method: "POST",
+      body: JSON.stringify({ target_connection_code }),
+    }),
+
+  acceptConnection: (id: string) =>
+    api<{ connection: TrustedConnection }>(
+      `/api/connections/${encodeURIComponent(id)}/accept`,
+      { method: "POST" }
+    ),
+
+  rejectConnection: (id: string) =>
+    api<{ connection: TrustedConnection }>(
+      `/api/connections/${encodeURIComponent(id)}/reject`,
+      { method: "POST" }
+    ),
+
+  revokeConnection: (id: string) =>
+    api<{ connection: TrustedConnection }>(
+      `/api/connections/${encodeURIComponent(id)}/revoke`,
+      { method: "POST" }
+    ),
+
+  updateConnectionPermissions: (
+    id: string,
+    body: { view_products?: boolean; copy_products?: boolean }
+  ) =>
+    api<{ connection: TrustedConnection }>(
+      `/api/connections/${encodeURIComponent(id)}/permissions`,
+      { method: "PATCH", body: JSON.stringify(body) }
+    ),
+
   ensureProductDetail: (productId: string) =>
     api<{
       product: ProductRow;
@@ -312,5 +380,81 @@ export const Api = {
       timings_ms?: Record<string, number>;
     }>(`/api/products/${encodeURIComponent(productId)}/ensure-detail`, {
       method: "POST",
+    }),
+
+  listInventory: (params: {
+    store_id?: string;
+    search?: string;
+    status?: string;
+    low_stock?: boolean;
+    low_stock_threshold?: number;
+    sort?: string;
+    page?: number;
+    page_size?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<InventoryListResponse>(`/api/inventory${suffix}`);
+  },
+
+  inventorySummary: (params: { store_id?: string; low_stock_threshold?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<InventorySummary>(`/api/inventory/summary${suffix}`);
+  },
+
+  analyticsSummary: (params: { year?: number; month?: number; store_id?: string } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<AnalyticsDashboard>(`/api/analytics/summary${suffix}`);
+  },
+
+  financeSummary: (params: { store_id?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.store_id) qs.set("store_id", params.store_id);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<FinanceSummary>(`/api/finance/summary${suffix}`);
+  },
+
+  financeTransactions: (params: { store_id?: string; page?: number; page_size?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<{ items: FinanceTransaction[]; total: number; page: number; page_size: number }>(
+      `/api/finance/transactions${suffix}`
+    );
+  },
+
+  financePayouts: (params: { store_id?: string; page?: number; page_size?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<{ items: FinancePayout[]; total: number; page: number; page_size: number }>(
+      `/api/finance/payouts${suffix}`
+    );
+  },
+
+  syncFinance: (body: { store_ids: string[]; lookback_days?: number }) =>
+    api<FinanceSyncResponse>("/api/finance/sync", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 };

@@ -10,12 +10,10 @@ import { StoresPage } from "@/pages/StoresPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { OrdersPage } from "@/pages/OrdersPage";
 import { ProductsPage } from "@/pages/ProductsPage";
-import {
-  AnalyticsPage,
-  ConnectionsPage,
-  FinancePage,
-  InventoryPage,
-} from "@/pages/PlaceholderPages";
+import { ConnectionsPage } from "@/pages/ConnectionsPage";
+import { InventoryPage } from "@/pages/InventoryPage";
+import { AnalyticsPage } from "@/pages/AnalyticsPage";
+import { FinancePage } from "@/pages/FinancePage";
 
 export default function App() {
   return (

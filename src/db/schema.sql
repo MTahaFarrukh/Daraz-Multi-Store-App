@@ -9,10 +9,15 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS connection_code TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspaces_connection_code
+    ON workspaces (connection_code)
+    WHERE connection_code IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS workspace_members (
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id UUID NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'staff')),
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'staff', 'manager', 'member', 'viewer')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (workspace_id, user_id)
 );
@@ -356,10 +361,76 @@ CREATE TABLE IF NOT EXISTS trusted_workspace_connections (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     destination_workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'PENDING',
+    status TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'REVOKED')),
     view_products BOOLEAN NOT NULL DEFAULT FALSE,
     copy_products BOOLEAN NOT NULL DEFAULT FALSE,
+    requested_by_user_id UUID,
+    responded_by_user_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (source_workspace_id <> destination_workspace_id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_trusted_ws_pair
+    ON trusted_workspace_connections (source_workspace_id, destination_workspace_id);
+CREATE INDEX IF NOT EXISTS idx_trusted_ws_dest
+    ON trusted_workspace_connections (destination_workspace_id, status);
+
+ALTER TABLE trusted_workspace_connections
+    ADD COLUMN IF NOT EXISTS requested_by_user_id UUID;
+ALTER TABLE trusted_workspace_connections
+    ADD COLUMN IF NOT EXISTS responded_by_user_id UUID;
+
+-- Expand legacy role check when the table already existed with owner/admin/staff only.
+ALTER TABLE workspace_members DROP CONSTRAINT IF EXISTS workspace_members_role_check;
+ALTER TABLE workspace_members
+    ADD CONSTRAINT workspace_members_role_check
+    CHECK (role IN ('owner', 'admin', 'staff', 'manager', 'member', 'viewer'));
+
+-- Batch 5: Finance persistence (read/sync only)
+CREATE TABLE IF NOT EXISTS finance_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    store_slug TEXT,
+    source_transaction_id TEXT NOT NULL,
+    order_no TEXT,
+    order_item_no TEXT,
+    transaction_type TEXT,
+    fee_type TEXT,
+    amount NUMERIC(18, 2),
+    fee_amount NUMERIC(18, 2),
+    currency TEXT NOT NULL DEFAULT 'PKR',
+    payout_status TEXT,
+    transaction_at TEXT,
+    statement TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, store_id, source_transaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_txn_workspace_time
+    ON finance_transactions (workspace_id, synced_at DESC);
+
+CREATE TABLE IF NOT EXISTS finance_payouts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    store_slug TEXT,
+    source_payout_id TEXT NOT NULL,
+    statement_number TEXT,
+    status TEXT,
+    payout_amount NUMERIC(18, 2),
+    item_revenue NUMERIC(18, 2),
+    fees_total NUMERIC(18, 2),
+    currency TEXT NOT NULL DEFAULT 'PKR',
+    created_at_source TEXT,
+    updated_at_source TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, store_id, source_payout_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_payout_workspace_time
+    ON finance_payouts (workspace_id, synced_at DESC);
+
