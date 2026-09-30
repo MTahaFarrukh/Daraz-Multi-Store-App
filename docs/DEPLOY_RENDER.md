@@ -1,4 +1,4 @@
-# Deploy on Render (free web service)
+glkgf# Deploy on Render (free web service)
 
 Host the Daraz Multi-Store UI on [Render](https://render.com) **free tier** using Docker (includes Chromium for PDF labels).
 
