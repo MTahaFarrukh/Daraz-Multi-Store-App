@@ -3,21 +3,36 @@ import type { ProductCloneDraftResponse } from "@/types/api";
 export function CloneDraftPreview({
   result,
   variants,
+  extractionComplete,
 }: {
   result: ProductCloneDraftResponse;
   variants: Array<Record<string, any>>;
+  extractionComplete?: boolean | null;
 }) {
   const fidelity = result.fidelity || {};
   const draft = result.draft as Record<string, any>;
   const media = draft.media || {};
   const enhancement = media.description_enhancement || {};
+  const incomplete =
+    extractionComplete === false ||
+    (result.warnings || []).some((w) => String(w).toLowerCase().includes("incomplete"));
   return (
     <div className="stack" style={{ marginTop: "0.75rem" }}>
-      <h4 style={{ margin: 0 }}>Clone Ready</h4>
+      <h4 style={{ margin: 0 }}>
+        {incomplete ? "Preview (incomplete extraction)" : "Product preview"}
+      </h4>
       <p className="muted-line" style={{ margin: 0 }}>
-        {variants.length} variant(s) · {(media.product_images || []).length} image(s) · Creation
-        remains gated
+        {variants.length} variant(s) · {(media.product_images || []).length} image(s)
+        {incomplete
+          ? " · Missing fields will not be invented — fix before create"
+          : ""}
       </p>
+      {incomplete ? (
+        <div className="banner banner-info">
+          Extraction is incomplete. Review missing attributes, prices, and category
+          compatibility before submitting.
+        </div>
+      ) : null}
 
       <div>
         <strong>WILL COPY</strong>

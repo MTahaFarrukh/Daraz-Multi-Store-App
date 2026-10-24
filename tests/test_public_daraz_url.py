@@ -55,6 +55,20 @@ def test_reject_non_daraz_and_localhost(monkeypatch):
         normalize_daraz_product_url("http://www.daraz.pk/products/foo-i1974026524.html")
     with pytest.raises(PublicDarazError):
         normalize_daraz_product_url("https://localhost/products/foo-i1974026524.html")
+    with pytest.raises(PublicDarazError):
+        normalize_daraz_product_url("https://127.0.0.1/products/foo-i1974026524.html")
+    with pytest.raises(PublicDarazError):
+        normalize_daraz_product_url("https://my.daraz.pk/wow/campaign/")
+
+
+def test_normalize_acs_and_my_hosts(monkeypatch):
+    monkeypatch.setattr("src.public_daraz._resolve_public", lambda host: None)
+    clean, item = normalize_daraz_product_url(
+        "https://my.daraz.pk/products/bar-i9876543210.html?spm=x"
+    )
+    assert item == "9876543210"
+    assert "spm" not in clean
+    assert "my.daraz.pk" in clean
 
 
 def test_reject_non_product_path(monkeypatch):

@@ -334,6 +334,279 @@ def evaluate_stale_claim_before_create(
     return {"action": "proceed", "mapping": None, "attempt": None}
 
 
+def resolve_connected_copy_identity(
+    workspace_id: str, draft: dict[str, Any]
+) -> dict[str, str] | None:
+    """Stable connected identity for mapping/claims, or None if URL-only / unreliable.
+
+    Only ``connected_store`` / ``connected_via_public_url`` with a resolvable
+    destination-store UUID and Daraz item ID qualify. Pure public URL identities
+    must not invent a fake source store for dedupe.
+    """
+    st = str(draft.get("source_type") or "")
+    if st not in {"connected_store", "connected_via_public_url"}:
+        return None
+    item = str(
+        draft.get("source_daraz_item_id")
+        or draft.get("source_item_id")
+        or ""
+    ).strip()
+    if not item:
+        return None
+    repo = get_repo()
+    src_uuid = str(draft.get("source_store_uuid") or "").strip()
+    if not src_uuid:
+        ref = str(draft.get("source_store_id") or "").strip()
+        if not ref:
+            return None
+        store = repo.get_store(workspace_id, ref) or repo.get_store_by_uuid(
+            workspace_id, ref
+        )
+        if not store:
+            return None
+        src_uuid = str(store["id"])
+    else:
+        store = repo.get_store_by_uuid(workspace_id, src_uuid)
+        if not store:
+            return None
+    return {
+        "source_store_id": src_uuid,
+        "source_daraz_item_id": item,
+        "source_store_slug": str(store.get("store_id") or ""),
+    }
+
+
+def gate_create_with_mapping_and_claim(
+    workspace_id: str,
+    *,
+    draft: dict[str, Any],
+    destination_store: dict[str, Any],
+    owner_job_id: str | None = None,
+    owner_item_id: str | None = None,
+) -> dict[str, Any]:
+    """Pre-CreateProduct gate shared by bulk and single-product paths.
+
+    Returns:
+      {"action": "proceed", "claim_id", "owner_token", "identity"}
+      {"action": "skip_verified", "result": dest-shaped dict}
+      {"action": "block", "result": dest-shaped dict}
+      {"action": "proceed_no_claim", "identity": None}  # URL-only / no stable id
+    """
+    dest_uuid = str(destination_store.get("id") or "")
+    store_info = {
+        "store_id": destination_store.get("store_id"),
+        "display_name": destination_store.get("display_name")
+        or destination_store.get("store_name")
+        or destination_store.get("store_id"),
+        "id": dest_uuid,
+    }
+    identity = resolve_connected_copy_identity(workspace_id, draft)
+    if not identity or not dest_uuid:
+        return {"action": "proceed_no_claim", "identity": None, "claim_id": None, "owner_token": None}
+
+    mapping = get_verified_copy_mapping(
+        workspace_id,
+        source_store_id=identity["source_store_id"],
+        source_daraz_item_id=identity["source_daraz_item_id"],
+        destination_store_id=dest_uuid,
+    )
+    if mapping:
+        return {
+            "action": "skip_verified",
+            "identity": identity,
+            "claim_id": None,
+            "owner_token": None,
+            "result": {
+                "store": store_info,
+                "status": "ALREADY_EXISTS",
+                "creation_status": "VERIFIED",
+                "reason": "already_copied_to_destination",
+                "attempt_id": mapping.get("attempt_id"),
+                "item_id": mapping.get("destination_item_id"),
+                "existing_daraz_item_id": mapping.get("destination_item_id"),
+            },
+        }
+
+    uncertain = find_uncertain_create_attempt(
+        workspace_id,
+        source_store_id=identity["source_store_id"],
+        source_daraz_item_id=identity["source_daraz_item_id"],
+        destination_store_id=dest_uuid,
+    )
+    if uncertain:
+        return {
+            "action": "block",
+            "identity": identity,
+            "claim_id": None,
+            "owner_token": None,
+            "result": {
+                "store": store_info,
+                "status": "NEEDS_ATTENTION",
+                "creation_status": "NEEDS_RECONCILIATION",
+                "reason": "product_create_attempt_requires_reconciliation",
+                "attempt_id": uncertain.get("id"),
+                "item_id": uncertain.get("destination_item_id"),
+            },
+        }
+
+    acquired = acquire_create_claim(
+        workspace_id,
+        source_store_id=identity["source_store_id"],
+        source_daraz_item_id=identity["source_daraz_item_id"],
+        destination_store_id=dest_uuid,
+        owner_job_id=owner_job_id,
+        owner_item_id=owner_item_id,
+    )
+    if not acquired.get("acquired"):
+        held = acquired.get("claim") or {}
+        reason = str(acquired.get("reason") or "concurrent_create_claim_held")
+        status = (
+            "NEEDS_RECONCILIATION"
+            if reason == "create_claim_uncertain_requires_reconciliation"
+            else "NEEDS_ATTENTION"
+        )
+        return {
+            "action": "block",
+            "identity": identity,
+            "claim_id": None,
+            "owner_token": None,
+            "result": {
+                "store": store_info,
+                "status": "NEEDS_ATTENTION" if status != "NEEDS_RECONCILIATION" else "NEEDS_ATTENTION",
+                "creation_status": status,
+                "reason": reason,
+                "attempt_id": held.get("attempt_id"),
+            },
+        }
+
+    # Stale reclaim safety
+    gate = evaluate_stale_claim_before_create(
+        workspace_id,
+        source_store_id=identity["source_store_id"],
+        source_daraz_item_id=identity["source_daraz_item_id"],
+        destination_store_id=dest_uuid,
+    )
+    claim = acquired["claim"]
+    token = str(acquired["owner_token"])
+    if gate["action"] == "skip_verified":
+        mapping = gate["mapping"] or {}
+        release_create_claim(
+            workspace_id, claim_id=str(claim["id"]), owner_token=token
+        )
+        return {
+            "action": "skip_verified",
+            "identity": identity,
+            "claim_id": None,
+            "owner_token": None,
+            "result": {
+                "store": store_info,
+                "status": "ALREADY_EXISTS",
+                "creation_status": "VERIFIED",
+                "reason": "already_copied_to_destination",
+                "attempt_id": mapping.get("attempt_id"),
+                "item_id": mapping.get("destination_item_id"),
+                "existing_daraz_item_id": mapping.get("destination_item_id"),
+            },
+        }
+    if gate["action"] == "needs_reconciliation":
+        attempt = gate["attempt"] or {}
+        mark_create_claim_uncertain(
+            workspace_id,
+            claim_id=str(claim["id"]),
+            owner_token=token,
+            attempt_id=str(attempt.get("id") or "") or None,
+        )
+        return {
+            "action": "block",
+            "identity": identity,
+            "claim_id": None,
+            "owner_token": None,
+            "result": {
+                "store": store_info,
+                "status": "NEEDS_ATTENTION",
+                "creation_status": "NEEDS_RECONCILIATION",
+                "reason": "stale_claim_requires_reconciliation",
+                "attempt_id": attempt.get("id"),
+                "item_id": attempt.get("destination_item_id"),
+            },
+        }
+
+    return {
+        "action": "proceed",
+        "identity": identity,
+        "claim_id": str(claim["id"]),
+        "owner_token": token,
+    }
+
+
+def finish_create_claim_after_outcome(
+    workspace_id: str,
+    *,
+    claim_id: str | None,
+    owner_token: str | None,
+    identity: dict[str, str] | None,
+    destination_store_id: str,
+    outcome_status: str,
+    destination_item_id: str | None,
+    attempt_id: str | None,
+) -> None:
+    """Release, mark uncertain, or record mapping after a gated create finishes."""
+    if not claim_id or not owner_token:
+        # Still persist mapping when verified without an active claim.
+        if (
+            identity
+            and str(outcome_status).upper()
+            in {"VERIFIED", "CREATED", "CREATED_WITH_WARNING"}
+            and destination_item_id
+        ):
+            try:
+                record_verified_copy_mapping(
+                    workspace_id,
+                    source_store_id=identity["source_store_id"],
+                    source_daraz_item_id=identity["source_daraz_item_id"],
+                    destination_store_id=destination_store_id,
+                    destination_item_id=str(destination_item_id),
+                    attempt_id=attempt_id,
+                )
+            except ValueError:
+                pass
+        return
+
+    status = str(outcome_status or "").upper()
+    if (
+        status in {"VERIFIED", "CREATED", "CREATED_WITH_WARNING"}
+        and destination_item_id
+        and identity
+    ):
+        try:
+            record_verified_copy_mapping(
+                workspace_id,
+                source_store_id=identity["source_store_id"],
+                source_daraz_item_id=identity["source_daraz_item_id"],
+                destination_store_id=destination_store_id,
+                destination_item_id=str(destination_item_id),
+                attempt_id=attempt_id,
+            )
+        except ValueError:
+            release_create_claim(
+                workspace_id, claim_id=claim_id, owner_token=owner_token
+            )
+            return
+        # record_verified_copy_mapping also releases the claim
+        return
+
+    if status in {"NEEDS_RECONCILIATION", "CREATED_UNVERIFIED"}:
+        mark_create_claim_uncertain(
+            workspace_id,
+            claim_id=claim_id,
+            owner_token=owner_token,
+            attempt_id=attempt_id,
+        )
+        return
+
+    release_create_claim(workspace_id, claim_id=claim_id, owner_token=owner_token)
+
+
 def try_record_verified_from_attempt(
     workspace_id: str,
     attempt: dict[str, Any],

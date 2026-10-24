@@ -503,6 +503,7 @@ export type AddProductDestinationResult = {
   retry_safe?: { item_id?: string; step?: string } | null;
   existing_product_id?: string | null;
   existing_daraz_item_id?: string | null;
+  draft_preview?: Record<string, unknown> | null;
   timings_ms?: Record<string, number | string>;
 };
 

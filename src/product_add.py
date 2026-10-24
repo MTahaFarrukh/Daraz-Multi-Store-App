@@ -285,8 +285,15 @@ def _prepare_destination(
     resume_item_id: str | None = None,
     forced_attempt_id: str | None = None,
     forced_seller_skus: Any = None,
+    claim_gate: bool = True,
 ) -> dict[str, Any]:
-    """Validate one destination draft; optionally CreateProduct when gated+confirmed."""
+    """Validate one destination draft; optionally CreateProduct when gated+confirmed.
+
+    When ``claim_gate`` is True (default), acquires the durable copy claim for
+    connected identities before CreateProduct. Bulk copy passes False after it
+    already holds the claim. Forced retries skip the gate so they can continue
+    an owned attempt without being blocked by their own uncertain row.
+    """
     del confirm  # probe-only concept; kept for call-site compatibility
     t0 = time.perf_counter()
     timings: dict[str, float] = {}
@@ -389,6 +396,59 @@ def _prepare_destination(
                 "dest_total": round((time.perf_counter() - t0) * 1000, 1),
             },
         }
+
+    # Early durable-identity check (no claim yet — claim is acquired only after
+    # validation passes, and never held across Daraz HTTP).
+    if execute and claim_gate and not forced_attempt_id and not resume_item_id:
+        from src.product_copy_mapping import (
+            find_uncertain_create_attempt,
+            get_verified_copy_mapping,
+            resolve_connected_copy_identity,
+        )
+
+        early_identity = resolve_connected_copy_identity(workspace_id, draft)
+        if early_identity and dest.get("id"):
+            early_mapping = get_verified_copy_mapping(
+                workspace_id,
+                source_store_id=early_identity["source_store_id"],
+                source_daraz_item_id=early_identity["source_daraz_item_id"],
+                destination_store_id=str(dest["id"]),
+            )
+            if early_mapping:
+                return {
+                    "store": store_info,
+                    "status": "ALREADY_EXISTS",
+                    "creation_status": "VERIFIED",
+                    "reason": "already_copied_to_destination",
+                    "attempt_id": early_mapping.get("attempt_id"),
+                    "item_id": early_mapping.get("destination_item_id"),
+                    "existing_daraz_item_id": early_mapping.get("destination_item_id"),
+                    "draft_preview": build_create_product_payload_preview(draft),
+                    "timings_ms": {
+                        **timings,
+                        "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+                    },
+                }
+            early_uncertain = find_uncertain_create_attempt(
+                workspace_id,
+                source_store_id=early_identity["source_store_id"],
+                source_daraz_item_id=early_identity["source_daraz_item_id"],
+                destination_store_id=str(dest["id"]),
+            )
+            if early_uncertain:
+                return {
+                    "store": store_info,
+                    "status": "NEEDS_ATTENTION",
+                    "creation_status": "NEEDS_RECONCILIATION",
+                    "reason": "product_create_attempt_requires_reconciliation",
+                    "attempt_id": early_uncertain.get("id"),
+                    "item_id": early_uncertain.get("destination_item_id"),
+                    "draft_preview": build_create_product_payload_preview(draft),
+                    "timings_ms": {
+                        **timings,
+                        "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+                    },
+                }
 
     try:
         client = client_for_store(dest)
@@ -749,6 +809,58 @@ def _prepare_destination(
             },
         }
 
+    from src.product_copy_mapping import (
+        finish_create_claim_after_outcome,
+        gate_create_with_mapping_and_claim,
+    )
+
+    claim_id: str | None = None
+    owner_token: str | None = None
+    copy_identity: dict[str, str] | None = None
+    # Bulk holds the claim outside; forced retries continue an owned attempt.
+    use_claim_gate = bool(claim_gate) and not forced_attempt_id
+    if use_claim_gate:
+        gated = gate_create_with_mapping_and_claim(
+            workspace_id, draft=draft, destination_store=dest
+        )
+        if gated["action"] in {"skip_verified", "block"}:
+            out = gated.get("result") or {}
+            return {
+                **result_base,
+                **{k: v for k, v in out.items() if k != "store"},
+                "store": out.get("store") or store_info,
+                "draft_preview": preview,
+                "timings_ms": {
+                    **timings,
+                    "dest_total": round((time.perf_counter() - t0) * 1000, 1),
+                },
+            }
+        claim_id = gated.get("claim_id")
+        owner_token = gated.get("owner_token")
+        copy_identity = gated.get("identity")
+
+    def _finish_claim(
+        outcome_status: str,
+        *,
+        destination_item_id: str | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
+        if not use_claim_gate:
+            return
+        try:
+            finish_create_claim_after_outcome(
+                workspace_id,
+                claim_id=claim_id,
+                owner_token=owner_token,
+                identity=copy_identity,
+                destination_store_id=str(dest.get("id") or ""),
+                outcome_status=outcome_status,
+                destination_item_id=destination_item_id,
+                attempt_id=attempt_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     repo = get_repo()
     generated_rows = (
         build_generated_seller_skus(draft)
@@ -807,6 +919,11 @@ def _prepare_destination(
             )
         except Exception:  # noqa: BLE001
             pass
+        _finish_claim(
+            "VERIFIED",
+            destination_item_id=str(attempt.get("destination_item_id") or "") or None,
+            attempt_id=str(attempt["id"]),
+        )
         return {
             **result_base,
             "status": "ALREADY_EXISTS",
@@ -831,6 +948,12 @@ def _prepare_destination(
             and str(attempt.get("id")) == str(forced_attempt_id)
             and attempt.get("state") == "CREATING"
         ):
+            _finish_claim(
+                "NEEDS_RECONCILIATION",
+                destination_item_id=str(attempt.get("destination_item_id") or "")
+                or None,
+                attempt_id=str(attempt["id"]),
+            )
             return {
                 **result_base,
                 "status": "NEEDS_ATTENTION",
@@ -893,6 +1016,7 @@ def _prepare_destination(
             last_error=f"{exc.code}:{exc}",
             retry_count=int(attempt.get("retry_count") or 0) + 1,
         )
+        _finish_claim(fail_state, attempt_id=str(attempt["id"]))
         return {
             **result_base,
             "status": "Failed",
@@ -923,6 +1047,9 @@ def _prepare_destination(
                 "dest_total": round((time.perf_counter() - t0) * 1000, 1),
             },
         }
+    except Exception:
+        _finish_claim("NEEDS_RECONCILIATION", attempt_id=str(attempt["id"]))
+        raise
 
     timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
     timings["create_ms"] = timings["create_product_ms"]
@@ -960,7 +1087,10 @@ def _prepare_destination(
         if isinstance(data, dict):
             mapping = _sku_mapping_from_product(data, generated_rows)
     t_persist = time.perf_counter()
-    verified = bool(post.get("raw"))
+    verified = bool(post.get("raw")) and bool(item_id)
+    # Missing destination item ID must never be treated as verified success.
+    if not item_id:
+        verified = False
     repo.update_product_attempt(
         workspace_id,
         attempt["id"],
@@ -1006,7 +1136,11 @@ def _prepare_destination(
     status = post["status"]
     creation_status = "CREATED"
     # Only treat hard pricing mismatch as warning — missing live SKUs is PARTIAL.
-    if (
+    if not item_id:
+        status = "NEEDS_ATTENTION"
+        creation_status = "CREATED_UNVERIFIED"
+        warnings.append("missing_destination_item_id")
+    elif (
         special.get("attempted")
         and not special.get("ok")
     ):
@@ -1019,6 +1153,21 @@ def _prepare_destination(
         warnings.append("verification:pricing_mismatch")
     elif not catalog_upsert.get("ok"):
         warnings.append(f"catalog_upsert:{catalog_upsert.get('error')}")
+
+    claim_outcome = (
+        "VERIFIED"
+        if verified and item_id
+        else (
+            "NEEDS_RECONCILIATION"
+            if not item_id or not verified
+            else str(creation_status)
+        )
+    )
+    _finish_claim(
+        claim_outcome,
+        destination_item_id=str(item_id) if item_id else None,
+        attempt_id=str(attempt["id"]),
+    )
 
     special_detected = sum(
         1
@@ -1480,8 +1629,14 @@ def add_product_from_connected(
     resume_by_store: dict[str, str] | None = None,
     forced_attempt_id: str | None = None,
     forced_seller_skus: Any = None,
+    claim_gate: bool = True,
 ) -> dict[str, Any]:
-    """Fetch connected item once → prepare / create on each destination."""
+    """Fetch connected item once → prepare / create on each destination.
+
+    ``claim_gate`` defaults True so single-product / URL-resolved connected
+    creates share mapping+claim safety. Bulk copy passes False after it already
+    acquired the durable claim.
+    """
     del confirm
     t0 = time.perf_counter()
     dest_ids = [str(x).strip() for x in destination_store_ids if str(x).strip()]
@@ -1613,6 +1768,7 @@ def add_product_from_connected(
             resume_item_id=payload.get("resume_id"),
             forced_attempt_id=forced_attempt_id,
             forced_seller_skus=forced_seller_skus,
+            claim_gate=claim_gate,
         )
 
     parallelism = min(_destination_concurrency(), max(1, len(jobs))) if jobs else 0

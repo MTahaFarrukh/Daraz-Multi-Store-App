@@ -2,11 +2,13 @@ import { useMemo, useState } from "react";
 import {
   useAddProductFromConnected,
   useAddProductFromUrl,
+  useImportUrlDraft,
 } from "@/hooks/queries/useProducts";
 import { Api } from "@/lib/api";
 import {
   destinationActionKind,
   destinationProgressLabel,
+  destinationReasonLabel,
   shouldShowReconcile,
   shouldShowRetry,
 } from "@/lib/productAddProgress";
@@ -49,15 +51,24 @@ export function AddDarazProductDialog({
   const [draftPreview, setDraftPreview] = useState<Record<string, unknown> | null>(
     null
   );
+  const [fetchedUrl, setFetchedUrl] = useState<string | null>(null);
+  const [extractionComplete, setExtractionComplete] = useState<boolean | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const addUrlMutation = useAddProductFromUrl(workspaceId);
   const addConnectedMutation = useAddProductFromConnected(workspaceId);
+  const importDraftMutation = useImportUrlDraft(workspaceId);
 
   const destOptions = useMemo(
     () =>
       stores.filter((s) => (mode === "connected" ? s.store_id !== sourceStore : true)),
     [stores, sourceStore, mode]
   );
+
+  const primaryDest = useMemo(() => {
+    const first = Array.from(destSelected)[0];
+    return first || "";
+  }, [destSelected]);
 
   const unresolvedVariants = useMemo(() => {
     const seen = new Map<string, { key: string; label: string }>();
@@ -70,6 +81,20 @@ export function AddDarazProductDialog({
     }
     return Array.from(seen.values());
   }, [result]);
+
+  const urlFetched =
+    mode === "url" &&
+    Boolean(fetchedUrl) &&
+    fetchedUrl === productUrl.trim() &&
+    Boolean(draftPreview);
+
+  const canAdd =
+    !busy &&
+    !submitting &&
+    destSelected.size > 0 &&
+    (mode === "connected"
+      ? Boolean(sourceStore && itemId.trim())
+      : urlFetched && Boolean(productUrl.trim()));
 
   function toggleDest(id: string) {
     setDestSelected((prev) => {
@@ -94,11 +119,14 @@ export function AddDarazProductDialog({
     setSourceStore("");
     setItemId("");
     setDestSelected(new Set());
-    setEditBefore(false);
+    setEditBefore(true);
     setPriceOverride("");
     setVariantPrices({});
     setResult(null);
     setDraftPreview(null);
+    setFetchedUrl(null);
+    setExtractionComplete(null);
+    setSubmitting(false);
     onClose();
   }
 
@@ -122,6 +150,56 @@ export function AddDarazProductDialog({
     return Object.keys(out).length ? out : undefined;
   }
 
+  async function onFetchProduct() {
+    if (mode !== "url") return;
+    const url = productUrl.trim();
+    if (!url) {
+      onError("Paste a Daraz product URL first");
+      return;
+    }
+    if (!primaryDest) {
+      onError("Select at least one destination store before fetching");
+      return;
+    }
+    onError("");
+    onOk("");
+    setResult(null);
+    setBusy("Fetching product…");
+    try {
+      const res = await importDraftMutation.mutateAsync({
+        url,
+        destination_store_id: primaryDest,
+      });
+      setDraftPreview(res as unknown as Record<string, unknown>);
+      setFetchedUrl(url);
+      const extracted = (res as { extraction_complete?: boolean; draft?: { validation?: { warnings?: string[] } } });
+      const complete =
+        typeof extracted.extraction_complete === "boolean"
+          ? extracted.extraction_complete
+          : !(extracted.draft?.validation?.warnings || []).some((w) =>
+              String(w).toLowerCase().includes("incomplete")
+            );
+      setExtractionComplete(complete);
+      const warnCount = (res.warnings || []).length + (res.errors || []).length;
+      if (complete && !warnCount) {
+        onOk("Preview ready — review details, then Add Product.");
+      } else if (complete) {
+        onOk("Preview ready with notes — review warnings before adding.");
+      } else {
+        onError(
+          "Extraction incomplete — missing fields are shown below. Fix what you can before adding."
+        );
+      }
+    } catch (err) {
+      setDraftPreview(null);
+      setFetchedUrl(null);
+      setExtractionComplete(null);
+      onError(err instanceof Error ? err.message : "Could not fetch product");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function runAdd(options?: {
     destIds?: string[];
     execute?: boolean;
@@ -129,17 +207,21 @@ export function AddDarazProductDialog({
     edit?: boolean;
     resumeByStore?: Record<string, string>;
   }) {
+    if (submitting) return;
     const destIds = options?.destIds ?? Array.from(destSelected);
     if (!destIds.length) {
       onError("Select at least one destination store");
       return;
     }
+    if (mode === "url" && !urlFetched) {
+      onError("Fetch the product first so you can review the preview");
+      return;
+    }
     onError("");
     onOk("");
     setResult(null);
-    setDraftPreview(null);
 
-    const wantEdit = options?.edit ?? editBefore;
+    const wantEdit = options?.edit ?? false;
     const price = parsePrice();
     const variantOverrides = parseVariantOverrides();
 
@@ -184,8 +266,9 @@ export function AddDarazProductDialog({
       });
     }
 
+    setSubmitting(true);
     try {
-      if (wantEdit) {
+      if (wantEdit || editBefore) {
         setBusy("Preparing draft for edit…");
         const res = await callApi({
           execute: false,
@@ -197,11 +280,11 @@ export function AddDarazProductDialog({
         if (res.draft_result) {
           setDraftPreview(res.draft_result as Record<string, unknown>);
         }
-        onOk("Draft ready — review below.");
+        onOk("Draft ready — review below, then Add Product to create.");
         return;
       }
 
-      setBusy("Analyzing product… Creating on Daraz…");
+      setBusy("Creating product on Daraz…");
       const res = await callApi({
         execute: true,
         confirm: true,
@@ -210,8 +293,15 @@ export function AddDarazProductDialog({
         resume_by_store: options?.resumeByStore,
       });
       setResult(res);
+      if (res.draft_result) {
+        setDraftPreview(res.draft_result as Record<string, unknown>);
+      } else {
+        const destDraft = res.destinations?.find((d) => d.draft_preview);
+        if (destDraft?.draft_preview) {
+          setDraftPreview({ draft: destDraft.draft_preview } as Record<string, unknown>);
+        }
+      }
       applyResultMessages(res);
-      // Progressive attempt refresh when IDs are available (non-blocking).
       for (const d of res.destinations || []) {
         if (d.attempt_id) {
           void pollAttemptIntoResult(d.attempt_id, d.store?.store_id || null);
@@ -221,6 +311,7 @@ export function AddDarazProductDialog({
       onError(err instanceof Error ? err.message : "Add product failed");
     } finally {
       setBusy("");
+      setSubmitting(false);
     }
   }
 
@@ -244,11 +335,19 @@ export function AddDarazProductDialog({
       onOk("Product already exists on destination — skipped create");
     } else if (res.needs_attention_count) {
       const missing = res.destinations?.some((d) => d.reason === "missing_price");
+      const recon = res.destinations?.some(
+        (d) =>
+          String(d.creation_status || "").includes("RECONCIL") ||
+          String(d.reason || "").includes("reconcil") ||
+          String(d.reason || "").includes("claim")
+      );
       onError(
         `${res.needs_attention_count} store(s) need attention` +
           (missing
             ? " — enter prices for unresolved variants (or a single override when all SKUs share one price)"
-            : "")
+            : recon
+              ? " — wait or use Reconcile; do not create again until resolved"
+              : "")
       );
     } else if (res.failed_count) {
       onError(`${res.failed_count} store(s) failed — see details below`);
@@ -294,9 +393,10 @@ export function AddDarazProductDialog({
   }
 
   async function onRetryDestination(d: AddProductDestinationResult) {
-    if (!d.attempt_id) return;
+    if (!d.attempt_id || submitting) return;
     setBusy(`Retrying ${d.store?.display_name || d.store?.store_id || "store"}…`);
     onError("");
+    setSubmitting(true);
     try {
       const res = await Api.retryProductCreateAttempt(d.attempt_id, true);
       const attempt = (res.attempt as Record<string, unknown> | undefined) || res;
@@ -329,19 +429,21 @@ export function AddDarazProductDialog({
           ),
         };
       });
-      onOk(`Retry finished · ${state}`);
+      onOk(`Retry finished · ${destinationProgressLabel({ creation_status: state })}`);
       void pollAttemptIntoResult(d.attempt_id, d.store?.store_id || null);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy("");
+      setSubmitting(false);
     }
   }
 
   async function onReconcileDestination(d: AddProductDestinationResult) {
-    if (!d.attempt_id) return;
+    if (!d.attempt_id || submitting) return;
     setBusy(`Reconciling ${d.store?.display_name || d.store?.store_id || "store"}…`);
     onError("");
+    setSubmitting(true);
     try {
       const res = await Api.reconcileProductCreateAttempt(d.attempt_id);
       const attempt = (res.attempt as Record<string, unknown> | undefined) || res;
@@ -374,11 +476,14 @@ export function AddDarazProductDialog({
           ),
         };
       });
-      onOk(`Reconcile finished · ${state}`);
+      onOk(
+        `Reconcile finished · ${destinationProgressLabel({ creation_status: state })}`
+      );
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy("");
+      setSubmitting(false);
     }
   }
 
@@ -393,14 +498,21 @@ export function AddDarazProductDialog({
         <button
           type="button"
           className={`tab${mode === "url" ? " active" : ""}`}
-          onClick={() => setMode("url")}
+          onClick={() => {
+            setMode("url");
+            setResult(null);
+          }}
         >
           Daraz Link
         </button>
         <button
           type="button"
           className={`tab${mode === "connected" ? " active" : ""}`}
-          onClick={() => setMode("connected")}
+          onClick={() => {
+            setMode("connected");
+            setResult(null);
+            setFetchedUrl(null);
+          }}
         >
           Connected Item ID
         </button>
@@ -411,15 +523,27 @@ export function AddDarazProductDialog({
           Product URL
           <input
             value={productUrl}
-            onChange={(e) => setProductUrl(e.target.value)}
+            onChange={(e) => {
+              setProductUrl(e.target.value);
+              if (fetchedUrl && e.target.value.trim() !== fetchedUrl) {
+                setFetchedUrl(null);
+                setDraftPreview(null);
+                setExtractionComplete(null);
+              }
+            }}
             placeholder="https://www.daraz.pk/products/…"
+            disabled={Boolean(busy) || submitting}
           />
         </label>
       ) : (
         <>
           <label>
             Source Store
-            <select value={sourceStore} onChange={(e) => setSourceStore(e.target.value)}>
+            <select
+              value={sourceStore}
+              onChange={(e) => setSourceStore(e.target.value)}
+              disabled={Boolean(busy) || submitting}
+            >
               <option value="">Select store…</option>
               {stores.map((s) => (
                 <option key={s.store_id} value={s.store_id}>
@@ -435,6 +559,7 @@ export function AddDarazProductDialog({
               onChange={(e) => setItemId(e.target.value)}
               placeholder="e.g. 1974026524"
               inputMode="numeric"
+              disabled={Boolean(busy) || submitting}
             />
           </label>
         </>
@@ -445,10 +570,20 @@ export function AddDarazProductDialog({
           Destination stores
         </legend>
         <div className="row" style={{ marginBottom: "0.35rem", gap: "0.5rem" }}>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={selectAllDest}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={selectAllDest}
+            disabled={Boolean(busy) || submitting}
+          >
             Select All
           </button>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={clearDest}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={clearDest}
+            disabled={Boolean(busy) || submitting}
+          >
             Clear
           </button>
         </div>
@@ -459,6 +594,7 @@ export function AddDarazProductDialog({
                 type="checkbox"
                 checked={destSelected.has(s.store_id)}
                 onChange={() => toggleDest(s.store_id)}
+                disabled={Boolean(busy) || submitting}
               />
               {s.display_name || s.store_name || s.store_id}
             </label>
@@ -466,13 +602,36 @@ export function AddDarazProductDialog({
         </div>
       </fieldset>
 
+      {mode === "url" ? (
+        <div className="row" style={{ gap: "0.5rem", marginBottom: "0.75rem" }}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={Boolean(busy) || submitting || !productUrl.trim() || !primaryDest}
+            onClick={() => void onFetchProduct()}
+          >
+            {busy.startsWith("Fetching") ? "Fetching…" : "Fetch Product"}
+          </button>
+          {urlFetched ? (
+            <span className="muted-line">
+              {extractionComplete === false
+                ? "Preview loaded (incomplete extraction)"
+                : "Preview loaded"}
+            </span>
+          ) : (
+            <span className="muted-line">Fetch to preview before adding</span>
+          )}
+        </div>
+      ) : null}
+
       <label className="row" style={{ gap: "0.5rem", marginBottom: "0.5rem" }}>
         <input
           type="checkbox"
           checked={editBefore}
           onChange={(e) => setEditBefore(e.target.checked)}
+          disabled={Boolean(busy) || submitting}
         />
-        Edit before adding
+        Review draft before creating
       </label>
 
       <label style={{ display: "block", marginBottom: "0.75rem" }}>
@@ -482,6 +641,7 @@ export function AddDarazProductDialog({
           onChange={(e) => setPriceOverride(e.target.value)}
           placeholder="Will not flatten differently priced variants"
           inputMode="decimal"
+          disabled={Boolean(busy) || submitting}
         />
       </label>
 
@@ -509,6 +669,7 @@ export function AddDarazProductDialog({
                   }
                   placeholder="Rs."
                   inputMode="decimal"
+                  disabled={Boolean(busy) || submitting}
                 />
               </label>
             ))}
@@ -517,8 +678,8 @@ export function AddDarazProductDialog({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={Boolean(busy) || !destSelected.size}
-              onClick={() => void runAdd()}
+              disabled={!canAdd}
+              onClick={() => void runAdd({ edit: false })}
             >
               Continue Adding
             </button>
@@ -530,15 +691,30 @@ export function AddDarazProductDialog({
         <button
           type="button"
           className="btn btn-primary"
-          disabled={Boolean(busy) || !destSelected.size}
-          onClick={() => void runAdd()}
+          disabled={!canAdd}
+          onClick={() => void runAdd({ edit: editBefore })}
         >
-          Add Product
+          {busy.includes("Creating") || busy.includes("Preparing")
+            ? "Working…"
+            : editBefore
+              ? "Prepare Preview"
+              : "Add Product"}
         </button>
-        <button type="button" className="btn btn-ghost" onClick={resetAndClose}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={resetAndClose}
+          disabled={submitting}
+        >
           Cancel
         </button>
       </div>
+
+      {busy ? (
+        <p className="muted-line" style={{ marginTop: "0.75rem" }} aria-live="polite">
+          {busy}
+        </p>
+      ) : null}
 
       {result?.status === "BLOCKED_CREATE" ? (
         <p className="muted-line" style={{ marginTop: "0.75rem" }}>
@@ -553,6 +729,7 @@ export function AddDarazProductDialog({
           <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
             {result.destinations.map((d, i) => {
               const action = destinationActionKind(d);
+              const reasonText = destinationReasonLabel(d.reason);
               return (
                 <li
                   key={`${d.store?.store_id || i}-${d.attempt_id || d.status}`}
@@ -565,13 +742,13 @@ export function AddDarazProductDialog({
                     ? ` · existing ${d.existing_daraz_item_id}`
                     : ""}
                   {d.used_no_brand ? " · No Brand" : ""}
-                  {d.reason ? ` · ${d.reason}` : ""}
+                  {reasonText ? ` · ${reasonText}` : ""}
                   {action === "retry" ? (
                     <button
                       type="button"
                       className="btn btn-ghost"
                       style={{ marginLeft: "0.5rem" }}
-                      disabled={Boolean(busy)}
+                      disabled={Boolean(busy) || submitting}
                       onClick={() => void onRetryDestination(d)}
                     >
                       Retry
@@ -582,7 +759,7 @@ export function AddDarazProductDialog({
                       type="button"
                       className="btn btn-ghost"
                       style={{ marginLeft: "0.5rem" }}
-                      disabled={Boolean(busy)}
+                      disabled={Boolean(busy) || submitting}
                       onClick={() => void onReconcileDestination(d)}
                     >
                       Reconcile
@@ -598,7 +775,7 @@ export function AddDarazProductDialog({
                 ? `${retryable.length} store(s) safe to retry (keeps Seller SKUs). `
                 : ""}
               {reconcileable.length
-                ? `${reconcileable.length} store(s) need reconciliation.`
+                ? `${reconcileable.length} store(s) need reconciliation — do not create again until resolved.`
                 : ""}
             </p>
           ) : null}
@@ -626,6 +803,7 @@ export function AddDarazProductDialog({
         <CloneDraftPreview
           result={draftPreview as any}
           variants={draftVariants as any}
+          extractionComplete={extractionComplete}
         />
       ) : null}
     </Dialog>

@@ -424,6 +424,7 @@ def _process_one_item(
             execute=True,
             confirm=True,
             allow_duplicates=False,
+            claim_gate=False,  # claim already held by this worker
         )
         destinations = result.get("destinations") or []
         dest0 = destinations[0] if destinations else {"status": "NEEDS_ATTENTION", "reason": "no_destination_result"}
@@ -434,10 +435,14 @@ def _process_one_item(
 
         # Title-only local-catalog ALREADY_EXISTS is not durable source→dest identity.
         reason_text = str(dest0.get("reason") or "")
+        _durable_already = {
+            "product_create_attempt_already_verified",
+            "already_copied_to_destination",
+        }
         if (
             status == "verified"
             and str(dest0.get("status") or "").upper() == "ALREADY_EXISTS"
-            and reason_text != "product_create_attempt_already_verified"
+            and reason_text not in _durable_already
         ):
             status = "needs_attention"
             reason = reason or "possible_destination_match_not_source_identity"

@@ -437,8 +437,9 @@ def _fetch_catalog_enrichment(item_id: str, *, host: str = "www.daraz.pk") -> di
     try:
         _resolve_public(host)
         url = f"https://{host}/catalog/?_keyori=ss&from=input&q={item_id}&ajax=true"
+        # Never auto-follow redirects off the Daraz allowlist (SSRF).
         client = get_shared_http_client(
-            timeout=min(TIMEOUT_S, 8.0), follow_redirects=True
+            timeout=min(TIMEOUT_S, 8.0), follow_redirects=False
         )
         resp = client.get(
             url,
@@ -447,6 +448,10 @@ def _fetch_catalog_enrichment(item_id: str, *, host: str = "www.daraz.pk") -> di
                 "Accept": "application/json",
             },
         )
+        if resp.status_code in {301, 302, 303, 307, 308}:
+            # Soft-skip enrichment rather than chasing unvalidated Location targets.
+            out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
+            return out
         if resp.status_code >= 400:
             out["timings_ms"]["catalog"] = round((time.perf_counter() - t0) * 1000, 1)
             return out
@@ -735,7 +740,7 @@ def _fetch_pdp_detail_sku_prices(
     try:
         with httpx.Client(
             timeout=min(TIMEOUT_S, 12.0),
-            follow_redirects=True,
+            follow_redirects=False,
             headers=headers,
         ) as client:
             # Warm cookies / token (same flow as PDP JS).
@@ -1200,6 +1205,7 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         },
         "timings_ms": timings,
         "warnings": [],
+        "extraction_complete": False,
     }
     if not title:
         payload["warnings"].append("Title not found on public page")
@@ -1222,6 +1228,19 @@ def fetch_public_product(url: str, *, use_cache: bool = True) -> dict[str, Any]:
         payload["warnings"].append(
             "Variant prices hydrated via mtop.global.detail.web.getDetailInfo "
             "(salePrice not treated as seller Special Price)"
+        )
+    # Complete only when core fields are present — never invent the rest.
+    payload["extraction_complete"] = bool(
+        title
+        and images
+        and payload["variants"]
+        and missing_variant_prices == 0
+        and not (payload.get("category_resolution") or {}).get("conflict")
+    )
+    if not payload["extraction_complete"]:
+        payload["warnings"].append(
+            "Extraction incomplete — review preview before creating; missing fields "
+            "will not be invented"
         )
     _cache[clean] = (now, payload)
     return payload
@@ -1546,6 +1565,7 @@ def build_public_clone_draft_from_extracted(
         "errors": draft["validation"]["errors"],
         "possible_duplicates": draft["possible_duplicates"],
         "source_resolution": "public_daraz_url",
+        "extraction_complete": bool(extracted.get("extraction_complete")),
         "timings_ms": {
             **(extracted.get("timings_ms") or {}),
             "defaults_ms": defaults_ms,
@@ -1584,6 +1604,11 @@ def build_public_clone_draft(
             "Item found in a connected store — used seller API path via public URL",
         )
         result["warnings"] = warnings
+        result["extraction_complete"] = True
+        result["public_extraction"] = {
+            "complete": bool(extracted.get("extraction_complete")),
+            "warnings": list(extracted.get("warnings") or []),
+        }
         return result
 
     return build_public_clone_draft_from_extracted(

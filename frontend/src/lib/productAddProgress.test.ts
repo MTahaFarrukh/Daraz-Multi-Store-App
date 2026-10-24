@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   destinationActionKind,
   destinationProgressLabel,
+  destinationReasonLabel,
   shouldShowReconcile,
   shouldShowRetry,
 } from "@/lib/productAddProgress";
@@ -22,6 +23,19 @@ describe("productAddProgress", () => {
     expect(destinationProgressLabel({ status: "NEEDS_ATTENTION" })).toBe(
       "Needs attention"
     );
+    expect(destinationProgressLabel({ status: "ALREADY_EXISTS" })).toBe(
+      "Already on destination"
+    );
+  });
+
+  it("maps internal reasons to actionable labels", () => {
+    expect(destinationReasonLabel("already_copied_to_destination")).toMatch(
+      /Already copied/
+    );
+    expect(destinationReasonLabel("concurrent_create_claim_held")).toMatch(
+      /in progress/
+    );
+    expect(destinationReasonLabel("CreateProduct:E123:boom")).toMatch(/rejected/);
   });
 
   it("shows Retry only for FAILED_SAFE_TO_RETRY with attempt_id", () => {
