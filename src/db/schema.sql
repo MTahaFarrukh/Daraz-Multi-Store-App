@@ -539,3 +539,26 @@ CREATE INDEX IF NOT EXISTS idx_product_copy_mappings_attempt
     ON product_copy_mappings (workspace_id, attempt_id)
     WHERE attempt_id IS NOT NULL;
 
+-- Cross-process create claim (short DB transaction; never held across Daraz HTTP)
+CREATE TABLE IF NOT EXISTS product_copy_claims (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    source_daraz_item_id TEXT NOT NULL,
+    destination_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    owner_token TEXT NOT NULL,
+    owner_job_id UUID,
+    owner_item_id UUID,
+    attempt_id UUID,
+    state TEXT NOT NULL DEFAULT 'held'
+        CHECK (state IN ('held', 'uncertain', 'released')),
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lease_expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, source_store_id, source_daraz_item_id, destination_store_id)
+);
+CREATE INDEX IF NOT EXISTS idx_product_copy_claims_lease
+    ON product_copy_claims (workspace_id, state, lease_expires_at);
+

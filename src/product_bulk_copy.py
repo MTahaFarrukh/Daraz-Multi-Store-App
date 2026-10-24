@@ -18,10 +18,13 @@ from typing import Any
 from src.db.repo import get_repo
 from src.product_add import add_product_from_connected, product_create_enabled
 from src.product_copy_mapping import (
+    acquire_create_claim,
+    evaluate_stale_claim_before_create,
     find_uncertain_create_attempt,
     get_verified_copy_mapping,
+    mark_create_claim_uncertain,
     record_verified_copy_mapping,
-    try_record_verified_from_attempt,
+    release_create_claim,
 )
 from src.product_sync import sync_store_products
 
@@ -287,6 +290,8 @@ def _process_one_item(
     daraz_item = str(item.get("source_daraz_item_id") or "")
     source_uuid = str(job.get("source_store_id") or "")
     dest_uuid = str(job.get("destination_store_id") or "")
+    claim_id: str | None = None
+    owner_token: str | None = None
     try:
         # 1) Durable verified mapping — skip before any CreateProduct path.
         mapping = get_verified_copy_mapping(
@@ -325,6 +330,86 @@ def _process_one_item(
                     "attempt_id": uncertain.get("id"),
                     "destination_item_id": uncertain.get("destination_item_id"),
                     "reason": "product_create_attempt_requires_reconciliation",
+                    "updated_at": _now(),
+                },
+            )
+            return
+
+        # 3) Atomic durable claim — short DB op, not held across Daraz HTTP.
+        acquired = acquire_create_claim(
+            workspace_id,
+            source_store_id=source_uuid,
+            source_daraz_item_id=daraz_item,
+            destination_store_id=dest_uuid,
+            owner_job_id=str(job.get("id") or "") or None,
+            owner_item_id=item_id,
+        )
+        if not acquired.get("acquired"):
+            held = acquired.get("claim") or {}
+            reason = str(acquired.get("reason") or "concurrent_create_claim_held")
+            if reason == "create_claim_uncertain_requires_reconciliation":
+                status = "needs_reconciliation"
+            else:
+                status = "needs_attention"
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": status,
+                    "attempt_id": held.get("attempt_id"),
+                    "destination_item_id": None,
+                    "reason": reason,
+                    "updated_at": _now(),
+                },
+            )
+            return
+
+        claim = acquired["claim"]
+        claim_id = str(claim["id"])
+        owner_token = str(acquired["owner_token"])
+
+        # 4) After (possibly stale) reclaim, re-evaluate before CreateProduct.
+        gate = evaluate_stale_claim_before_create(
+            workspace_id,
+            source_store_id=source_uuid,
+            source_daraz_item_id=daraz_item,
+            destination_store_id=dest_uuid,
+        )
+        if gate["action"] == "skip_verified":
+            mapping = gate["mapping"] or {}
+            release_create_claim(
+                workspace_id, claim_id=claim_id, owner_token=owner_token
+            )
+            claim_id = None
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": "skipped",
+                    "attempt_id": mapping.get("attempt_id"),
+                    "destination_item_id": mapping.get("destination_item_id"),
+                    "reason": "already_copied_to_destination",
+                    "updated_at": _now(),
+                },
+            )
+            return
+        if gate["action"] == "needs_reconciliation":
+            attempt = gate["attempt"] or {}
+            mark_create_claim_uncertain(
+                workspace_id,
+                claim_id=claim_id,
+                owner_token=owner_token,
+                attempt_id=str(attempt.get("id") or "") or None,
+            )
+            claim_id = None  # ownership transferred to uncertain; do not release as free
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": "needs_reconciliation",
+                    "attempt_id": attempt.get("id"),
+                    "destination_item_id": attempt.get("destination_item_id"),
+                    "reason": "stale_claim_requires_reconciliation",
                     "updated_at": _now(),
                 },
             )
@@ -369,6 +454,24 @@ def _process_one_item(
                 )
             except ValueError:
                 pass
+            release_create_claim(
+                workspace_id, claim_id=claim_id, owner_token=owner_token
+            )
+            claim_id = None
+        elif status == "needs_reconciliation":
+            mark_create_claim_uncertain(
+                workspace_id,
+                claim_id=claim_id,
+                owner_token=owner_token,
+                attempt_id=attempt_id,
+            )
+            claim_id = None
+        elif status in {"failed", "needs_attention", "skipped"}:
+            # Safe to retry later — release claim for another attempt.
+            release_create_claim(
+                workspace_id, claim_id=claim_id, owner_token=owner_token
+            )
+            claim_id = None
 
         repo.update_product_copy_job_item(
             workspace_id,
@@ -383,16 +486,56 @@ def _process_one_item(
         )
     except Exception as exc:  # noqa: BLE001
         logger.info("bulk copy item failed job=%s item=%s err=%s", job.get("id"), daraz_item, exc)
-        repo.update_product_copy_job_item(
+        open_attempt = find_uncertain_create_attempt(
             workspace_id,
-            item_id,
-            {
-                "status": "failed",
-                "reason": f"{type(exc).__name__}:{exc}"[:240],
-                "updated_at": _now(),
-            },
+            source_store_id=source_uuid,
+            source_daraz_item_id=daraz_item,
+            destination_store_id=dest_uuid,
         )
+        if open_attempt and claim_id and owner_token:
+            # Create may have been submitted — do not free the claim for another CreateProduct.
+            mark_create_claim_uncertain(
+                workspace_id,
+                claim_id=claim_id,
+                owner_token=owner_token,
+                attempt_id=str(open_attempt.get("id") or "") or None,
+            )
+            claim_id = None
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": "needs_reconciliation",
+                    "attempt_id": open_attempt.get("id"),
+                    "destination_item_id": open_attempt.get("destination_item_id"),
+                    "reason": f"create_interrupted:{type(exc).__name__}:{exc}"[:240],
+                    "updated_at": _now(),
+                },
+            )
+        else:
+            if claim_id and owner_token:
+                release_create_claim(
+                    workspace_id, claim_id=claim_id, owner_token=owner_token
+                )
+                claim_id = None
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}:{exc}"[:240],
+                    "updated_at": _now(),
+                },
+            )
     finally:
+        # If we still own a held claim (unexpected path), release for safe retry.
+        if claim_id and owner_token:
+            try:
+                release_create_claim(
+                    workspace_id, claim_id=claim_id, owner_token=owner_token
+                )
+            except Exception:  # noqa: BLE001
+                pass
         job_row = repo.get_product_copy_job(workspace_id, str(job["id"]))
         if job_row:
             _recompute_job_counts(repo, job_row)

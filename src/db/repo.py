@@ -448,6 +448,7 @@ class MemoryTenancyRepo:
         self.product_copy_jobs: dict[str, dict[str, Any]] = {}
         self.product_copy_job_items: dict[str, dict[str, Any]] = {}
         self.product_copy_mappings: dict[str, dict[str, Any]] = {}
+        self.product_copy_claims: dict[str, dict[str, Any]] = {}
 
     def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -917,6 +918,144 @@ class MemoryTenancyRepo:
             ]
         rows.sort(key=lambda r: str(r.get("updated_at") or r.get("created_at") or ""), reverse=True)
         return rows
+
+    def _copy_claim_key(
+        self,
+        workspace_id: str,
+        source_store_id: str,
+        source_daraz_item_id: str,
+        destination_store_id: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            str(workspace_id),
+            str(source_store_id),
+            str(source_daraz_item_id),
+            str(destination_store_id),
+        )
+
+    def get_product_copy_claim(
+        self,
+        workspace_id: str,
+        *,
+        source_store_id: str,
+        source_daraz_item_id: str,
+        destination_store_id: str,
+    ) -> dict[str, Any] | None:
+        key = self._copy_claim_key(
+            workspace_id, source_store_id, source_daraz_item_id, destination_store_id
+        )
+        with self._lock:
+            for row in self.product_copy_claims.values():
+                if (
+                    str(row.get("workspace_id")),
+                    str(row.get("source_store_id")),
+                    str(row.get("source_daraz_item_id")),
+                    str(row.get("destination_store_id")),
+                ) == key:
+                    return deepcopy(row)
+        return None
+
+    def try_acquire_product_copy_claim(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Atomically acquire or reclaim a create claim. Returns claim or None."""
+        key = self._copy_claim_key(
+            payload["workspace_id"],
+            payload["source_store_id"],
+            payload["source_daraz_item_id"],
+            payload["destination_store_id"],
+        )
+        now = _now()
+        now_iso = now.isoformat()
+        with self._lock:
+            existing_id = None
+            existing = None
+            for mid, row in self.product_copy_claims.items():
+                if (
+                    str(row.get("workspace_id")),
+                    str(row.get("source_store_id")),
+                    str(row.get("source_daraz_item_id")),
+                    str(row.get("destination_store_id")),
+                ) == key:
+                    existing_id = mid
+                    existing = row
+                    break
+
+            def _write_new() -> dict[str, Any]:
+                row = {
+                    "id": payload.get("id") or _uuid(),
+                    "workspace_id": str(payload["workspace_id"]),
+                    "source_store_id": str(payload["source_store_id"]),
+                    "source_daraz_item_id": str(payload["source_daraz_item_id"]),
+                    "destination_store_id": str(payload["destination_store_id"]),
+                    "owner_token": str(payload["owner_token"]),
+                    "owner_job_id": payload.get("owner_job_id"),
+                    "owner_item_id": payload.get("owner_item_id"),
+                    "attempt_id": None,
+                    "state": "held",
+                    "claimed_at": now_iso,
+                    "heartbeat_at": now_iso,
+                    "lease_expires_at": payload["lease_expires_at"],
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                }
+                self.product_copy_claims[str(row["id"])] = row
+                return deepcopy(row)
+
+            if existing is None:
+                return _write_new()
+
+            state = str(existing.get("state") or "")
+            lease = str(existing.get("lease_expires_at") or "")
+            can_reclaim = state == "released" or (
+                state == "held" and lease and lease < now_iso
+            )
+            if not can_reclaim:
+                return None
+            existing.update(
+                {
+                    "owner_token": str(payload["owner_token"]),
+                    "owner_job_id": payload.get("owner_job_id"),
+                    "owner_item_id": payload.get("owner_item_id"),
+                    "attempt_id": None,
+                    "state": "held",
+                    "claimed_at": now_iso,
+                    "heartbeat_at": now_iso,
+                    "lease_expires_at": payload["lease_expires_at"],
+                    "updated_at": now_iso,
+                }
+            )
+            return deepcopy(existing)
+
+    def update_product_copy_claim(
+        self,
+        workspace_id: str,
+        claim_id: str,
+        *,
+        owner_token: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.product_copy_claims.get(str(claim_id))
+            if (
+                not row
+                or str(row.get("workspace_id")) != str(workspace_id)
+                or str(row.get("owner_token")) != str(owner_token)
+            ):
+                return None
+            allowed = {
+                "state",
+                "attempt_id",
+                "heartbeat_at",
+                "lease_expires_at",
+                "owner_job_id",
+                "owner_item_id",
+            }
+            for k, v in fields.items():
+                if k in allowed:
+                    row[k] = v
+            row["updated_at"] = _now().isoformat()
+            return deepcopy(row)
 
     def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -2879,6 +3018,171 @@ class PostgresTenancyRepo:
                 }
             )
         return out
+
+    def _product_copy_claim_row(self, row) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "source_store_id": str(row[2]),
+            "source_daraz_item_id": row[3],
+            "destination_store_id": str(row[4]),
+            "owner_token": row[5],
+            "owner_job_id": str(row[6]) if row[6] else None,
+            "owner_item_id": str(row[7]) if row[7] else None,
+            "attempt_id": str(row[8]) if row[8] else None,
+            "state": row[9],
+            "claimed_at": row[10].isoformat() if row[10] else None,
+            "heartbeat_at": row[11].isoformat() if row[11] else None,
+            "lease_expires_at": row[12].isoformat() if row[12] else None,
+            "created_at": row[13].isoformat() if row[13] else None,
+            "updated_at": row[14].isoformat() if row[14] else None,
+        }
+
+    def get_product_copy_claim(
+        self,
+        workspace_id: str,
+        *,
+        source_store_id: str,
+        source_daraz_item_id: str,
+        destination_store_id: str,
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, workspace_id, source_store_id, source_daraz_item_id,
+                          destination_store_id, owner_token, owner_job_id, owner_item_id,
+                          attempt_id, state, claimed_at, heartbeat_at, lease_expires_at,
+                          created_at, updated_at
+                   FROM product_copy_claims
+                   WHERE workspace_id=%s AND source_store_id=%s
+                     AND source_daraz_item_id=%s AND destination_store_id=%s""",
+                (
+                    workspace_id,
+                    source_store_id,
+                    source_daraz_item_id,
+                    destination_store_id,
+                ),
+            ).fetchone()
+        return self._product_copy_claim_row(row) if row else None
+
+    def try_acquire_product_copy_claim(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """INSERT INTO product_copy_claims
+                   (id, workspace_id, source_store_id, source_daraz_item_id,
+                    destination_store_id, owner_token, owner_job_id, owner_item_id,
+                    state, claimed_at, heartbeat_at, lease_expires_at)
+                   VALUES (
+                     COALESCE(%s::uuid, gen_random_uuid()), %s, %s, %s,
+                     %s, %s, %s, %s,
+                     'held', NOW(), NOW(), %s::timestamptz
+                   )
+                   ON CONFLICT (workspace_id, source_store_id, source_daraz_item_id, destination_store_id)
+                   DO UPDATE SET
+                     owner_token = EXCLUDED.owner_token,
+                     owner_job_id = EXCLUDED.owner_job_id,
+                     owner_item_id = EXCLUDED.owner_item_id,
+                     attempt_id = NULL,
+                     state = 'held',
+                     claimed_at = NOW(),
+                     heartbeat_at = NOW(),
+                     lease_expires_at = EXCLUDED.lease_expires_at,
+                     updated_at = NOW()
+                   WHERE product_copy_claims.state = 'released'
+                      OR (
+                        product_copy_claims.state = 'held'
+                        AND product_copy_claims.lease_expires_at < NOW()
+                      )
+                   RETURNING id, workspace_id, source_store_id, source_daraz_item_id,
+                             destination_store_id, owner_token, owner_job_id, owner_item_id,
+                             attempt_id, state, claimed_at, heartbeat_at, lease_expires_at,
+                             created_at, updated_at""",
+                (
+                    payload.get("id"),
+                    payload["workspace_id"],
+                    payload["source_store_id"],
+                    payload["source_daraz_item_id"],
+                    payload["destination_store_id"],
+                    payload["owner_token"],
+                    payload.get("owner_job_id"),
+                    payload.get("owner_item_id"),
+                    payload["lease_expires_at"],
+                ),
+            ).fetchone()
+            conn.commit()
+        return self._product_copy_claim_row(row) if row else None
+
+    def update_product_copy_claim(
+        self,
+        workspace_id: str,
+        claim_id: str,
+        *,
+        owner_token: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        allowed = {
+            "state",
+            "attempt_id",
+            "heartbeat_at",
+            "lease_expires_at",
+            "owner_job_id",
+            "owner_item_id",
+        }
+        sets: list[str] = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            sets.append(f"{k} = %s")
+            params.append(v)
+        if not sets:
+            return self.get_product_copy_claim_by_id(workspace_id, claim_id)
+        sets.append("updated_at = NOW()")
+        params.extend([workspace_id, claim_id, owner_token])
+        with connect() as conn:
+            conn.execute(
+                f"""UPDATE product_copy_claims SET {', '.join(sets)}
+                    WHERE workspace_id=%s AND id=%s AND owner_token=%s""",
+                tuple(params),
+            )
+            conn.commit()
+            row = conn.execute(
+                """SELECT id, workspace_id, source_store_id, source_daraz_item_id,
+                          destination_store_id, owner_token, owner_job_id, owner_item_id,
+                          attempt_id, state, claimed_at, heartbeat_at, lease_expires_at,
+                          created_at, updated_at
+                   FROM product_copy_claims WHERE workspace_id=%s AND id=%s""",
+                (workspace_id, claim_id),
+            ).fetchone()
+        if not row:
+            return None
+        claim = self._product_copy_claim_row(row)
+        if str(claim.get("owner_token")) != str(owner_token):
+            return None
+        return claim
+
+    def get_product_copy_claim_by_id(
+        self, workspace_id: str, claim_id: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, workspace_id, source_store_id, source_daraz_item_id,
+                          destination_store_id, owner_token, owner_job_id, owner_item_id,
+                          attempt_id, state, claimed_at, heartbeat_at, lease_expires_at,
+                          created_at, updated_at
+                   FROM product_copy_claims WHERE workspace_id=%s AND id=%s""",
+                (workspace_id, claim_id),
+            ).fetchone()
+        return self._product_copy_claim_row(row) if row else None
 
     def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         from src.db.connection import connect
