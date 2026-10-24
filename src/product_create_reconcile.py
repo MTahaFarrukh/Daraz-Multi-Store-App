@@ -261,6 +261,12 @@ def reconcile_product_create_attempt(
     )
 
     if attempt.get("state") in VERIFIED_STATES:
+        try:
+            from src.product_copy_mapping import try_record_verified_from_attempt
+
+            try_record_verified_from_attempt(workspace_id, attempt)
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "status": "VERIFIED",
             "attempt": attempt,
@@ -422,6 +428,14 @@ def reconcile_product_create_attempt(
                 "state": "VERIFIED",
             },
         )
+        try:
+            from src.product_copy_mapping import try_record_verified_from_attempt
+
+            try_record_verified_from_attempt(
+                workspace_id, updated or {**attempt, "state": "VERIFIED", "destination_item_id": dest_item}
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "status": "VERIFIED",
             "attempt": updated or attempt,

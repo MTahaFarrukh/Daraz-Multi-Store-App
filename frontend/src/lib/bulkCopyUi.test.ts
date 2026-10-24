@@ -7,6 +7,7 @@ const LABELS: Record<string, string> = {
   creating: "Creating",
   verifying: "Verifying",
   verified: "Verified",
+  skipped: "Skipped",
   needs_attention: "Needs Attention",
   needs_reconciliation: "Needs Reconciliation",
   failed: "Failed",

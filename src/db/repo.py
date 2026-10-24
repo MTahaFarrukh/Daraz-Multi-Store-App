@@ -447,6 +447,7 @@ class MemoryTenancyRepo:
         self.finance_payouts: dict[str, dict[str, Any]] = {}
         self.product_copy_jobs: dict[str, dict[str, Any]] = {}
         self.product_copy_job_items: dict[str, dict[str, Any]] = {}
+        self.product_copy_mappings: dict[str, dict[str, Any]] = {}
 
     def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -823,6 +824,99 @@ class MemoryTenancyRepo:
             "page": page,
             "page_size": page_size,
         }
+
+    def get_verified_product_copy_mapping(
+        self,
+        workspace_id: str,
+        *,
+        source_store_id: str,
+        source_daraz_item_id: str,
+        destination_store_id: str,
+    ) -> dict[str, Any] | None:
+        key = (
+            str(workspace_id),
+            str(source_store_id),
+            str(source_daraz_item_id),
+            str(destination_store_id),
+        )
+        with self._lock:
+            for row in self.product_copy_mappings.values():
+                if (
+                    str(row.get("workspace_id")),
+                    str(row.get("source_store_id")),
+                    str(row.get("source_daraz_item_id")),
+                    str(row.get("destination_store_id")),
+                ) == key and str(row.get("state") or "") == "verified":
+                    return deepcopy(row)
+        return None
+
+    def upsert_verified_product_copy_mapping(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Insert or update a verified mapping. Unique on workspace+source+dest."""
+        with self._lock:
+            existing_id = None
+            for mid, row in self.product_copy_mappings.items():
+                if (
+                    str(row.get("workspace_id")) == str(payload["workspace_id"])
+                    and str(row.get("source_store_id")) == str(payload["source_store_id"])
+                    and str(row.get("source_daraz_item_id"))
+                    == str(payload["source_daraz_item_id"])
+                    and str(row.get("destination_store_id"))
+                    == str(payload["destination_store_id"])
+                ):
+                    existing_id = mid
+                    break
+            now = _now().isoformat()
+            if existing_id:
+                row = self.product_copy_mappings[existing_id]
+                row.update(
+                    {
+                        "destination_item_id": payload["destination_item_id"],
+                        "attempt_id": payload.get("attempt_id") or row.get("attempt_id"),
+                        "state": "verified",
+                        "verified_at": payload.get("verified_at") or now,
+                        "updated_at": now,
+                    }
+                )
+                return deepcopy(row)
+            row = {
+                "id": payload.get("id") or _uuid(),
+                "workspace_id": str(payload["workspace_id"]),
+                "source_store_id": str(payload["source_store_id"]),
+                "source_daraz_item_id": str(payload["source_daraz_item_id"]),
+                "destination_store_id": str(payload["destination_store_id"]),
+                "destination_item_id": str(payload["destination_item_id"]),
+                "attempt_id": payload.get("attempt_id"),
+                "state": "verified",
+                "verified_at": payload.get("verified_at") or now,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.product_copy_mappings[str(row["id"])] = row
+            return deepcopy(row)
+
+    def find_product_attempts_for_source_dest(
+        self,
+        workspace_id: str,
+        *,
+        source_identities: list[str],
+        destination_store_id: str,
+        states: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        wanted = {str(s) for s in source_identities if s}
+        state_set = {str(s) for s in (states or [])} if states is not None else None
+        with self._lock:
+            rows = [
+                deepcopy(r)
+                for r in self.product_attempts.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+                and str(r.get("destination_store_id")) == str(destination_store_id)
+                and str(r.get("source_identity") or "") in wanted
+                and (state_set is None or str(r.get("state") or "") in state_set)
+            ]
+        rows.sort(key=lambda r: str(r.get("updated_at") or r.get("created_at") or ""), reverse=True)
+        return rows
 
     def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -2477,6 +2571,7 @@ class PostgresTenancyRepo:
             "error",
             "started_at",
             "finished_at",
+            "request_fingerprint",
         }
         sets: list[str] = []
         params: list[Any] = []
@@ -2645,6 +2740,145 @@ class PostgresTenancyRepo:
             for r in rows
         ]
         return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+
+    def _product_copy_mapping_row(self, row) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "source_store_id": str(row[2]),
+            "source_daraz_item_id": row[3],
+            "destination_store_id": str(row[4]),
+            "destination_item_id": row[5],
+            "attempt_id": str(row[6]) if row[6] else None,
+            "state": row[7],
+            "verified_at": row[8].isoformat() if row[8] else None,
+            "created_at": row[9].isoformat() if row[9] else None,
+            "updated_at": row[10].isoformat() if row[10] else None,
+        }
+
+    def get_verified_product_copy_mapping(
+        self,
+        workspace_id: str,
+        *,
+        source_store_id: str,
+        source_daraz_item_id: str,
+        destination_store_id: str,
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, workspace_id, source_store_id, source_daraz_item_id,
+                          destination_store_id, destination_item_id, attempt_id, state,
+                          verified_at, created_at, updated_at
+                   FROM product_copy_mappings
+                   WHERE workspace_id=%s AND source_store_id=%s
+                     AND source_daraz_item_id=%s AND destination_store_id=%s
+                     AND state='verified'""",
+                (
+                    workspace_id,
+                    source_store_id,
+                    source_daraz_item_id,
+                    destination_store_id,
+                ),
+            ).fetchone()
+        return self._product_copy_mapping_row(row) if row else None
+
+    def upsert_verified_product_copy_mapping(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """INSERT INTO product_copy_mappings
+                   (id, workspace_id, source_store_id, source_daraz_item_id,
+                    destination_store_id, destination_item_id, attempt_id, state, verified_at)
+                   VALUES (
+                     COALESCE(%s::uuid, gen_random_uuid()), %s, %s, %s,
+                     %s, %s, %s, 'verified', COALESCE(%s::timestamptz, NOW())
+                   )
+                   ON CONFLICT (workspace_id, source_store_id, source_daraz_item_id, destination_store_id)
+                   DO UPDATE SET
+                     destination_item_id = EXCLUDED.destination_item_id,
+                     attempt_id = COALESCE(EXCLUDED.attempt_id, product_copy_mappings.attempt_id),
+                     state = 'verified',
+                     verified_at = COALESCE(EXCLUDED.verified_at, product_copy_mappings.verified_at, NOW()),
+                     updated_at = NOW()
+                   RETURNING id, workspace_id, source_store_id, source_daraz_item_id,
+                             destination_store_id, destination_item_id, attempt_id, state,
+                             verified_at, created_at, updated_at""",
+                (
+                    payload.get("id"),
+                    payload["workspace_id"],
+                    payload["source_store_id"],
+                    payload["source_daraz_item_id"],
+                    payload["destination_store_id"],
+                    payload["destination_item_id"],
+                    payload.get("attempt_id"),
+                    payload.get("verified_at"),
+                ),
+            ).fetchone()
+            conn.commit()
+        return self._product_copy_mapping_row(row)
+
+    def find_product_attempts_for_source_dest(
+        self,
+        workspace_id: str,
+        *,
+        source_identities: list[str],
+        destination_store_id: str,
+        states: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        identities = [str(s) for s in source_identities if str(s).strip()]
+        if not identities:
+            return []
+        clauses = [
+            "workspace_id = %s",
+            "destination_store_id = %s",
+            "source_identity = ANY(%s)",
+        ]
+        params: list[Any] = [workspace_id, destination_store_id, identities]
+        if states is not None:
+            clauses.append("state = ANY(%s)")
+            params.append([str(s) for s in states])
+        where = " AND ".join(clauses)
+        with connect() as conn:
+            rows = conn.execute(
+                f"""SELECT id,workspace_id,source_type,source_identity,destination_store_id,
+                           request_fingerprint,state,generated_seller_skus,destination_item_id,
+                           verification_state,last_error,retry_count,created_at,updated_at,
+                           destination_sku_mapping,daraz_response
+                    FROM product_create_attempts
+                    WHERE {where}
+                    ORDER BY updated_at DESC""",
+                tuple(params),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            out.append(
+                {
+                    "id": str(row[0]),
+                    "workspace_id": str(row[1]),
+                    "source_type": row[2],
+                    "source_identity": row[3],
+                    "destination_store_id": str(row[4]),
+                    "request_fingerprint": row[5],
+                    "state": row[6],
+                    "generated_seller_skus": row[7],
+                    "destination_item_id": row[8],
+                    "verification_state": row[9],
+                    "last_error": row[10],
+                    "retry_count": row[11],
+                    "created_at": row[12].isoformat(),
+                    "updated_at": row[13].isoformat(),
+                    "destination_sku_mapping": row[14] or {},
+                    "daraz_response": row[15],
+                }
+            )
+        return out
 
     def create_product_attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         from src.db.connection import connect

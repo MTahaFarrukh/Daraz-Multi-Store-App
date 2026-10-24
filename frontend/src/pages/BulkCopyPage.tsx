@@ -34,12 +34,14 @@ type JobRow = {
   failed_count?: number;
   needs_attention_count?: number;
   needs_reconciliation_count?: number;
+  skipped_count?: number;
   catalog_incomplete?: boolean;
   catalog_warning?: string | null;
 };
 
 const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "muted"> = {
   verified: "ok",
+  skipped: "ok",
   failed: "danger",
   needs_attention: "warn",
   needs_reconciliation: "warn",
@@ -516,6 +518,10 @@ export function BulkCopyPage() {
             <div className="card stat-card">
               <p className="label">Verified</p>
               <p className="value">{job.verified_count ?? 0}</p>
+            </div>
+            <div className="card stat-card">
+              <p className="label">Already Copied</p>
+              <p className="value">{job.skipped_count ?? 0}</p>
             </div>
             <div className="card stat-card">
               <p className="label">Needs Attention</p>

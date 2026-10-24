@@ -517,3 +517,25 @@ CREATE INDEX IF NOT EXISTS idx_product_copy_job_items_job
 CREATE INDEX IF NOT EXISTS idx_product_copy_job_items_workspace
     ON product_copy_job_items (workspace_id, created_at DESC);
 
+-- Durable verified source→destination copy identity (independent of job fingerprint / Seller SKUs)
+CREATE TABLE IF NOT EXISTS product_copy_mappings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    source_daraz_item_id TEXT NOT NULL,
+    destination_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    destination_item_id TEXT NOT NULL,
+    attempt_id UUID,
+    state TEXT NOT NULL DEFAULT 'verified'
+        CHECK (state = 'verified'),
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, source_store_id, source_daraz_item_id, destination_store_id)
+);
+CREATE INDEX IF NOT EXISTS idx_product_copy_mappings_workspace_dest
+    ON product_copy_mappings (workspace_id, destination_store_id);
+CREATE INDEX IF NOT EXISTS idx_product_copy_mappings_attempt
+    ON product_copy_mappings (workspace_id, attempt_id)
+    WHERE attempt_id IS NOT NULL;
+

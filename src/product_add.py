@@ -792,6 +792,21 @@ def _prepare_destination(
     else:
         attempt = repo.find_product_attempt(workspace_id, fingerprint)
     if attempt and attempt.get("state") == "VERIFIED":
+        try:
+            from src.product_copy_mapping import try_record_verified_from_attempt
+
+            try_record_verified_from_attempt(
+                workspace_id,
+                attempt,
+                source_store_id=str(
+                    draft.get("source_store_uuid") or draft.get("source_store_id") or ""
+                )
+                or None,
+                source_daraz_item_id=str(draft.get("source_daraz_item_id") or "")
+                or None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {
             **result_base,
             "status": "ALREADY_EXISTS",
@@ -954,6 +969,27 @@ def _prepare_destination(
         destination_item_id=str(item_id) if item_id else None,
         destination_sku_mapping=mapping or None,
     )
+    if verified and item_id:
+        try:
+            from src.product_copy_mapping import try_record_verified_from_attempt
+
+            refreshed = repo.get_product_attempt(workspace_id, attempt["id"]) or {
+                **attempt,
+                "state": "VERIFIED",
+                "destination_item_id": str(item_id),
+            }
+            try_record_verified_from_attempt(
+                workspace_id,
+                refreshed,
+                source_store_id=str(
+                    draft.get("source_store_uuid") or draft.get("source_store_id") or ""
+                )
+                or None,
+                source_daraz_item_id=str(draft.get("source_daraz_item_id") or "")
+                or None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     catalog_upsert: dict[str, Any] = {"ok": False}
     if item_id:

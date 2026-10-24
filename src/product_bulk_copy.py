@@ -17,6 +17,12 @@ from typing import Any
 
 from src.db.repo import get_repo
 from src.product_add import add_product_from_connected, product_create_enabled
+from src.product_copy_mapping import (
+    find_uncertain_create_attempt,
+    get_verified_copy_mapping,
+    record_verified_copy_mapping,
+    try_record_verified_from_attempt,
+)
 from src.product_sync import sync_store_products
 
 logger = logging.getLogger(__name__)
@@ -279,7 +285,51 @@ def _process_one_item(
     repo = get_repo()
     item_id = str(item["id"])
     daraz_item = str(item.get("source_daraz_item_id") or "")
+    source_uuid = str(job.get("source_store_id") or "")
+    dest_uuid = str(job.get("destination_store_id") or "")
     try:
+        # 1) Durable verified mapping — skip before any CreateProduct path.
+        mapping = get_verified_copy_mapping(
+            workspace_id,
+            source_store_id=source_uuid,
+            source_daraz_item_id=daraz_item,
+            destination_store_id=dest_uuid,
+        )
+        if mapping:
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": "skipped",
+                    "attempt_id": mapping.get("attempt_id"),
+                    "destination_item_id": mapping.get("destination_item_id"),
+                    "reason": "already_copied_to_destination",
+                    "updated_at": _now(),
+                },
+            )
+            return
+
+        # 2) Uncertain prior attempt for same source→dest — reconcile, do not recreate.
+        uncertain = find_uncertain_create_attempt(
+            workspace_id,
+            source_store_id=source_uuid,
+            source_daraz_item_id=daraz_item,
+            destination_store_id=dest_uuid,
+        )
+        if uncertain:
+            repo.update_product_copy_job_item(
+                workspace_id,
+                item_id,
+                {
+                    "status": "needs_reconciliation",
+                    "attempt_id": uncertain.get("id"),
+                    "destination_item_id": uncertain.get("destination_item_id"),
+                    "reason": "product_create_attempt_requires_reconciliation",
+                    "updated_at": _now(),
+                },
+            )
+            return
+
         source_slug = str(job.get("source_store_slug") or "")
         result = add_product_from_connected(
             workspace_id,
@@ -296,6 +346,30 @@ def _process_one_item(
         if not product_create_enabled() and status != "verified":
             status = "needs_attention"
             reason = reason or "ALLOW_PRODUCT_CREATE is not enabled"
+
+        # Title-only local-catalog ALREADY_EXISTS is not durable source→dest identity.
+        reason_text = str(dest0.get("reason") or "")
+        if (
+            status == "verified"
+            and str(dest0.get("status") or "").upper() == "ALREADY_EXISTS"
+            and reason_text != "product_create_attempt_already_verified"
+        ):
+            status = "needs_attention"
+            reason = reason or "possible_destination_match_not_source_identity"
+
+        if status == "verified" and dest_item:
+            try:
+                record_verified_copy_mapping(
+                    workspace_id,
+                    source_store_id=source_uuid,
+                    source_daraz_item_id=daraz_item,
+                    destination_store_id=dest_uuid,
+                    destination_item_id=str(dest_item),
+                    attempt_id=attempt_id,
+                )
+            except ValueError:
+                pass
+
         repo.update_product_copy_job_item(
             workspace_id,
             item_id,
@@ -409,10 +483,11 @@ def _run_job_worker(workspace_id: str, job_id: str) -> None:
         attn = int(job.get("needs_attention_count") or 0)
         recon = int(job.get("needs_reconciliation_count") or 0)
         verified = int(job.get("verified_count") or 0)
+        skipped = int(job.get("skipped_count") or 0)
         total = int(job.get("total_items") or 0)
-        if failed + attn + recon == 0 and verified >= total:
+        if failed + attn + recon == 0 and verified + skipped >= total:
             status = "completed"
-        elif verified == 0 and failed + attn + recon > 0:
+        elif verified == 0 and skipped == 0 and failed + attn + recon > 0:
             status = "failed"
         else:
             status = "partial"
@@ -488,6 +563,13 @@ def start_bulk_copy_job(
     if existing and existing.get("status") in {"completed", "partial"}:
         # Same exact selection already finished — return it (no blind recreate).
         return {"job": existing, "resumed": False, "duplicate_prevented": True}
+    if existing and existing.get("status") == "failed":
+        # Retire fingerprint so a new identical selection can start without UNIQUE clash.
+        repo.update_product_copy_job(
+            workspace_id,
+            str(existing["id"]),
+            {"request_fingerprint": f"{fp}:retired:{existing['id']}", "updated_at": _now()},
+        )
 
     # Build title lookup from catalog walk
     title_by_item: dict[str, str] = {}
@@ -791,10 +873,11 @@ def reconcile_bulk_copy_items(
     attn = int(job.get("needs_attention_count") or 0)
     recon = int(job.get("needs_reconciliation_count") or 0)
     verified = int(job.get("verified_count") or 0)
+    skipped = int(job.get("skipped_count") or 0)
     total = int(job.get("total_items") or 0)
-    if failed + attn + recon == 0 and verified >= total:
+    if failed + attn + recon == 0 and verified + skipped >= total:
         status = "completed"
-    elif verified == 0 and failed + attn + recon > 0:
+    elif verified == 0 and skipped == 0 and failed + attn + recon > 0:
         status = "failed"
     else:
         status = "partial"
