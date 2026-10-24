@@ -462,3 +462,58 @@ CREATE INDEX IF NOT EXISTS idx_workspace_audit_events_action
 CREATE INDEX IF NOT EXISTS idx_trusted_ws_source_status
     ON trusted_workspace_connections (source_workspace_id, status);
 
+-- Bulk store-to-store product copy jobs (parent + per-item progress)
+CREATE TABLE IF NOT EXISTS product_copy_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    actor_user_id UUID,
+    source_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    destination_store_id UUID NOT NULL REFERENCES daraz_stores(id) ON DELETE CASCADE,
+    source_store_slug TEXT,
+    destination_store_slug TEXT,
+    request_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    total_items INT NOT NULL DEFAULT 0,
+    completed_items INT NOT NULL DEFAULT 0,
+    verified_count INT NOT NULL DEFAULT 0,
+    failed_count INT NOT NULL DEFAULT 0,
+    needs_attention_count INT NOT NULL DEFAULT 0,
+    needs_reconciliation_count INT NOT NULL DEFAULT 0,
+    skipped_count INT NOT NULL DEFAULT 0,
+    excluded_item_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    catalog_incomplete BOOLEAN NOT NULL DEFAULT FALSE,
+    catalog_warning TEXT,
+    error TEXT,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, request_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_product_copy_jobs_workspace_time
+    ON product_copy_jobs (workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_copy_jobs_workspace_status
+    ON product_copy_jobs (workspace_id, status);
+
+CREATE TABLE IF NOT EXISTS product_copy_job_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id UUID NOT NULL REFERENCES product_copy_jobs(id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_product_id UUID,
+    source_daraz_item_id TEXT NOT NULL,
+    source_title TEXT,
+    thumbnail_url TEXT,
+    variants_count INT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempt_id UUID,
+    destination_item_id TEXT,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (job_id, source_daraz_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_product_copy_job_items_job
+    ON product_copy_job_items (job_id, status);
+CREATE INDEX IF NOT EXISTS idx_product_copy_job_items_workspace
+    ON product_copy_job_items (workspace_id, created_at DESC);
+

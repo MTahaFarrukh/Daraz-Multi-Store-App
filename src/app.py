@@ -2083,6 +2083,156 @@ def api_add_product_from_connected(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class BulkCopyCatalogBody(BaseModel):
+    source_store_id: str = Field(..., min_length=1)
+    refresh: bool = True
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+
+
+class BulkCopyStartBody(BaseModel):
+    source_store_id: str = Field(..., min_length=1)
+    destination_store_id: str = Field(..., min_length=1)
+    product_item_ids: list[str] = Field(default_factory=list)
+    select_all: bool = False
+    exclude_item_ids: list[str] = Field(default_factory=list)
+    refresh_catalog: bool = True
+
+
+@app.post("/api/products/bulk-copy/catalog")
+def api_bulk_copy_catalog(
+    body: BulkCopyCatalogBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Discover source-store catalog for bulk copy preview (paginated)."""
+    enforce_capability(ctx.role, "product.create")
+    from src.product_bulk_copy import discover_source_catalog
+
+    try:
+        return discover_source_catalog(
+            ctx.workspace_id,
+            body.source_store_id,
+            refresh=body.refresh,
+            page=body.page,
+            page_size=body.page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/bulk-copy/jobs")
+def api_bulk_copy_start(
+    body: BulkCopyStartBody,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Start a durable one-click bulk copy job (source → destination)."""
+    enforce_capability(ctx.role, "product.create")
+    from src.product_bulk_copy import start_bulk_copy_job
+
+    try:
+        result = start_bulk_copy_job(
+            ctx.workspace_id,
+            source_store_id=body.source_store_id,
+            destination_store_id=body.destination_store_id,
+            product_item_ids=body.product_item_ids,
+            select_all=body.select_all,
+            exclude_item_ids=body.exclude_item_ids,
+            actor_user_id=ctx.user.id,
+            refresh_catalog=body.refresh_catalog,
+        )
+        audit_mutation(
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            action="product.bulk_copy.started",
+            entity_type="product_copy_job",
+            entity_id=str((result.get("job") or {}).get("id") or ""),
+            metadata={
+                "source_store_id": body.source_store_id,
+                "destination_store_id": body.destination_store_id,
+                "select_all": body.select_all,
+                "total_items": (result.get("job") or {}).get("total_items"),
+                "duplicate_prevented": result.get("duplicate_prevented"),
+            },
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/products/bulk-copy/jobs/{job_id}")
+def api_bulk_copy_job(
+    job_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "product.create")
+    from src.product_bulk_copy import get_bulk_copy_job
+
+    job = get_bulk_copy_job(ctx.workspace_id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Bulk copy job not found")
+    return {"job": job}
+
+
+@app.get("/api/products/bulk-copy/jobs/{job_id}/items")
+def api_bulk_copy_job_items(
+    job_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    status: str | None = None,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "product.create")
+    from src.product_bulk_copy import list_bulk_copy_job_items
+
+    try:
+        return list_bulk_copy_job_items(
+            ctx.workspace_id,
+            job_id,
+            page=page,
+            page_size=page_size,
+            status=status,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/products/bulk-copy/jobs/{job_id}/retry-failed")
+def api_bulk_copy_retry_failed(
+    job_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    enforce_capability(ctx.role, "product.retry")
+    from src.product_bulk_copy import retry_failed_bulk_copy_items
+
+    try:
+        return retry_failed_bulk_copy_items(
+            ctx.workspace_id, job_id, actor_user_id=ctx.user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/products/bulk-copy/jobs/{job_id}/reconcile")
+def api_bulk_copy_reconcile(
+    job_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Reconcile uncertain create outcomes for a bulk-copy job (no new creates)."""
+    enforce_capability(ctx.role, "product.retry")
+    from src.product_bulk_copy import reconcile_bulk_copy_items
+
+    try:
+        return reconcile_bulk_copy_items(
+            ctx.workspace_id, job_id, actor_user_id=ctx.user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/products/{product_id}/create-payload-preview")
 def api_product_create_payload_preview(
     product_id: str,

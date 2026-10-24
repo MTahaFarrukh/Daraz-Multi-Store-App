@@ -169,7 +169,7 @@ def test_clone_draft_from_connected_generates_mtf(tenancy_env, monkeypatch):
     assert v0["seller_sku"].startswith("MTF-")
     assert v0["seller_sku"] != "SOURCE-SKU-1"
     assert v0["source_seller_sku"] == "SOURCE-SKU-1"
-    assert v0["quantity"] == 1
+    assert v0["quantity"] == 20  # known source qty preserved
     assert v0["package_weight"] == 0.25
     assert v0["package_length"] == 12
     assert result["api_calls"]["products_get"] == 0

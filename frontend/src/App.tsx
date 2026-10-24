@@ -28,6 +28,9 @@ const OrdersPage = lazy(() =>
 const ProductsPage = lazy(() =>
   import("@/pages/ProductsPage").then((m) => ({ default: m.ProductsPage }))
 );
+const BulkCopyPage = lazy(() =>
+  import("@/pages/BulkCopyPage").then((m) => ({ default: m.BulkCopyPage }))
+);
 const ConnectionsPage = lazy(() =>
   import("@/pages/ConnectionsPage").then((m) => ({ default: m.ConnectionsPage }))
 );
@@ -84,6 +87,14 @@ export default function App() {
                 element={
                   <LazyPage>
                     <ProductsPage />
+                  </LazyPage>
+                }
+              />
+              <Route
+                path="products/bulk-copy"
+                element={
+                  <LazyPage>
+                    <BulkCopyPage />
                   </LazyPage>
                 }
               />

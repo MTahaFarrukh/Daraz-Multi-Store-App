@@ -7,6 +7,10 @@ const titles: Record<string, { title: string; subtitle?: string }> = {
   "/app": { title: "Overview", subtitle: "Action-first workspace summary" },
   "/app/orders": { title: "Orders" },
   "/app/products": { title: "Products" },
+  "/app/products/bulk-copy": {
+    title: "Copy Products",
+    subtitle: "Store-to-store bulk catalog copy",
+  },
   "/app/inventory": { title: "Inventory" },
   "/app/shipping": { title: "Shipping", subtitle: "Load RTS and print labels" },
   "/app/finance": { title: "Finance" },

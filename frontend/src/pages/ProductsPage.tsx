@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { useStores } from "@/hooks/queries/useStores";
 import {
@@ -166,6 +167,9 @@ export function ProductsPage() {
             >
               + Add Daraz Product
             </button>
+            <Link to="/app/products/bulk-copy" className="btn btn-primary">
+              Copy Products Between Stores
+            </Link>
             <button
               type="button"
               className="btn btn-ghost"

@@ -457,4 +457,92 @@ export const Api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  bulkCopyCatalog: (body: {
+    source_store_id: string;
+    refresh?: boolean;
+    page?: number;
+    page_size?: number;
+  }) =>
+    api<{
+      source_store: { id?: string; store_id?: string; display_name?: string };
+      total: number;
+      eligible_count: number;
+      ineligible_count: number;
+      eligible_item_ids: string[];
+      catalog_incomplete: boolean;
+      catalog_warning?: string | null;
+      page: number;
+      page_size: number;
+      items: Array<{
+        product_id?: string;
+        daraz_item_id?: string;
+        title?: string;
+        thumbnail_url?: string | null;
+        variants_count?: number;
+        detail_complete?: boolean;
+        eligible?: boolean;
+      }>;
+    }>("/api/products/bulk-copy/catalog", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  startBulkCopyJob: (body: {
+    source_store_id: string;
+    destination_store_id: string;
+    product_item_ids?: string[];
+    select_all?: boolean;
+    exclude_item_ids?: string[];
+    refresh_catalog?: boolean;
+  }) =>
+    api<{
+      job: Record<string, unknown>;
+      resumed?: boolean;
+      duplicate_prevented?: boolean;
+      catalog_incomplete?: boolean;
+      catalog_warning?: string | null;
+      product_create_enabled?: boolean;
+    }>("/api/products/bulk-copy/jobs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getBulkCopyJob: (jobId: string) =>
+    api<{ job: Record<string, unknown> }>(
+      `/api/products/bulk-copy/jobs/${encodeURIComponent(jobId)}`
+    ),
+
+  listBulkCopyJobItems: (
+    jobId: string,
+    params: { page?: number; page_size?: number; status?: string } = {}
+  ) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null || v === "") continue;
+      qs.set(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return api<{
+      items: Array<Record<string, unknown>>;
+      total: number;
+      page: number;
+      page_size: number;
+    }>(`/api/products/bulk-copy/jobs/${encodeURIComponent(jobId)}/items${suffix}`);
+  },
+
+  retryBulkCopyFailed: (jobId: string) =>
+    api<{ job: Record<string, unknown>; requeued: number }>(
+      `/api/products/bulk-copy/jobs/${encodeURIComponent(jobId)}/retry-failed`,
+      { method: "POST" }
+    ),
+
+  reconcileBulkCopyJob: (jobId: string) =>
+    api<{
+      job: Record<string, unknown>;
+      reconciled: number;
+      unresolved: number;
+    }>(`/api/products/bulk-copy/jobs/${encodeURIComponent(jobId)}/reconcile`, {
+      method: "POST",
+    }),
 };

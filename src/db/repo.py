@@ -445,6 +445,8 @@ class MemoryTenancyRepo:
         self.connections: dict[str, dict[str, Any]] = {}
         self.finance_transactions: dict[str, dict[str, Any]] = {}
         self.finance_payouts: dict[str, dict[str, Any]] = {}
+        self.product_copy_jobs: dict[str, dict[str, Any]] = {}
+        self.product_copy_job_items: dict[str, dict[str, Any]] = {}
 
     def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -721,6 +723,98 @@ class MemoryTenancyRepo:
         rows.sort(key=lambda r: str(r.get("created_at_source") or r.get("synced_at") or ""), reverse=True)
         page = max(1, int(page or 1))
         page_size = max(1, min(int(page_size or 50), 200))
+        total = len(rows)
+        start = (page - 1) * page_size
+        return {
+            "items": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def create_product_copy_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            row = deepcopy(payload)
+            row.setdefault("id", _uuid())
+            row.setdefault("created_at", _now().isoformat())
+            row.setdefault("updated_at", _now().isoformat())
+            self.product_copy_jobs[str(row["id"])] = row
+            return deepcopy(row)
+
+    def get_product_copy_job(self, workspace_id: str, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.product_copy_jobs.get(str(job_id))
+            if not row or str(row.get("workspace_id")) != str(workspace_id):
+                return None
+            return deepcopy(row)
+
+    def get_product_copy_job_by_fingerprint(
+        self, workspace_id: str, fingerprint: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            for row in self.product_copy_jobs.values():
+                if (
+                    str(row.get("workspace_id")) == str(workspace_id)
+                    and str(row.get("request_fingerprint")) == str(fingerprint)
+                ):
+                    return deepcopy(row)
+            return None
+
+    def update_product_copy_job(
+        self, workspace_id: str, job_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.product_copy_jobs.get(str(job_id))
+            if not row or str(row.get("workspace_id")) != str(workspace_id):
+                return None
+            row.update(deepcopy(fields))
+            row["updated_at"] = _now().isoformat()
+            return deepcopy(row)
+
+    def create_product_copy_job_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            for payload in items:
+                row = deepcopy(payload)
+                row.setdefault("id", _uuid())
+                row.setdefault("created_at", _now().isoformat())
+                row.setdefault("updated_at", _now().isoformat())
+                self.product_copy_job_items[str(row["id"])] = row
+                out.append(deepcopy(row))
+        return out
+
+    def update_product_copy_job_item(
+        self, workspace_id: str, item_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.product_copy_job_items.get(str(item_id))
+            if not row or str(row.get("workspace_id")) != str(workspace_id):
+                return None
+            row.update(deepcopy(fields))
+            row["updated_at"] = _now().isoformat()
+            return deepcopy(row)
+
+    def list_product_copy_job_items(
+        self,
+        workspace_id: str,
+        job_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            rows = [
+                deepcopy(r)
+                for r in self.product_copy_job_items.values()
+                if str(r.get("workspace_id")) == str(workspace_id)
+                and str(r.get("job_id")) == str(job_id)
+                and (not status or str(r.get("status")) == str(status))
+            ]
+        rows.sort(key=lambda r: str(r.get("source_title") or r.get("source_daraz_item_id") or ""))
+        page = max(1, int(page or 1))
+        raw_size = int(page_size or 50)
+        page_size = max(1, min(raw_size, 10_000))
         total = len(rows)
         start = (page - 1) * page_size
         return {
@@ -2247,6 +2341,306 @@ class PostgresTenancyRepo:
                 "created_at_source": r[11],
                 "updated_at_source": r[12],
                 "synced_at": r[13].isoformat() if hasattr(r[13], "isoformat") else r[13],
+            }
+            for r in rows
+        ]
+        return {"items": items, "total": int(total), "page": page, "page_size": page_size}
+
+    def create_product_copy_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """INSERT INTO product_copy_jobs
+                   (id, workspace_id, actor_user_id, source_store_id, destination_store_id,
+                    source_store_slug, destination_store_slug, request_fingerprint, status,
+                    total_items, completed_items, verified_count, failed_count,
+                    needs_attention_count, needs_reconciliation_count, skipped_count,
+                    excluded_item_ids, catalog_incomplete, catalog_warning)
+                   VALUES (
+                     COALESCE(%s::uuid, gen_random_uuid()), %s, %s, %s, %s,
+                     %s, %s, %s, %s,
+                     %s, %s, %s, %s, %s, %s, %s,
+                     %s::jsonb, %s, %s
+                   )
+                   RETURNING id, created_at, updated_at""",
+                (
+                    payload.get("id"),
+                    payload["workspace_id"],
+                    payload.get("actor_user_id"),
+                    payload["source_store_id"],
+                    payload["destination_store_id"],
+                    payload.get("source_store_slug"),
+                    payload.get("destination_store_slug"),
+                    payload["request_fingerprint"],
+                    payload.get("status") or "queued",
+                    int(payload.get("total_items") or 0),
+                    int(payload.get("completed_items") or 0),
+                    int(payload.get("verified_count") or 0),
+                    int(payload.get("failed_count") or 0),
+                    int(payload.get("needs_attention_count") or 0),
+                    int(payload.get("needs_reconciliation_count") or 0),
+                    int(payload.get("skipped_count") or 0),
+                    json.dumps(payload.get("excluded_item_ids") or []),
+                    bool(payload.get("catalog_incomplete")),
+                    payload.get("catalog_warning"),
+                ),
+            ).fetchone()
+            conn.commit()
+        return {
+            **payload,
+            "id": str(row[0]),
+            "created_at": row[1].isoformat(),
+            "updated_at": row[2].isoformat(),
+        }
+
+    def _product_copy_job_row(self, row) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "workspace_id": str(row[1]),
+            "actor_user_id": str(row[2]) if row[2] else None,
+            "source_store_id": str(row[3]),
+            "destination_store_id": str(row[4]),
+            "source_store_slug": row[5],
+            "destination_store_slug": row[6],
+            "request_fingerprint": row[7],
+            "status": row[8],
+            "total_items": int(row[9] or 0),
+            "completed_items": int(row[10] or 0),
+            "verified_count": int(row[11] or 0),
+            "failed_count": int(row[12] or 0),
+            "needs_attention_count": int(row[13] or 0),
+            "needs_reconciliation_count": int(row[14] or 0),
+            "skipped_count": int(row[15] or 0),
+            "excluded_item_ids": self._json_maybe(row[16]) or [],
+            "catalog_incomplete": bool(row[17]),
+            "catalog_warning": row[18],
+            "error": row[19],
+            "started_at": row[20].isoformat() if row[20] else None,
+            "finished_at": row[21].isoformat() if row[21] else None,
+            "created_at": row[22].isoformat() if row[22] else None,
+            "updated_at": row[23].isoformat() if row[23] else None,
+        }
+
+    def get_product_copy_job(self, workspace_id: str, job_id: str) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, workspace_id, actor_user_id, source_store_id, destination_store_id,
+                          source_store_slug, destination_store_slug, request_fingerprint, status,
+                          total_items, completed_items, verified_count, failed_count,
+                          needs_attention_count, needs_reconciliation_count, skipped_count,
+                          excluded_item_ids, catalog_incomplete, catalog_warning, error,
+                          started_at, finished_at, created_at, updated_at
+                   FROM product_copy_jobs WHERE workspace_id=%s AND id=%s""",
+                (workspace_id, job_id),
+            ).fetchone()
+        return self._product_copy_job_row(row) if row else None
+
+    def get_product_copy_job_by_fingerprint(
+        self, workspace_id: str, fingerprint: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """SELECT id, workspace_id, actor_user_id, source_store_id, destination_store_id,
+                          source_store_slug, destination_store_slug, request_fingerprint, status,
+                          total_items, completed_items, verified_count, failed_count,
+                          needs_attention_count, needs_reconciliation_count, skipped_count,
+                          excluded_item_ids, catalog_incomplete, catalog_warning, error,
+                          started_at, finished_at, created_at, updated_at
+                   FROM product_copy_jobs
+                   WHERE workspace_id=%s AND request_fingerprint=%s
+                   ORDER BY created_at DESC LIMIT 1""",
+                (workspace_id, fingerprint),
+            ).fetchone()
+        return self._product_copy_job_row(row) if row else None
+
+    def update_product_copy_job(
+        self, workspace_id: str, job_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        allowed = {
+            "status",
+            "total_items",
+            "completed_items",
+            "verified_count",
+            "failed_count",
+            "needs_attention_count",
+            "needs_reconciliation_count",
+            "skipped_count",
+            "catalog_incomplete",
+            "catalog_warning",
+            "error",
+            "started_at",
+            "finished_at",
+        }
+        sets: list[str] = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            sets.append(f"{k} = %s")
+            params.append(v)
+        if not sets:
+            return self.get_product_copy_job(workspace_id, job_id)
+        sets.append("updated_at = NOW()")
+        params.extend([workspace_id, job_id])
+        with connect() as conn:
+            conn.execute(
+                f"UPDATE product_copy_jobs SET {', '.join(sets)} WHERE workspace_id=%s AND id=%s",
+                tuple(params),
+            )
+            conn.commit()
+        return self.get_product_copy_job(workspace_id, job_id)
+
+    def create_product_copy_job_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from src.db.connection import connect
+
+        out: list[dict[str, Any]] = []
+        with connect() as conn:
+            for payload in items:
+                row = conn.execute(
+                    """INSERT INTO product_copy_job_items
+                       (id, job_id, workspace_id, source_product_id, source_daraz_item_id,
+                        source_title, thumbnail_url, variants_count, status, attempt_id,
+                        destination_item_id, reason)
+                       VALUES (
+                         COALESCE(%s::uuid, gen_random_uuid()), %s, %s, %s, %s,
+                         %s, %s, %s, %s, %s, %s, %s
+                       )
+                       ON CONFLICT (job_id, source_daraz_item_id) DO UPDATE SET
+                         source_title = EXCLUDED.source_title,
+                         updated_at = NOW()
+                       RETURNING id""",
+                    (
+                        payload.get("id"),
+                        payload["job_id"],
+                        payload["workspace_id"],
+                        payload.get("source_product_id"),
+                        payload["source_daraz_item_id"],
+                        payload.get("source_title"),
+                        payload.get("thumbnail_url"),
+                        payload.get("variants_count"),
+                        payload.get("status") or "queued",
+                        payload.get("attempt_id"),
+                        payload.get("destination_item_id"),
+                        payload.get("reason"),
+                    ),
+                ).fetchone()
+                out.append({**payload, "id": str(row[0])})
+            conn.commit()
+        return out
+
+    def update_product_copy_job_item(
+        self, workspace_id: str, item_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        allowed = {
+            "status",
+            "attempt_id",
+            "destination_item_id",
+            "reason",
+            "source_title",
+            "variants_count",
+            "thumbnail_url",
+        }
+        sets: list[str] = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            sets.append(f"{k} = %s")
+            params.append(v)
+        if not sets:
+            return None
+        sets.append("updated_at = NOW()")
+        params.extend([workspace_id, item_id])
+        with connect() as conn:
+            conn.execute(
+                f"UPDATE product_copy_job_items SET {', '.join(sets)} WHERE workspace_id=%s AND id=%s",
+                tuple(params),
+            )
+            conn.commit()
+            row = conn.execute(
+                """SELECT id, job_id, workspace_id, source_product_id, source_daraz_item_id,
+                          source_title, thumbnail_url, variants_count, status, attempt_id,
+                          destination_item_id, reason, created_at, updated_at
+                   FROM product_copy_job_items WHERE workspace_id=%s AND id=%s""",
+                (workspace_id, item_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row[0]),
+            "job_id": str(row[1]),
+            "workspace_id": str(row[2]),
+            "source_product_id": str(row[3]) if row[3] else None,
+            "source_daraz_item_id": row[4],
+            "source_title": row[5],
+            "thumbnail_url": row[6],
+            "variants_count": row[7],
+            "status": row[8],
+            "attempt_id": str(row[9]) if row[9] else None,
+            "destination_item_id": row[10],
+            "reason": row[11],
+            "created_at": row[12].isoformat() if row[12] else None,
+            "updated_at": row[13].isoformat() if row[13] else None,
+        }
+
+    def list_product_copy_job_items(
+        self,
+        workspace_id: str,
+        job_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 50), 10_000))
+        clauses = ["workspace_id = %s", "job_id = %s"]
+        params: list[Any] = [workspace_id, job_id]
+        if status:
+            clauses.append("status = %s")
+            params.append(status)
+        where = " AND ".join(clauses)
+        with connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM product_copy_job_items WHERE {where}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT id, job_id, workspace_id, source_product_id, source_daraz_item_id,
+                           source_title, thumbnail_url, variants_count, status, attempt_id,
+                           destination_item_id, reason, created_at, updated_at
+                    FROM product_copy_job_items WHERE {where}
+                    ORDER BY COALESCE(source_title, source_daraz_item_id) ASC
+                    LIMIT %s OFFSET %s""",
+                tuple(params + [page_size, (page - 1) * page_size]),
+            ).fetchall()
+        items = [
+            {
+                "id": str(r[0]),
+                "job_id": str(r[1]),
+                "workspace_id": str(r[2]),
+                "source_product_id": str(r[3]) if r[3] else None,
+                "source_daraz_item_id": r[4],
+                "source_title": r[5],
+                "thumbnail_url": r[6],
+                "variants_count": r[7],
+                "status": r[8],
+                "attempt_id": str(r[9]) if r[9] else None,
+                "destination_item_id": r[10],
+                "reason": r[11],
+                "created_at": r[12].isoformat() if r[12] else None,
+                "updated_at": r[13].isoformat() if r[13] else None,
             }
             for r in rows
         ]

@@ -61,7 +61,8 @@ def build_connected_clone_draft(
 ) -> dict[str, Any]:
     """Create a ProductCloneDraft for connected_store → connected_store.
 
-    Quantity strategy: workspace ``default_initial_quantity`` (default 1),
+    Quantity strategy: preserve known source quantity; unknown uses workspace
+    ``default_initial_quantity`` (default 1). Never invent 0 for unknown.
     NOT live source stock.
     """
     repo = get_repo()
@@ -131,11 +132,18 @@ def build_connected_clone_draft(
         errors.extend(pkg["errors"])
 
         src_qty = v.get("quantity")
+        # Preserve explicitly known source quantity; never invent 0 for unknown.
         if src_qty is not None:
-            warnings.append(
-                f"Source stock {src_qty} not copied for SKU {v.get('seller_sku')}; "
-                f"using initial quantity {initial_qty}"
-            )
+            try:
+                qty_out = int(src_qty)
+            except (TypeError, ValueError):
+                qty_out = initial_qty
+                warnings.append(
+                    f"Source stock unreadable for SKU {v.get('seller_sku')}; "
+                    f"using initial quantity {initial_qty}"
+                )
+        else:
+            qty_out = initial_qty
 
         draft_variants.append(
             {
@@ -146,7 +154,7 @@ def build_connected_clone_draft(
                 "price": v.get("price"),
                 "special_price": v.get("special_price"),
                 "source_quantity": src_qty,
-                "quantity": initial_qty,
+                "quantity": qty_out,
                 "seller_sku": sku,
                 "package_weight": pkg["values"].get("package_weight"),
                 "package_length": pkg["values"].get("package_length"),
@@ -199,7 +207,7 @@ def build_connected_clone_draft(
     will_change = [
         "SellerSku → generated MTF-…",
         "Destination-specific item/SKU IDs (after create)",
-        f"Quantity → workspace initial ({initial_qty})",
+        f"Quantity → known source qty preserved; unknown uses workspace initial ({initial_qty})",
     ]
     not_copied = ["Video"]
     if product.get("video_ref"):

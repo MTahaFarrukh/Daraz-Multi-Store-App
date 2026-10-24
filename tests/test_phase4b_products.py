@@ -238,7 +238,7 @@ def test_clone_draft_generates_mtf_and_preserves_dims(tenancy_env):
     assert draft["variants"][0]["seller_sku"].startswith("MTF-")
     assert draft["variants"][0]["seller_sku"] != "SOURCE-SKU"
     assert draft["variants"][0]["package_weight"] == 0.2
-    assert draft["variants"][0]["quantity"] == 1  # default initial qty
+    assert draft["variants"][0]["quantity"] == 42  # known source qty preserved
     assert "Video" in draft["validation"]["fidelity"]["not_available"]
     assert result["warnings"]
 
