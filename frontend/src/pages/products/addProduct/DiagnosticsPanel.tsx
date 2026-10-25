@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { NoBrandCheckResult } from "@/lib/noBrandCheck";
 import {
   formatDiagnosticsCopy,
   type DestinationAttemptLike,
@@ -13,6 +14,8 @@ export function DiagnosticsPanel({
   stageHistory,
   elapsedMs,
   requestRunning,
+  noBrandByStore,
+  primaryCategoryId,
 }: {
   correlationId?: string | null;
   phase: string;
@@ -21,6 +24,8 @@ export function DiagnosticsPanel({
   stageHistory?: StageHistoryEntry[];
   elapsedMs?: number | null;
   requestRunning?: boolean;
+  noBrandByStore?: Record<string, NoBrandCheckResult | undefined>;
+  primaryCategoryId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -33,6 +38,8 @@ export function DiagnosticsPanel({
       destinations,
       stageHistory,
       elapsedMs,
+      noBrandByStore,
+      primaryCategoryId,
     });
     try {
       await navigator.clipboard.writeText(text);

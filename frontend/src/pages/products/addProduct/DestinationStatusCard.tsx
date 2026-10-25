@@ -1,5 +1,10 @@
 import { StatusBadge } from "@/components/ui/Primitives";
 import {
+  formatNoBrandCheckLine,
+  noBrandCheckTone,
+  type NoBrandCheckResult,
+} from "@/lib/noBrandCheck";
+import {
   destinationActionKind,
   destinationProgressLabel,
   destinationReasonLabel,
@@ -17,6 +22,11 @@ export function DestinationStatusCard({
   onReconcile,
   actionsDisabled,
   retryDisabled,
+  noBrand,
+  noBrandChecking,
+  noBrandDisabled,
+  noBrandDisabledReason,
+  onCheckNoBrand,
 }: {
   dest: DestinationAttemptLike;
   processing?: boolean;
@@ -26,6 +36,11 @@ export function DestinationStatusCard({
   actionsDisabled?: boolean;
   /** When create gate is off, hide live Retry (Reconcile remains allowed). */
   retryDisabled?: boolean;
+  noBrand?: NoBrandCheckResult | null;
+  noBrandChecking?: boolean;
+  noBrandDisabled?: boolean;
+  noBrandDisabledReason?: string;
+  onCheckNoBrand?: () => void;
 }) {
   const ui = destinationUiStatus(dest, { processing, checking });
   const tone = destinationStatusTone(ui);
@@ -38,6 +53,7 @@ export function DestinationStatusCard({
   const recovery = reasonText ? destinationRecoveryHint(dest) : "";
   const action = destinationActionKind(dest);
   const name = dest.store?.display_name || dest.store?.store_id || "Destination store";
+  const brandTone = noBrand ? noBrandCheckTone(noBrand.status) : "muted";
 
   return (
     <article className={`add-dest-card add-dest-card--${ui}`}>
@@ -70,6 +86,43 @@ export function DestinationStatusCard({
           {dest.attempt_id && dest.item_id ? " · " : ""}
           {dest.item_id ? `Item ${dest.item_id}` : ""}
         </p>
+      ) : null}
+
+      {onCheckNoBrand ? (
+        <div className="stack" style={{ gap: "0.35rem", marginTop: "0.65rem" }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={Boolean(noBrandDisabled) || Boolean(noBrandChecking) || actionsDisabled}
+            title={
+              noBrandDisabled
+                ? noBrandDisabledReason || "primary_category_id required from preview"
+                : "Read-only GET — does not create or migrate"
+            }
+            onClick={onCheckNoBrand}
+          >
+            {noBrandChecking ? "Checking No Brand…" : "Check No Brand (read-only)"}
+          </button>
+          {noBrandDisabled && noBrandDisabledReason ? (
+            <p className="muted-line" style={{ margin: 0 }}>
+              {noBrandDisabledReason}
+            </p>
+          ) : null}
+          {noBrand ? (
+            <div className="add-dest-card__reason">
+              <p className="add-dest-card__reason-label">No Brand check</p>
+              <p className="add-dest-card__reason-text">
+                <StatusBadge tone={brandTone}>{noBrand.status}</StatusBadge>
+                {noBrand.status !== "NO_BRAND" ? (
+                  <span className="muted-line"> · Create blocked until No Brand is confirmed</span>
+                ) : null}
+              </p>
+              <p className="muted-line" style={{ margin: "0.25rem 0 0" }}>
+                {formatNoBrandCheckLine(noBrand)}
+              </p>
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {action !== "none" ? (

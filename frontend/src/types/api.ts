@@ -115,6 +115,21 @@ export type StoreHealthCheckResult = {
   seller?: { name?: string | null; seller_id?: string | null };
 };
 
+/** GET /api/stores/{id}/category-brands/no-brand — read-only; never invents brand IDs. */
+export type CategoryNoBrandDiagnostic = {
+  status: "NO_BRAND" | "UNRESOLVED" | "UNVERIFIED" | string;
+  reason?: string | null;
+  no_brand_found?: boolean;
+  brand?: string | null;
+  brand_id?: number | string | null;
+  primary_category_id?: string | null;
+  store_id?: string | null;
+  lookup_calls?: number | null;
+  used_no_brand?: boolean;
+  lookup?: Record<string, unknown> | null;
+  timings_ms?: Record<string, unknown> | null;
+};
+
 export type StoreGroup = {
   id: string;
   name: string;

@@ -8,6 +8,13 @@ import { useProductCreateEnabled } from "@/hooks/useProductCreateEnabled";
 import { Api } from "@/lib/api";
 import { ApiError } from "@/lib/api/client";
 import {
+  brandCheckBlocksCreate,
+  canCheckNoBrand,
+  extractPreviewPrimaryCategoryId,
+  noBrandCheckFromHttpError,
+  type NoBrandCheckResult,
+} from "@/lib/noBrandCheck";
+import {
   buildAttentionSummary,
   extractDiagnosticId,
   type StageHistoryEntry,
@@ -68,6 +75,12 @@ export function AddDarazProductDialog({
   const startedAtRef = useRef<number | null>(null);
   /** Synchronous lock — closes React double-click TOCTOU before setSubmitting re-renders. */
   const inFlightRef = useRef(false);
+  /** Separate lock for read-only No Brand GET (independent of create gate). */
+  const brandCheckInFlightRef = useRef(false);
+  const [noBrandByStore, setNoBrandByStore] = useState<
+    Record<string, NoBrandCheckResult | undefined>
+  >({});
+  const [brandCheckingStoreId, setBrandCheckingStoreId] = useState<string | null>(null);
 
   const addUrlMutation = useAddProductFromUrl(workspaceId);
   const addConnectedMutation = useAddProductFromConnected(workspaceId);
@@ -108,6 +121,15 @@ export function AddDarazProductDialog({
     fetchedUrl === productUrl.trim() &&
     Boolean(draftPreview);
 
+  const previewCategoryId = useMemo(
+    () => extractPreviewPrimaryCategoryId(draftPreview),
+    [draftPreview]
+  );
+  const brandBlocksCreate = brandCheckBlocksCreate(
+    noBrandByStore,
+    selectedStores.map((s) => s.store_id)
+  );
+
   const canPrepare =
     !busy &&
     !submitting &&
@@ -115,7 +137,7 @@ export function AddDarazProductDialog({
     (mode === "connected"
       ? Boolean(sourceStore && itemId.trim())
       : urlFetched && Boolean(productUrl.trim()));
-  const canCreate = canPrepare && createGateOn;
+  const canCreate = canPrepare && createGateOn && !brandBlocksCreate;
 
   const draftVariants =
     ((draftPreview?.draft as Record<string, unknown> | undefined)?.variants as Array<
@@ -204,7 +226,58 @@ export function AddDarazProductDialog({
     setExecutedCreate(false);
     setElapsedMs(null);
     startedAtRef.current = null;
+    setNoBrandByStore({});
+    setBrandCheckingStoreId(null);
+    brandCheckInFlightRef.current = false;
     onClose();
+  }
+
+  async function onCheckNoBrand(storeId: string) {
+    if (brandCheckInFlightRef.current || submitting) return;
+    const categoryId = previewCategoryId;
+    if (!canCheckNoBrand(categoryId) || !categoryId) {
+      setAlerts(
+        "warn",
+        "Check No Brand needs the preview primary_category_id — fetch/preview first. Category id is never guessed."
+      );
+      return;
+    }
+    brandCheckInFlightRef.current = true;
+    setBrandCheckingStoreId(storeId);
+    try {
+      const res = await Api.checkCategoryNoBrand(storeId, categoryId);
+      const mapped: NoBrandCheckResult = {
+        status: String(res.status || "UNVERIFIED"),
+        reason: res.reason ?? null,
+        brand: res.brand ?? null,
+        brand_id: res.brand_id ?? null,
+        lookup_calls: res.lookup_calls ?? null,
+        primary_category_id: res.primary_category_id ?? categoryId,
+        store_id: res.store_id ?? storeId,
+      };
+      setNoBrandByStore((prev) => ({ ...prev, [storeId]: mapped }));
+      if (mapped.status === "NO_BRAND") {
+        setAlerts("ok", `No Brand confirmed for ${storeId} (read-only).`, false);
+      } else {
+        setAlerts(
+          "warn",
+          `No Brand ${mapped.status} for ${storeId} — create stays blocked until confirmed.`,
+          false
+        );
+      }
+    } catch (err) {
+      const mapped = noBrandCheckFromHttpError(err, storeId, categoryId);
+      setNoBrandByStore((prev) => ({ ...prev, [storeId]: mapped }));
+      setAlerts(
+        "error",
+        mapped.error ||
+          (err instanceof ApiError ? err.message : "No Brand check failed"),
+        false
+      );
+    } finally {
+      brandCheckInFlightRef.current = false;
+      setBrandCheckingStoreId(null);
+    }
   }
 
   function parsePrice(): number | undefined {
@@ -273,6 +346,7 @@ export function AddDarazProductDialog({
         destination_store_id: primaryDest,
       });
       setDraftPreview(res as unknown as Record<string, unknown>);
+      setNoBrandByStore({});
       setFetchedUrl(url);
       const extracted = res as {
         extraction_complete?: boolean;
@@ -401,6 +475,7 @@ export function AddDarazProductDialog({
         ingestResultMeta(res);
         if (res.draft_result) {
           setDraftPreview(res.draft_result as Record<string, unknown>);
+          setNoBrandByStore({});
         }
         setAlerts("ok", "Draft ready — review below, then Add Product to create.");
         endWork("done");
@@ -640,6 +715,10 @@ export function AddDarazProductDialog({
             {busy || "Request in progress…"}
             {elapsedMs != null ? ` · ${Math.round(elapsedMs / 1000)}s` : ""}
           </span>
+        ) : brandBlocksCreate ? (
+          <span className="muted-line">
+            No Brand check did not confirm — create blocked. Re-check or fix category.
+          </span>
         ) : createGateOn ? (
           <span className="muted-line">
             {editBefore
@@ -647,7 +726,9 @@ export function AddDarazProductDialog({
               : "Create runs only when you confirm Add Product."}
           </span>
         ) : (
-          <span className="muted-line">Creation gate is off — fetch and preview still work.</span>
+          <span className="muted-line">
+            Creation gate is off — fetch, preview, and Check No Brand still work.
+          </span>
         )}
       </div>
       <div className="row" style={{ gap: "0.5rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
@@ -945,17 +1026,31 @@ export function AddDarazProductDialog({
           <h4>Destination status</h4>
           {result?.destinations?.length ? (
             <div className="stack" style={{ gap: "0.65rem" }}>
-              {result.destinations.map((d, i) => (
-                <DestinationStatusCard
-                  key={`${d.store?.store_id || i}-${d.attempt_id || d.status}`}
-                  dest={d}
-                  processing={submitting && phase === "creating"}
-                  actionsDisabled={submitting}
-                  retryDisabled={!createGateOn}
-                  onRetry={() => void onRetryDestination(d)}
-                  onReconcile={() => void onReconcileDestination(d)}
-                />
-              ))}
+              {result.destinations.map((d, i) => {
+                const sid = String(d.store?.store_id || "");
+                return (
+                  <DestinationStatusCard
+                    key={`${sid || i}-${d.attempt_id || d.status}`}
+                    dest={d}
+                    processing={submitting && phase === "creating"}
+                    actionsDisabled={submitting || brandCheckingStoreId != null}
+                    retryDisabled={!createGateOn}
+                    onRetry={() => void onRetryDestination(d)}
+                    onReconcile={() => void onReconcileDestination(d)}
+                    noBrand={sid ? noBrandByStore[sid] : undefined}
+                    noBrandChecking={Boolean(sid) && brandCheckingStoreId === sid}
+                    noBrandDisabled={!canCheckNoBrand(previewCategoryId)}
+                    noBrandDisabledReason={
+                      canCheckNoBrand(previewCategoryId)
+                        ? undefined
+                        : "Needs preview primary_category_id — never guessed"
+                    }
+                    onCheckNoBrand={
+                      sid ? () => void onCheckNoBrand(sid) : undefined
+                    }
+                  />
+                );
+              })}
             </div>
           ) : selectedStores.length ? (
             <div className="stack" style={{ gap: "0.65rem" }}>
@@ -968,6 +1063,16 @@ export function AddDarazProductDialog({
                   }}
                   checking={submitting && phase === "fetching"}
                   processing={submitting && (phase === "creating" || phase === "preparing")}
+                  actionsDisabled={submitting || brandCheckingStoreId != null}
+                  noBrand={noBrandByStore[s.store_id]}
+                  noBrandChecking={brandCheckingStoreId === s.store_id}
+                  noBrandDisabled={!canCheckNoBrand(previewCategoryId)}
+                  noBrandDisabledReason={
+                    canCheckNoBrand(previewCategoryId)
+                      ? undefined
+                      : "Needs preview primary_category_id — never guessed"
+                  }
+                  onCheckNoBrand={() => void onCheckNoBrand(s.store_id)}
                 />
               ))}
             </div>
@@ -980,10 +1085,18 @@ export function AddDarazProductDialog({
           correlationId={correlationId || result?.correlation_id}
           phase={phase}
           message={localAlert?.text}
-          destinations={result?.destinations}
+          destinations={
+            result?.destinations ||
+            selectedStores.map((s) => ({
+              store: { store_id: s.store_id, display_name: s.display_name || s.store_name },
+              status: "READY",
+            }))
+          }
           stageHistory={stageHistory}
           elapsedMs={elapsedMs}
-          requestRunning={submitting}
+          requestRunning={submitting || brandCheckingStoreId != null}
+          noBrandByStore={noBrandByStore}
+          primaryCategoryId={previewCategoryId}
         />
 
         {draftPreview ? (

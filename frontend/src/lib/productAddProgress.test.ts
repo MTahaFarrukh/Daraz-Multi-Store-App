@@ -171,9 +171,23 @@ describe("productAddProgress", () => {
         },
       ],
       stageHistory: [{ stage: "gate_checked", at_ms: 12, gate_on: true }],
+      primaryCategoryId: "10002730",
+      noBrandByStore: {
+        mtf: {
+          status: "NO_BRAND",
+          reason: "confirmed_no_brand_row",
+          brand: "No Brand",
+          brand_id: 60147,
+          lookup_calls: 1,
+        },
+      },
     });
     expect(text).toContain("cid-xyz");
     expect(text).toContain("MTF");
+    expect(text).toContain("primary_category_id: 10002730");
+    expect(text).toContain("No Brand checks");
+    expect(text).toContain("status=NO_BRAND");
+    expect(text).toContain("brand_id=60147");
     expect(text).toContain("No tokens");
     expect(text).not.toMatch(/bearer |password=/i);
   });

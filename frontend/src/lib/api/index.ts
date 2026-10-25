@@ -24,6 +24,7 @@ import type {
   ProductRow,
   ProductSyncResponse,
   StoreGroup,
+  CategoryNoBrandDiagnostic,
   StoreHealthCheckResult,
   StoreView,
   UnifiedOrder,
@@ -71,6 +72,18 @@ export const Api = {
       `/api/stores/${encodeURIComponent(storeId)}/health-check`,
       { method: "POST" }
     ),
+  /**
+   * Read-only No Brand category diagnostic (GET only).
+   * Never CreateProduct / UpdatePrice / image migrate. Requires product.create RBAC.
+   */
+  checkCategoryNoBrand: (storeId: string, primaryCategoryId: string) => {
+    const qs = new URLSearchParams({
+      primary_category_id: String(primaryCategoryId).trim(),
+    });
+    return api<CategoryNoBrandDiagnostic>(
+      `/api/stores/${encodeURIComponent(storeId)}/category-brands/no-brand?${qs}`
+    );
+  },
   oauthStart: () => api<{ authorize_url: string }>("/api/oauth/start"),
 
   listGroups: () => api<{ groups: StoreGroup[] }>("/api/store-groups"),

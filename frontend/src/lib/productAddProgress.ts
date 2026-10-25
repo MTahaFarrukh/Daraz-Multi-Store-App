@@ -1,5 +1,10 @@
 /** Per-store Add Product progress labels, recovery hints, and diagnostics helpers. */
 
+import {
+  formatNoBrandCheckLine,
+  type NoBrandCheckResult,
+} from "@/lib/noBrandCheck";
+
 export type DestinationAttemptLike = {
   status?: string | null;
   creation_status?: string | null;
@@ -345,6 +350,8 @@ export function formatDiagnosticsCopy(input: {
   destinations?: DestinationAttemptLike[];
   stageHistory?: StageHistoryEntry[];
   elapsedMs?: number | null;
+  noBrandByStore?: Record<string, NoBrandCheckResult | undefined>;
+  primaryCategoryId?: string | null;
 }): string {
   const lines: string[] = [
     "Daraz Multi-Store — Add Product diagnostics (redacted)",
@@ -354,6 +361,9 @@ export function formatDiagnosticsCopy(input: {
   if (input.phase) lines.push(`Client phase: ${input.phase}`);
   if (input.elapsedMs != null) lines.push(`Elapsed ms: ${Math.round(input.elapsedMs)}`);
   if (input.message) lines.push(`Message: ${input.message}`);
+  if (input.primaryCategoryId) {
+    lines.push(`Preview primary_category_id: ${input.primaryCategoryId}`);
+  }
   lines.push("");
   lines.push("Per-store:");
   for (const d of input.destinations || []) {
@@ -362,6 +372,15 @@ export function formatDiagnosticsCopy(input: {
       `- ${d.store?.display_name || d.store?.store_id || "Store"} | ${destinationProgressLabel(d)} | ${reason}` +
         (d.attempt_id ? ` | attempt ${d.attempt_id}` : "")
     );
+  }
+  const brandEntries = Object.entries(input.noBrandByStore || {}).filter(([, v]) => Boolean(v));
+  if (brandEntries.length) {
+    lines.push("");
+    lines.push("No Brand checks (read-only):");
+    for (const [storeId, result] of brandEntries) {
+      if (!result) continue;
+      lines.push(`- ${storeId} | ${formatNoBrandCheckLine(result)}`);
+    }
   }
   if (input.stageHistory?.length) {
     lines.push("");
