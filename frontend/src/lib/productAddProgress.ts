@@ -70,6 +70,8 @@ const REASON_LABELS: Record<string, string> = {
   category_evidence_conflict: "Category evidence conflicts — review before creating",
   destination_store_not_found: "Destination store was not found in this workspace",
   destination_must_differ_from_source: "Choose a different store than the source",
+  no_brand_unavailable:
+    "Daraz No Brand could not be confirmed for this category — create is blocked until brand lookup succeeds",
 };
 
 const RECOVERY_HINTS: Record<string, string> = {
@@ -97,6 +99,8 @@ const RECOVERY_HINTS: Record<string, string> = {
     "Pick another destination store that is not the source.",
   missing_destination_item_id:
     "Use Reconcile to locate the listing before any retry.",
+  no_brand_unavailable:
+    "Retry after brand lookup is fixed, or confirm in Seller Center that No Brand is selectable for this category.",
 };
 
 export type DestinationUiStatus =

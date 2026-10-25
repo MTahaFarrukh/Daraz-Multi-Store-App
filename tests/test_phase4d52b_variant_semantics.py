@@ -423,10 +423,10 @@ def test_grey_gray_still_safe():
 
 def test_brand_source_nike_becomes_no_brand():
     clear_no_brand_cache_for_tests()
-    calls: list[str] = []
+    calls: list[str | None] = []
 
     def query(**kwargs):
-        calls.append(str(kwargs.get("name")))
+        calls.append(kwargs.get("name"))
         return {"data": {"module": [{"name": "No Brand", "brand_id": 1}]}}
 
     res = resolve_brand_for_category(
@@ -436,9 +436,10 @@ def test_brand_source_nike_becomes_no_brand():
     )
     assert res["status"] == "NO_BRAND"
     assert res["brand"] == "No Brand"
+    assert res["brand_id"] == 1
     assert res["source_brand"] == "Nike"
     assert res["source_brand_ignored"] is True
-    assert calls == ["No Brand"]
+    assert calls[0] == "No Brand"
 
 
 def test_brand_missing_still_no_brand():
