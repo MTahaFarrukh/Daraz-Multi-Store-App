@@ -307,15 +307,24 @@ def _seconds_until(iso_ts: Any) -> int | None:
 
 
 def connection_health(record: dict[str, Any]) -> dict[str, Any]:
-    """Truthful connection state from known token expiry fields only.
+    """Token-expiry heuristic only — NOT verified Daraz API connectivity.
 
     Statuses:
     - connected: store is registered; tokens present (access may still be refreshable)
     - needs_reconnection: refresh token is expired (or access expired with no refresh window)
     - connection_error: reserved; not emitted without a persisted error signal
 
+    ``token_status``:
+    - expired: refresh window dead
+    - expiring: access token ≤10 days
+    - ok: access token known and >10 days
+    - unknown: expiry timestamps missing
+
     ``needs_attention`` is True when expiry is known and access is ≤10 days (or refresh dead).
     ``needs_attention`` is None when expiry timestamps are unknown (do not invent Healthy counts).
+
+    Live API reachability is a separate field (``api_health``) set only by an
+    explicit read-only probe — never inferred from token expiry alone.
     """
     access_sec = _seconds_until(record.get("access_token_expires_at"))
     refresh_sec = _seconds_until(record.get("refresh_token_expires_at"))
@@ -324,6 +333,7 @@ def connection_health(record: dict[str, Any]) -> dict[str, Any]:
         return {
             "connection_status": "needs_reconnection",
             "needs_attention": True,
+            "token_status": "expired",
             "access_token_expires_in_seconds": access_sec,
             "refresh_token_expires_in_seconds": refresh_sec,
         }
@@ -332,6 +342,7 @@ def connection_health(record: dict[str, Any]) -> dict[str, Any]:
         return {
             "connection_status": "connected",
             "needs_attention": None,
+            "token_status": "unknown",
             "access_token_expires_in_seconds": None,
             "refresh_token_expires_in_seconds": None,
         }
@@ -339,12 +350,15 @@ def connection_health(record: dict[str, Any]) -> dict[str, Any]:
     attention: bool | None
     if access_sec is not None:
         attention = access_sec <= 10 * 86400
+        token_status = "expiring" if attention else "ok"
     else:
         attention = False
+        token_status = "unknown"
 
     return {
         "connection_status": "connected",
         "needs_attention": attention,
+        "token_status": token_status,
         "access_token_expires_in_seconds": access_sec,
         "refresh_token_expires_in_seconds": refresh_sec,
     }
@@ -382,6 +396,9 @@ def sanitize_store_view(record: dict[str, Any] | None) -> dict[str, Any]:
         "refresh_token_expires_in_seconds": health["refresh_token_expires_in_seconds"],
         "connection_status": health["connection_status"],
         "needs_attention": health["needs_attention"],
+        # Token heuristic only — never claim API-verified from list endpoint.
+        "token_status": health.get("token_status") or "unknown",
+        "api_health": "unverified",
         "authorized_at": record.get("authorized_at"),
         "updated_at": updated_at,
     }

@@ -86,6 +86,38 @@ def _resolve_dest(workspace_id: str, store_ref: str) -> dict[str, Any] | None:
     )
 
 
+def _copy_permission_denied_result(
+    dest: dict[str, Any] | None, gate: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "status": "NEEDS_ATTENTION",
+        "store": _store_label(dest),
+        "reason": str(gate.get("reason") or "copy_permission_denied"),
+        "code": str(gate.get("code") or "copy_permission_denied"),
+        "copy_permission": gate,
+        "item_id": None,
+        "attempt_id": None,
+    }
+
+
+def _enforce_copy_permission(
+    workspace_id: str,
+    *,
+    source_store: dict[str, Any] | None = None,
+    destination_store: dict[str, Any] | None = None,
+    source_workspace_id: str | None = None,
+) -> dict[str, Any]:
+    """Fail closed when trusted-connection copy_products is required but missing."""
+    from src.workspace_connections import assert_product_copy_allowed
+
+    return assert_product_copy_allowed(
+        actor_workspace_id=workspace_id,
+        source_workspace_id=source_workspace_id,
+        source_store=source_store,
+        destination_store=destination_store,
+    )
+
+
 def _apply_price_override(
     draft: dict[str, Any],
     price_override: float | None,
@@ -316,6 +348,31 @@ def _prepare_destination(
             execute=bool(execute),
             gate_on=bool(gate_on),
         )
+
+    source_store_meta: dict[str, Any] | None = None
+    src_ws = draft.get("source_workspace_id")
+    src_uuid = draft.get("source_store_uuid") or draft.get("source_store_id")
+    if src_uuid:
+        source_store_meta = get_repo().get_store_by_uuid(
+            workspace_id, str(src_uuid)
+        ) or {"workspace_id": src_ws, "id": src_uuid}
+    elif src_ws:
+        source_store_meta = {"workspace_id": src_ws}
+    perm = _enforce_copy_permission(
+        workspace_id,
+        source_store=source_store_meta,
+        destination_store=dest,
+        source_workspace_id=str(src_ws) if src_ws else None,
+    )
+    if not perm.get("allowed"):
+        if trace:
+            trace.stage(
+                "copy_permission_denied",
+                reason=perm.get("reason"),
+                code=perm.get("code"),
+            )
+        return _copy_permission_denied_result(dest, perm)
+
     if forced_seller_skus is not None:
         apply_attempt_seller_skus(draft, forced_seller_skus)
     override_report = _apply_price_override(
@@ -1902,6 +1959,22 @@ def _add_product_from_connected_inner(
         dest_count=len(dest_ids),
         source="connected",
     )
+
+    source_store_row = _resolve_dest(workspace_id, source_store_id)
+    if not source_store_row:
+        raise ValueError("Source store not found")
+    # Fail closed before any fetch/create when peer copy_products is missing.
+    for dest_ref in dest_ids:
+        dest_row = _resolve_dest(workspace_id, dest_ref)
+        perm = _enforce_copy_permission(
+            workspace_id,
+            source_store=source_store_row,
+            destination_store=dest_row,
+        )
+        if not perm.get("allowed"):
+            raise PermissionError(
+                f"copy_permission_denied:{perm.get('reason') or 'copy_products_not_granted'}"
+            )
 
     fetched = fetch_connected_product(
         workspace_id,

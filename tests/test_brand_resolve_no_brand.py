@@ -272,3 +272,41 @@ def test_global_identifier_only_row_still_resolves():
     assert res["status"] == "NO_BRAND"
     assert is_no_brand_label(res["brand"])
     assert res["brand_id"] == 42
+
+
+def test_never_invents_brand_id_when_row_omits_it():
+    """Verified name is enough; brand_id must come from Daraz row or stay None."""
+    clear_no_brand_cache_for_tests()
+
+    def query(**kwargs):
+        return {
+            "data": {
+                "module": [
+                    {"name": "No Brand", "name_en": "No Brand"},
+                ],
+                "total_record": 1,
+            }
+        }
+
+    res = resolve_destination_no_brand(primary_category_id=11, query_brands=query)
+    assert res["status"] == "NO_BRAND"
+    assert res["brand"] == "No Brand"
+    assert res["brand_id"] is None
+
+
+def test_never_hardcodes_fallback_brand_id_on_miss():
+    clear_no_brand_cache_for_tests()
+
+    def query(**kwargs):
+        return {
+            "data": {
+                "module": [{"name": "Acme Co", "brand_id": 60147}],
+                "total_record": 1,
+            }
+        }
+
+    res = resolve_destination_no_brand(primary_category_id=12, query_brands=query)
+    assert res["status"] == "UNRESOLVED"
+    assert res["brand"] is None
+    assert res["brand_id"] is None
+    assert res["reason"] == "no_brand_unavailable"

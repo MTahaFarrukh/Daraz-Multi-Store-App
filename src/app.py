@@ -692,6 +692,24 @@ def api_rename_store(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/api/stores/{store_id}/health-check")
+def api_store_health_check(
+    store_id: str,
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Read-only Daraz /seller/get probe. Does not mutate listings, stock, prices, or orders.
+
+    Distinguishes token-expiry heuristics (``token_status``) from verified API
+    connectivity (``api_health``). List endpoint never claims API-verified.
+    """
+    from src.store_api_health import probe_store_api_health
+
+    result = probe_store_api_health(ctx.workspace_id, store_id)
+    if result.get("reason") == "store_not_found":
+        raise HTTPException(status_code=404, detail="Store not found")
+    return result
+
+
 @app.get("/stores")
 def stores(ctx: WorkspaceContext = Depends(get_workspace_context)) -> dict:
     return api_stores(ctx)
@@ -2133,6 +2151,18 @@ def api_add_product_from_connected(
             source="connected",
         )
         return result
+    except PermissionError as exc:
+        trace.stage(
+            "request_failed",
+            error_class=type(exc).__name__,
+            message=str(exc)[:160],
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=safe_error_detail(
+                str(exc), diagnostic_id=trace.correlation_id, status_code=403
+            ),
+        ) from exc
     except (ProductFetchError, ValueError) as exc:
         trace.stage(
             "request_failed",
@@ -2233,6 +2263,8 @@ def api_bulk_copy_start(
             },
         )
         return result
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

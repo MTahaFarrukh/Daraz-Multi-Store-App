@@ -71,6 +71,12 @@ export type BootstrapResponse = {
 /** Backend-authoritative connection status (see sanitize_store_view / connection_health). */
 export type ConnectionStatus = "connected" | "needs_reconnection" | "connection_error";
 
+/** Token-expiry heuristic only — not live API connectivity. */
+export type TokenStatus = "ok" | "expiring" | "expired" | "unknown";
+
+/** Live API probe result; list endpoint always returns unverified. */
+export type ApiHealthStatus = "unverified" | "ok" | "error" | "skipped";
+
 export type StoreView = {
   connected: boolean;
   /** Internal UUID primary key when available — prefer for future metrics joins. */
@@ -90,8 +96,23 @@ export type StoreView = {
   connection_status?: ConnectionStatus;
   /** null = expiry unknown — do not invent Healthy counts */
   needs_attention?: boolean | null;
+  /** Token expiry heuristic — never means API-verified */
+  token_status?: TokenStatus;
+  /** Live /seller/get probe; list defaults to unverified */
+  api_health?: ApiHealthStatus;
   authorized_at?: string | null;
   updated_at?: string | null;
+};
+
+export type StoreHealthCheckResult = {
+  ok: boolean;
+  store: StoreView | null;
+  token_status: TokenStatus | string;
+  api_health: ApiHealthStatus | string;
+  reason?: string;
+  checked_at?: string;
+  probe?: { api?: string; status?: string; latency_ms?: number };
+  seller?: { name?: string | null; seller_id?: string | null };
 };
 
 export type StoreGroup = {

@@ -232,9 +232,34 @@ export function StoresPage() {
       const data = await refreshConnMutation.mutateAsync([store.store_id]);
       const bad = (data.results || []).find((r) => r.status === "error");
       if (bad) setError(bad.error || "Refresh failed — try Reconnect with Daraz");
-      else setOk(`Connection refreshed for ${storeTitle(store)}`);
+      else setOk(`Token refreshed for ${storeTitle(store)} (not an API health check)`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Refresh failed");
+    } finally {
+      setBusyStoreId(null);
+    }
+  }
+
+  async function checkApiHealth(store: StoreView) {
+    setError("");
+    setBusyStoreId(store.store_id);
+    setMenuOpen(null);
+    try {
+      const data = await Api.checkStoreHealth(store.store_id);
+      if (data.ok && data.api_health === "ok") {
+        setOk(
+          `API verified for ${storeTitle(store)} via read-only /seller/get` +
+            (data.probe?.latency_ms != null ? ` (${data.probe.latency_ms}ms)` : "")
+        );
+      } else {
+        setError(
+          data.reason
+            ? `API check failed for ${storeTitle(store)}: ${data.reason}`
+            : `API check failed for ${storeTitle(store)}`
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "API health check failed");
     } finally {
       setBusyStoreId(null);
     }
@@ -342,7 +367,14 @@ export function StoresPage() {
               disabled={busyStoreId === store.store_id}
               onClick={() => refreshOne(store)}
             >
-              Refresh Connection
+              Refresh Token
+            </button>
+            <button
+              type="button"
+              disabled={busyStoreId === store.store_id}
+              onClick={() => checkApiHealth(store)}
+            >
+              Check API (read-only)
             </button>
             <button type="button" onClick={() => { setMenuOpen(null); connectStore(); }}>
               Reconnect with Daraz
@@ -373,12 +405,12 @@ export function StoresPage() {
       <div className="grid-stats">
         <StatCard label="Connected Stores" value={loading ? "…" : stores.length} hint="Registered in this workspace" />
         <StatCard
-          label="Healthy Stores"
+          label="Token OK"
           value={loading ? "…" : knownHealthy.length}
           hint={
             unknownHealth > 0
-              ? `${unknownHealth} store(s) have unknown token expiry`
-              : "Access token healthy (>10 days)"
+              ? `${unknownHealth} store(s) have unknown token expiry — not API-verified`
+              : "Access token >10 days left (not a live API check)"
           }
         />
         <StatCard
@@ -415,7 +447,7 @@ export function StoresPage() {
               }}
             >
               <option value="all">All</option>
-              <option value="healthy">Healthy</option>
+              <option value="healthy">Token OK</option>
               <option value="attention">Needs Attention</option>
               <option value={`group:${VIRTUAL_ALL}`}>Group: All Stores</option>
               {groups.map((g) => (

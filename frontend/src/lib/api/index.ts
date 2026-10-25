@@ -24,6 +24,7 @@ import type {
   ProductRow,
   ProductSyncResponse,
   StoreGroup,
+  StoreHealthCheckResult,
   StoreView,
   UnifiedOrder,
   AuditEvent,
@@ -64,6 +65,12 @@ export const Api = {
       { method: "POST" }
     );
   },
+  /** Read-only /seller/get probe — does not mutate listings, stock, prices, or orders. */
+  checkStoreHealth: (storeId: string) =>
+    api<StoreHealthCheckResult>(
+      `/api/stores/${encodeURIComponent(storeId)}/health-check`,
+      { method: "POST" }
+    ),
   oauthStart: () => api<{ authorize_url: string }>("/api/oauth/start"),
 
   listGroups: () => api<{ groups: StoreGroup[] }>("/api/store-groups"),

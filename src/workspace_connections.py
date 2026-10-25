@@ -329,28 +329,136 @@ def update_permissions(
     return _serialize(updated, viewer_workspace_id=workspace_id)
 
 
+def _permission_flag_true(value: Any) -> bool:
+    """Fail closed: only an explicit True (or DB 1) grants a permission."""
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, (int, float)) and value == 1:
+        return True
+    return False
+
+
 def connection_allows_copy(source_workspace_id: str, destination_workspace_id: str) -> bool:
-    """Future Product Copy gate — foundation only."""
+    """True only when ACCEPTED connection source→dest has copy_products=True.
+
+    Fail closed on missing row, non-ACCEPTED status, or ambiguous flags.
+    """
+    src = str(source_workspace_id or "").strip()
+    dst = str(destination_workspace_id or "").strip()
+    if not src or not dst or src == dst:
+        return False
     repo = get_repo()
-    row = repo.get_connection_between(source_workspace_id, destination_workspace_id)
+    row = repo.get_connection_between(src, dst)
     if not row:
         return False
-    return (
-        row.get("status") == "ACCEPTED"
-        and bool(row.get("copy_products")) is True
-    )
+    status = str(row.get("status") or "").strip().upper()
+    if status != "ACCEPTED":
+        return False
+    return _permission_flag_true(row.get("copy_products"))
 
 
 def connection_allows_view_products(
     source_workspace_id: str, destination_workspace_id: str
 ) -> bool:
+    src = str(source_workspace_id or "").strip()
+    dst = str(destination_workspace_id or "").strip()
+    if not src or not dst or src == dst:
+        return False
     repo = get_repo()
-    row = repo.get_connection_between(source_workspace_id, destination_workspace_id)
+    row = repo.get_connection_between(src, dst)
     if not row:
         return False
-    return (
-        row.get("status") == "ACCEPTED"
-        and bool(row.get("view_products")) is True
+    status = str(row.get("status") or "").strip().upper()
+    if status != "ACCEPTED":
+        return False
+    return _permission_flag_true(row.get("view_products"))
+
+
+def evaluate_product_copy_permission(
+    *,
+    actor_workspace_id: str,
+    source_workspace_id: str | None = None,
+    destination_workspace_id: str | None = None,
+) -> dict[str, Any]:
+    """Fail-closed gate for product create / copy paths.
+
+    - Same-workspace (source and destination owned by actor): allowed.
+    - Public / unknown source (no peer workspace): treated as actor-owned source.
+    - Cross-workspace source catalog: allowed only when the actor holds an
+      ACCEPTED connection *to the peer* with ``copy_products=True``
+      (``connection_allows_copy(actor, peer)``).
+    - Creating into a non-actor destination: denied.
+    """
+    actor = str(actor_workspace_id or "").strip()
+    if not actor:
+        return {
+            "allowed": False,
+            "reason": "missing_actor_workspace",
+            "code": "copy_permission_denied",
+        }
+
+    src = str(source_workspace_id or "").strip() or actor
+    dst = str(destination_workspace_id or "").strip() or actor
+
+    if dst != actor:
+        return {
+            "allowed": False,
+            "reason": "destination_outside_actor_workspace",
+            "code": "copy_permission_denied",
+            "source_workspace_id": src,
+            "destination_workspace_id": dst,
+        }
+
+    if src == actor:
+        return {
+            "allowed": True,
+            "reason": "same_workspace",
+            "code": "same_workspace",
+            "source_workspace_id": src,
+            "destination_workspace_id": dst,
+        }
+
+    if connection_allows_copy(actor, src) is True:
+        return {
+            "allowed": True,
+            "reason": "trusted_connection_copy_products",
+            "code": "connection_granted",
+            "source_workspace_id": src,
+            "destination_workspace_id": dst,
+        }
+
+    return {
+        "allowed": False,
+        "reason": "copy_products_not_granted",
+        "code": "copy_permission_denied",
+        "source_workspace_id": src,
+        "destination_workspace_id": dst,
+    }
+
+
+def assert_product_copy_allowed(
+    *,
+    actor_workspace_id: str,
+    source_workspace_id: str | None = None,
+    destination_workspace_id: str | None = None,
+    source_store: dict[str, Any] | None = None,
+    destination_store: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve workspace ids from stores when provided, then evaluate the gate."""
+    src = source_workspace_id
+    dst = destination_workspace_id
+    if source_store is not None and not src:
+        raw = source_store.get("workspace_id")
+        src = str(raw).strip() if raw is not None and str(raw).strip() else None
+    if destination_store is not None and not dst:
+        raw = destination_store.get("workspace_id")
+        dst = str(raw).strip() if raw is not None and str(raw).strip() else None
+    return evaluate_product_copy_permission(
+        actor_workspace_id=actor_workspace_id,
+        source_workspace_id=src,
+        destination_workspace_id=dst,
     )
 
 

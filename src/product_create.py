@@ -69,6 +69,32 @@ def run_supervised_create(
     if not dest:
         return {"status": "BLOCKED", "reason": "Destination store not found"}
 
+    source_product = repo.get_daraz_product(workspace_id, source_product_id)
+    source_store = None
+    if source_product:
+        source_store = repo.get_store_by_uuid(
+            workspace_id, str(source_product.get("store_id") or "")
+        )
+    from src.workspace_connections import assert_product_copy_allowed
+
+    perm = assert_product_copy_allowed(
+        actor_workspace_id=workspace_id,
+        source_store=source_store,
+        destination_store=dest,
+        source_workspace_id=(
+            str(source_store.get("workspace_id"))
+            if source_store and source_store.get("workspace_id")
+            else None
+        ),
+    )
+    if not perm.get("allowed"):
+        return {
+            "status": "BLOCKED",
+            "reason": str(perm.get("reason") or "copy_permission_denied"),
+            "code": str(perm.get("code") or "copy_permission_denied"),
+            "copy_permission": perm,
+        }
+
     # Workspace-scoped encrypted store tokens only — never the legacy global vault.
     try:
         from src.ops import client_for_store

@@ -674,6 +674,18 @@ def start_bulk_copy_job(
     if str(source["id"]) == str(dest["id"]):
         raise ValueError("Source and destination must be different stores")
 
+    from src.workspace_connections import assert_product_copy_allowed
+
+    perm = assert_product_copy_allowed(
+        actor_workspace_id=workspace_id,
+        source_store=source,
+        destination_store=dest,
+    )
+    if not perm.get("allowed"):
+        raise PermissionError(
+            f"copy_permission_denied:{perm.get('reason') or 'copy_products_not_granted'}"
+        )
+
     catalog = discover_source_catalog(
         workspace_id,
         str(source.get("store_id") or source["id"]),

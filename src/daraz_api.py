@@ -372,6 +372,14 @@ class DarazClient:
             "/product/item/get", business_params={"item_id": str(item_id)}
         )
 
+    def get_seller(self) -> dict[str, Any]:
+        """GET /seller/get — read-only seller profile (PK live-proven).
+
+        Used for connectivity health checks only — never mutates listings,
+        stock, prices, or orders.
+        """
+        return self._request("/seller/get")
+
     def get_category_tree(self) -> dict[str, Any]:
         """GET /category/tree/get."""
         return self._request("/category/tree/get")
