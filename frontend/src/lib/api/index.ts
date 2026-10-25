@@ -76,10 +76,18 @@ export const Api = {
    * Read-only No Brand category diagnostic (GET only).
    * Never CreateProduct / UpdatePrice / image migrate. Requires product.create RBAC.
    */
-  checkCategoryNoBrand: (storeId: string, primaryCategoryId: string) => {
+  checkCategoryNoBrand: (
+    storeId: string,
+    primaryCategoryId: string,
+    opts?: { deep?: boolean; scanFromStartRow?: number }
+  ) => {
     const qs = new URLSearchParams({
       primary_category_id: String(primaryCategoryId).trim(),
     });
+    if (opts?.deep) qs.set("deep", "true");
+    if (opts?.scanFromStartRow != null && opts.scanFromStartRow > 0) {
+      qs.set("scan_from_start_row", String(opts.scanFromStartRow));
+    }
     return api<CategoryNoBrandDiagnostic>(
       `/api/stores/${encodeURIComponent(storeId)}/category-brands/no-brand?${qs}`
     );

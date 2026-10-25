@@ -10,6 +10,7 @@ import { ApiError } from "@/lib/api/client";
 import {
   brandCheckBlocksCreate,
   canCheckNoBrand,
+  canContinueDeepScan,
   extractPreviewPrimaryCategoryId,
   mapApiNoBrandResult,
   noBrandCheckFromHttpError,
@@ -82,6 +83,9 @@ export function AddDarazProductDialog({
     Record<string, NoBrandCheckResult | undefined>
   >({});
   const [brandCheckingStoreId, setBrandCheckingStoreId] = useState<string | null>(null);
+  const [deepScanStoreId, setDeepScanStoreId] = useState<string | null>(null);
+  const deepScanCancelRef = useRef(false);
+  const deepScanAutoRef = useRef(true);
 
   const addUrlMutation = useAddProductFromUrl(workspaceId);
   const addConnectedMutation = useAddProductFromConnected(workspaceId);
@@ -229,6 +233,8 @@ export function AddDarazProductDialog({
     startedAtRef.current = null;
     setNoBrandByStore({});
     setBrandCheckingStoreId(null);
+    setDeepScanStoreId(null);
+    deepScanCancelRef.current = true;
     brandCheckInFlightRef.current = false;
     onClose();
   }
@@ -280,6 +286,92 @@ export function AddDarazProductDialog({
     } finally {
       brandCheckInFlightRef.current = false;
       setBrandCheckingStoreId(null);
+    }
+  }
+
+  function onCancelDeepScan() {
+    deepScanCancelRef.current = true;
+    deepScanAutoRef.current = false;
+    setAlerts("warn", "Deep scan pause requested — current page request will finish.", false);
+  }
+
+  async function onDeepScanNoBrand(storeId: string) {
+    if (brandCheckInFlightRef.current || submitting) return;
+    const categoryId = previewCategoryId;
+    if (!canCheckNoBrand(categoryId) || !categoryId) {
+      setAlerts(
+        "warn",
+        "Deep scan needs the preview primary_category_id — fetch/preview first."
+      );
+      return;
+    }
+    brandCheckInFlightRef.current = true;
+    deepScanCancelRef.current = false;
+    deepScanAutoRef.current = true;
+    setBrandCheckingStoreId(storeId);
+    setDeepScanStoreId(storeId);
+    let startRow = 0;
+    const prior = noBrandByStore[storeId];
+    if (canContinueDeepScan(prior)) {
+      startRow = Number(prior?.next_start_row ?? prior?.lookup?.next_start_row ?? 0);
+    }
+    try {
+      // Auto-continue across requests until complete, NO_BRAND, rate_limited, or cancel.
+      for (let hop = 0; hop < 40; hop += 1) {
+        if (deepScanCancelRef.current) {
+          setAlerts("warn", `Deep scan paused for ${storeId}.`, false);
+          break;
+        }
+        const res = await Api.checkCategoryNoBrand(storeId, categoryId, {
+          deep: true,
+          scanFromStartRow: startRow,
+        });
+        const mapped = mapApiNoBrandResult(
+          res as unknown as Record<string, unknown>,
+          storeId,
+          categoryId
+        );
+        setNoBrandByStore((prev) => ({ ...prev, [storeId]: mapped }));
+        if (mapped.status === "NO_BRAND") {
+          setAlerts(
+            "ok",
+            `No Brand confirmed via deep scan for ${storeId} (brand_id=${mapped.brand_id ?? "n/a"}).`,
+            false
+          );
+          break;
+        }
+        if (mapped.lookup?.stop_reason === "rate_limited") {
+          setAlerts(
+            "warn",
+            `Deep scan rate-limited for ${storeId} — not retrying blindly. Resume later from next_start_row.`,
+            false
+          );
+          break;
+        }
+        if (mapped.complete || !canContinueDeepScan(mapped)) {
+          setAlerts(
+            "warn",
+            `Deep scan stopped for ${storeId}: ${mapped.status}/${mapped.reason || "incomplete"}. Create stays blocked.`,
+            false
+          );
+          break;
+        }
+        startRow = Number(mapped.next_start_row ?? mapped.lookup?.next_start_row ?? startRow);
+        if (!deepScanAutoRef.current) break;
+      }
+    } catch (err) {
+      const mapped = noBrandCheckFromHttpError(err, storeId, categoryId);
+      setNoBrandByStore((prev) => ({ ...prev, [storeId]: mapped }));
+      setAlerts(
+        "error",
+        mapped.error ||
+          (err instanceof ApiError ? err.message : "Deep scan failed"),
+        false
+      );
+    } finally {
+      brandCheckInFlightRef.current = false;
+      setBrandCheckingStoreId(null);
+      setDeepScanStoreId(null);
     }
   }
 
@@ -1051,6 +1143,20 @@ export function AddDarazProductDialog({
                     onCheckNoBrand={
                       sid ? () => void onCheckNoBrand(sid) : undefined
                     }
+                    onDeepScanNoBrand={
+                      sid ? () => void onDeepScanNoBrand(sid) : undefined
+                    }
+                    onCancelDeepScan={
+                      sid && deepScanStoreId === sid
+                        ? () => onCancelDeepScan()
+                        : undefined
+                    }
+                    deepScanActive={Boolean(sid) && deepScanStoreId === sid}
+                    deepScanPaused={
+                      Boolean(sid) &&
+                      deepScanStoreId === sid &&
+                      deepScanCancelRef.current
+                    }
                   />
                 );
               })}
@@ -1076,6 +1182,16 @@ export function AddDarazProductDialog({
                       : "Needs preview primary_category_id — never guessed"
                   }
                   onCheckNoBrand={() => void onCheckNoBrand(s.store_id)}
+                  onDeepScanNoBrand={() => void onDeepScanNoBrand(s.store_id)}
+                  onCancelDeepScan={
+                    deepScanStoreId === s.store_id
+                      ? () => onCancelDeepScan()
+                      : undefined
+                  }
+                  deepScanActive={deepScanStoreId === s.store_id}
+                  deepScanPaused={
+                    deepScanStoreId === s.store_id && deepScanCancelRef.current
+                  }
                 />
               ))}
             </div>

@@ -366,11 +366,59 @@ class DarazClient:
             business["sku_seller_list"] = sku_seller_list
         return self._request("/products/get", business_params=business)
 
-    def get_product_item(self, item_id: int | str) -> dict[str, Any]:
-        """GET /product/item/get — single owned product (item_id required)."""
-        return self._request(
-            "/product/item/get", business_params={"item_id": str(item_id)}
-        )
+    def get_product_item(
+        self,
+        item_id: int | str | None = None,
+        *,
+        seller_sku: str | None = None,
+    ) -> dict[str, Any]:
+        """GET /product/item/get — owned product by ``item_id`` or ``seller_sku``.
+
+        Spike evidence (``scripts/phase4a_product_spike.py``): both ``item_id`` and
+        ``seller_sku`` business params are accepted. Exactly one should be set.
+        """
+        business: dict[str, str] = {}
+        if item_id is not None and str(item_id).strip() != "":
+            business["item_id"] = str(item_id)
+        if seller_sku is not None and str(seller_sku).strip() != "":
+            business["seller_sku"] = str(seller_sku)
+        if not business:
+            raise ValueError("item_id or seller_sku required")
+        return self._request("/product/item/get", business_params=business)
+
+    def get_seller_item_limit(self) -> dict[str, Any]:
+        """GET /product/seller/item/limit — read-only seller listing quota.
+
+        Lazada Open API path; no business parameters. Response data field names
+        ``onlineItemCount`` / ``itemLimit`` per Lazada client typings; Daraz PK
+        live shape unverified. Documented ~10 QPS per seller — caller must pace.
+        """
+        return self._request("/product/seller/item/limit")
+
+    def get_qc_status(
+        self,
+        *,
+        seller_skus: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """GET /product/qc/status/get — optional QC status by seller SKUs.
+
+        Parameter names follow modern Lazada Open API docs (``seller_skus`` as a
+        JSON array string). **Unverified on Daraz PK** — do not treat failures as
+        create success/failure. Read-only.
+        """
+        import json as _json
+
+        business: dict[str, str] = {
+            "offset": str(int(offset)),
+            "limit": str(int(limit)),
+        }
+        if seller_skus:
+            business["seller_skus"] = _json.dumps(
+                [str(s).strip() for s in seller_skus if str(s).strip()]
+            )
+        return self._request("/product/qc/status/get", business_params=business)
 
     def get_seller(self) -> dict[str, Any]:
         """GET /seller/get — read-only seller profile (PK live-proven).

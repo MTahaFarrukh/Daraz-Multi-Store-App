@@ -21,8 +21,10 @@ from src.category_attr_resolve import (
 )
 from src.category_validate import validate_draft_against_category
 from src.daraz_api import DarazApiError, DarazClient
+from src.daraz_error_classify import classify_daraz_create_error
 from src.db.repo import get_repo
 from src.image_migrate import DarazImageMigrationService
+from src.image_preflight import preflight_images_for_dry_run
 from src.ops import client_for_store
 from src.product_clone import build_connected_clone_draft
 from src.product_create import product_create_enabled
@@ -31,6 +33,7 @@ from src.product_create_payload import (
     build_create_product_xml,
     redact_create_response,
 )
+from src.seller_item_limit import preflight_seller_item_limit
 from src.product_fetch import ProductFetchError, fetch_connected_product
 from src.product_fidelity import (
     apply_price_overrides,
@@ -736,6 +739,9 @@ def _prepare_destination(
                 draft["product"]["brand"] = brand_resolution.get("brand")
                 attrs = draft["product"].get("attributes") or {}
                 attrs["brand"] = brand_resolution.get("brand")
+                if brand_resolution.get("brand_id") not in (None, ""):
+                    draft["product"]["brand_id"] = brand_resolution.get("brand_id")
+                    attrs["brand_id"] = brand_resolution.get("brand_id")
                 draft["product"]["attributes"] = attrs
             # Always clear source brand from destination draft product field
             # when policy forces No Brand (provenance kept on brand_resolution).
@@ -812,6 +818,39 @@ def _prepare_destination(
     else:
         errors.append("category:PrimaryCategory unresolved")
 
+    # Read-only GetSellerItemLimit preflight (shown in dry-run; blocks when at limit / failed).
+    seller_item_limit: dict[str, Any] = {"skipped": True}
+    get_limit = getattr(client, "get_seller_item_limit", None)
+    if callable(get_limit):
+        try:
+            seller_item_limit = preflight_seller_item_limit(get_limit)
+            draft["seller_item_limit"] = seller_item_limit
+            if seller_item_limit.get("blocks_create") or (
+                not seller_item_limit.get("ok")
+                and str(seller_item_limit.get("reason") or "").startswith(
+                    "seller_item_limit_failed"
+                )
+            ):
+                errors.append(
+                    f"seller_item_limit:{seller_item_limit.get('reason') or 'blocked'}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            seller_item_limit = {
+                "ok": False,
+                "blocks_create": True,
+                "reason": f"seller_item_limit_failed:{type(exc).__name__}",
+            }
+            draft["seller_item_limit"] = seller_item_limit
+            errors.append(f"seller_item_limit:{seller_item_limit['reason']}")
+    else:
+        seller_item_limit = {
+            "ok": False,
+            "skipped": True,
+            "blocks_create": False,
+            "reason": "seller_item_limit_unavailable_on_client",
+        }
+        draft["seller_item_limit"] = seller_item_limit
+
     # Skip expensive image migration when category/brand already blocks create.
     blocking_pre_image = bool(
         any(
@@ -823,6 +862,7 @@ def _prepare_destination(
                     "category:",
                     "brand:",
                     "variant_schema_conflict:",
+                    "seller_item_limit:",
                 )
             )
             for e in errors
@@ -852,6 +892,7 @@ def _prepare_destination(
             "category": category_result,
             "brand_resolution": brand_resolution,
             "used_no_brand": used_no_brand,
+            "seller_item_limit": seller_item_limit,
             "category_resolution": draft.get("category_resolution")
             or {
                 "category_id": primary,
@@ -873,6 +914,16 @@ def _prepare_destination(
     source_images = list(
         media.get("product_images") or media.get("resolved_images") or []
     )
+    # Dry-run / migrate-disabled: public HTTP image preflight only (no MigrateImage).
+    image_preflight: dict[str, Any] | None = None
+    if not allow_image_migrate:
+        image_preflight = preflight_images_for_dry_run(source_images)
+        draft.setdefault("media", {})["image_preflight"] = image_preflight
+        for issue in image_preflight.get("issues") or []:
+            errors.append(
+                f"image_preflight:{issue.get('issue')}:{issue.get('message')}"
+            )
+
     t_img = time.perf_counter()
     img_svc = DarazImageMigrationService(client)
     resolved = img_svc.resolve_many(
@@ -899,6 +950,7 @@ def _prepare_destination(
         "unique_source_urls": len(dict.fromkeys(u for u in source_images if u)),
         "allow_migrate": bool(allow_image_migrate),
         "needs_migration": needs_migration,
+        "image_preflight": image_preflight,
     }
     if needs_migration and not allow_image_migrate:
         errors.append("images:migration_required_for_non_cdn_urls")
@@ -928,6 +980,7 @@ def _prepare_destination(
         },
         "brand_resolution": brand_resolution,
         "used_no_brand": used_no_brand,
+        "seller_item_limit": seller_item_limit,
         "variant_count": len(
             [v for v in (draft.get("variants") or []) if isinstance(v, dict)]
         ),
@@ -1133,6 +1186,7 @@ def _prepare_destination(
                     "dest_total": round((time.perf_counter() - t0) * 1000, 1),
                 },
             }
+    brand_resolution_snapshot = dict(brand_resolution or {})
     if not attempt:
         attempt = repo.create_product_attempt(
             {
@@ -1144,6 +1198,7 @@ def _prepare_destination(
                 "state": "PREPARING",
                 "generated_seller_skus": generated_rows,
                 "verification_state": "UNVERIFIED",
+                "brand_resolution": brand_resolution_snapshot,
             }
         )
     else:
@@ -1152,6 +1207,7 @@ def _prepare_destination(
             workspace_id,
             attempt["id"],
             generated_seller_skus=generated_rows,
+            brand_resolution=brand_resolution_snapshot,
         )
     repo.update_product_attempt(workspace_id, attempt["id"], state="CREATING")
 
@@ -1179,16 +1235,51 @@ def _prepare_destination(
         suffix = f" ({', '.join(safe_bits)})" if safe_bits else ""
         timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
         timings["create_ms"] = timings["create_product_ms"]
-        uncertain = exc.http_status is None or exc.http_status >= 500
-        fail_state = (
-            "NEEDS_RECONCILIATION" if uncertain else "FAILED_SAFE_TO_RETRY"
+        classified = classify_daraz_create_error(
+            code=exc.code,
+            message=str(exc),
+            payload=exc.payload if isinstance(exc.payload, dict) else None,
+            http_status=exc.http_status,
         )
+        uncertain = (
+            not classified.get("definite")
+            and (exc.http_status is None or exc.http_status >= 500)
+        ) or classified.get("class") == "UNCERTAIN_TIMEOUT"
+        if classified.get("definite") and classified.get("class") != "UNCERTAIN_TIMEOUT":
+            fail_state = "FAILED_SAFE_TO_RETRY"
+        else:
+            fail_state = (
+                "NEEDS_RECONCILIATION" if uncertain else "FAILED_SAFE_TO_RETRY"
+            )
+        if classified.get("blocks_corroboration"):
+            try:
+                repo.upsert_category_brand_rejection_block(
+                    {
+                        "store_id": str(dest.get("store_id") or ""),
+                        "primary_category_id": str(primary or ""),
+                        "marketplace": str(dest.get("country") or "pk"),
+                        "detail_code": (classified.get("detail_codes") or [None])[0],
+                        "message": str(exc)[:500],
+                        "evidence": {
+                            "error_class": classified.get("class"),
+                            "attempt_id": str(attempt.get("id") or ""),
+                        },
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
         repo.update_product_attempt(
             workspace_id,
             attempt["id"],
             state=fail_state,
             last_error=f"{exc.code}:{exc}",
             retry_count=int(attempt.get("retry_count") or 0) + 1,
+            brand_resolution=brand_resolution_snapshot,
+            daraz_response={
+                "error": redact_create_response(exc.payload),
+                "classification": classified,
+                "brand_resolution": brand_resolution_snapshot,
+            },
         )
         _finish_claim(fail_state, attempt_id=str(attempt["id"]))
         if trace:
@@ -1208,6 +1299,7 @@ def _prepare_destination(
             "reason": f"CreateProduct:{exc.code}:{exc}{suffix}",
             "attempt_id": attempt["id"],
             "daraz_error": redact_create_response(exc.payload),
+            "error_classification": classified,
             "transport_diagnostics": {
                 k: diag[k]
                 for k in (
@@ -1249,8 +1341,12 @@ def _prepare_destination(
         attempt["id"],
         state="CREATED_UNVERIFIED",
         destination_item_id=str(item_id) if item_id else None,
-        daraz_response=redact_create_response(resp),
+        daraz_response={
+            **redact_create_response(resp),
+            "brand_resolution": brand_resolution_snapshot,
+        },
         generated_seller_skus=generated_rows,
+        brand_resolution=brand_resolution_snapshot,
     )
 
     t_sp = time.perf_counter()

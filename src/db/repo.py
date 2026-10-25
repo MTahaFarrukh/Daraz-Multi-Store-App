@@ -449,6 +449,10 @@ class MemoryTenancyRepo:
         self.product_copy_job_items: dict[str, dict[str, Any]] = {}
         self.product_copy_mappings: dict[str, dict[str, Any]] = {}
         self.product_copy_claims: dict[str, dict[str, Any]] = {}
+        # marketplace|category_id → verified No Brand row (tests / local memory)
+        self.verified_category_no_brand: dict[str, dict[str, Any]] = {}
+        # store_id|category_id → definite brand rejection block
+        self.category_brand_rejection_blocks: dict[str, dict[str, Any]] = {}
 
     def insert_audit_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1080,6 +1084,86 @@ class MemoryTenancyRepo:
             if not row or str(row.get("workspace_id")) != str(workspace_id):
                 return None
             row.update(deepcopy(fields)); row["updated_at"] = _now().isoformat()
+            return deepcopy(row)
+
+    @staticmethod
+    def _verified_no_brand_key(marketplace: str, primary_category_id: str) -> str:
+        return f"{(marketplace or 'pk').strip().lower()}|{str(primary_category_id).strip()}"
+
+    def get_verified_category_no_brand(
+        self, marketplace: str, primary_category_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.verified_category_no_brand.get(
+                self._verified_no_brand_key(marketplace, primary_category_id)
+            )
+            return deepcopy(row) if row else None
+
+    def upsert_verified_category_no_brand(self, payload: dict[str, Any]) -> dict[str, Any]:
+        mp = str(payload.get("marketplace") or "pk").strip().lower() or "pk"
+        cat = str(payload.get("primary_category_id") or "").strip()
+        if not cat:
+            raise ValueError("primary_category_id required")
+        brand_id = payload.get("brand_id")
+        if brand_id is None or str(brand_id).strip() == "":
+            raise ValueError("brand_id required")
+        brand_name = str(payload.get("brand_name") or payload.get("brand") or "").strip()
+        if not brand_name:
+            raise ValueError("brand_name required")
+        row = {
+            "marketplace": mp,
+            "primary_category_id": cat,
+            "brand_name": brand_name,
+            "brand_id": str(brand_id).strip(),
+            "verified_at": payload.get("verified_at") or _now().isoformat(),
+            "evidence": deepcopy(payload.get("evidence") or {}),
+        }
+        with self._lock:
+            self.verified_category_no_brand[self._verified_no_brand_key(mp, cat)] = row
+            return deepcopy(row)
+
+    def get_category_brand_rejection_block(
+        self, store_id: str, primary_category_id: str
+    ) -> dict[str, Any] | None:
+        key = f"{str(store_id).strip()}|{str(primary_category_id).strip()}"
+        with self._lock:
+            row = self.category_brand_rejection_blocks.get(key)
+            if not row:
+                return None
+            if row.get("cleared_at"):
+                return None
+            return deepcopy(row)
+
+    def upsert_category_brand_rejection_block(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        store_id = str(payload.get("store_id") or "").strip()
+        cat = str(payload.get("primary_category_id") or "").strip()
+        if not store_id or not cat:
+            raise ValueError("store_id and primary_category_id required")
+        row = {
+            "store_id": store_id,
+            "primary_category_id": cat,
+            "marketplace": str(payload.get("marketplace") or "pk").strip().lower(),
+            "detail_code": payload.get("detail_code"),
+            "message": payload.get("message"),
+            "blocked_at": payload.get("blocked_at") or _now().isoformat(),
+            "cleared_at": payload.get("cleared_at"),
+            "evidence": deepcopy(payload.get("evidence") or {}),
+        }
+        with self._lock:
+            self.category_brand_rejection_blocks[f"{store_id}|{cat}"] = row
+            return deepcopy(row)
+
+    def clear_category_brand_rejection_block(
+        self, store_id: str, primary_category_id: str
+    ) -> dict[str, Any] | None:
+        key = f"{str(store_id).strip()}|{str(primary_category_id).strip()}"
+        with self._lock:
+            row = self.category_brand_rejection_blocks.get(key)
+            if not row:
+                return None
+            row["cleared_at"] = _now().isoformat()
             return deepcopy(row)
 
     def create_workspace_with_owner(self, user_id: str, name: str) -> dict[str, Any]:
@@ -3288,6 +3372,174 @@ class PostgresTenancyRepo:
             )
             conn.commit()
         return self.get_product_attempt(workspace_id, attempt_id)
+
+    def get_verified_category_no_brand(
+        self, marketplace: str, primary_category_id: str
+    ) -> dict[str, Any] | None:
+        """Requires migration verified_category_no_brand.sql — returns None if missing."""
+        from src.db.connection import connect
+
+        mp = (marketplace or "pk").strip().lower() or "pk"
+        cat = str(primary_category_id).strip()
+        try:
+            with connect() as conn:
+                row = conn.execute(
+                    """SELECT marketplace, primary_category_id, brand_name, brand_id,
+                              verified_at, evidence
+                       FROM verified_category_no_brand
+                       WHERE marketplace=%s AND primary_category_id=%s""",
+                    (mp, cat),
+                ).fetchone()
+        except Exception:  # noqa: BLE001 — table may not exist until migration
+            return None
+        if not row:
+            return None
+        return {
+            "marketplace": row[0],
+            "primary_category_id": row[1],
+            "brand_name": row[2],
+            "brand_id": row[3],
+            "verified_at": row[4].isoformat() if hasattr(row[4], "isoformat") else row[4],
+            "evidence": row[5] if isinstance(row[5], dict) else (row[5] or {}),
+        }
+
+    def upsert_verified_category_no_brand(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        mp = str(payload.get("marketplace") or "pk").strip().lower() or "pk"
+        cat = str(payload.get("primary_category_id") or "").strip()
+        brand_id = str(payload.get("brand_id") or "").strip()
+        brand_name = str(payload.get("brand_name") or payload.get("brand") or "").strip()
+        evidence = payload.get("evidence") or {}
+        with connect() as conn:
+            conn.execute(
+                """INSERT INTO verified_category_no_brand
+                   (marketplace, primary_category_id, brand_name, brand_id, verified_at, evidence)
+                   VALUES (%s,%s,%s,%s,NOW(),%s::jsonb)
+                   ON CONFLICT (marketplace, primary_category_id) DO UPDATE SET
+                     brand_name=EXCLUDED.brand_name,
+                     brand_id=EXCLUDED.brand_id,
+                     verified_at=NOW(),
+                     evidence=EXCLUDED.evidence""",
+                (mp, cat, brand_name, brand_id, json.dumps(evidence)),
+            )
+            conn.commit()
+        out = self.get_verified_category_no_brand(mp, cat)
+        if not out:
+            raise RuntimeError(
+                "verified_category_no_brand upsert failed — apply "
+                "src/db/migrations/verified_category_no_brand.sql"
+            )
+        return out
+
+    def get_category_brand_rejection_block(
+        self, store_id: str, primary_category_id: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        try:
+            with connect() as conn:
+                row = conn.execute(
+                    """SELECT store_id, primary_category_id, marketplace, detail_code,
+                              message, blocked_at, cleared_at, evidence
+                       FROM category_brand_rejection_blocks
+                       WHERE store_id=%s AND primary_category_id=%s
+                         AND cleared_at IS NULL""",
+                    (str(store_id).strip(), str(primary_category_id).strip()),
+                ).fetchone()
+        except Exception:  # noqa: BLE001
+            return None
+        if not row:
+            return None
+        return {
+            "store_id": row[0],
+            "primary_category_id": row[1],
+            "marketplace": row[2],
+            "detail_code": row[3],
+            "message": row[4],
+            "blocked_at": row[5].isoformat() if hasattr(row[5], "isoformat") else row[5],
+            "cleared_at": row[6].isoformat() if hasattr(row[6], "isoformat") else row[6],
+            "evidence": row[7] if isinstance(row[7], dict) else (row[7] or {}),
+        }
+
+    def upsert_category_brand_rejection_block(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        from src.db.connection import connect
+
+        store_id = str(payload.get("store_id") or "").strip()
+        cat = str(payload.get("primary_category_id") or "").strip()
+        with connect() as conn:
+            conn.execute(
+                """INSERT INTO category_brand_rejection_blocks
+                   (store_id, primary_category_id, marketplace, detail_code, message,
+                    blocked_at, cleared_at, evidence)
+                   VALUES (%s,%s,%s,%s,%s,NOW(),NULL,%s::jsonb)
+                   ON CONFLICT (store_id, primary_category_id) DO UPDATE SET
+                     marketplace=EXCLUDED.marketplace,
+                     detail_code=EXCLUDED.detail_code,
+                     message=EXCLUDED.message,
+                     blocked_at=NOW(),
+                     cleared_at=NULL,
+                     evidence=EXCLUDED.evidence""",
+                (
+                    store_id,
+                    cat,
+                    str(payload.get("marketplace") or "pk").strip().lower(),
+                    payload.get("detail_code"),
+                    payload.get("message"),
+                    json.dumps(payload.get("evidence") or {}),
+                ),
+            )
+            conn.commit()
+        out = self.get_category_brand_rejection_block(store_id, cat)
+        if not out:
+            raise RuntimeError(
+                "category_brand_rejection_blocks upsert failed — apply "
+                "src/db/migrations/verified_category_no_brand.sql"
+            )
+        return out
+
+    def clear_category_brand_rejection_block(
+        self, store_id: str, primary_category_id: str
+    ) -> dict[str, Any] | None:
+        from src.db.connection import connect
+
+        try:
+            with connect() as conn:
+                conn.execute(
+                    """UPDATE category_brand_rejection_blocks
+                       SET cleared_at=NOW()
+                       WHERE store_id=%s AND primary_category_id=%s""",
+                    (str(store_id).strip(), str(primary_category_id).strip()),
+                )
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            return None
+        # Return cleared row snapshot (may be None if already absent)
+        try:
+            with connect() as conn:
+                row = conn.execute(
+                    """SELECT store_id, primary_category_id, marketplace, detail_code,
+                              message, blocked_at, cleared_at, evidence
+                       FROM category_brand_rejection_blocks
+                       WHERE store_id=%s AND primary_category_id=%s""",
+                    (str(store_id).strip(), str(primary_category_id).strip()),
+                ).fetchone()
+        except Exception:  # noqa: BLE001
+            return None
+        if not row:
+            return None
+        return {
+            "store_id": row[0],
+            "primary_category_id": row[1],
+            "marketplace": row[2],
+            "detail_code": row[3],
+            "message": row[4],
+            "blocked_at": row[5].isoformat() if hasattr(row[5], "isoformat") else row[5],
+            "cleared_at": row[6].isoformat() if hasattr(row[6], "isoformat") else row[6],
+            "evidence": row[7] if isinstance(row[7], dict) else (row[7] or {}),
+        }
 
     """Postgres-backed tenancy repository."""
 

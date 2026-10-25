@@ -12,6 +12,16 @@ export type NoBrandLookup = {
   name_filter_ignored_for?: string | null;
   matched_query?: string | null;
   cache_hit?: boolean | null;
+  scan_from_start_row?: number | null;
+  scanned_rows?: number | null;
+  next_start_row?: number | null;
+  verified_at?: string | null;
+};
+
+export type NoBrandCandidate = {
+  brand?: string | null;
+  brand_id?: number | string | null;
+  matched_start_row?: number | null;
 };
 
 export type CatalogBrandCount = { brand: string; count: number };
@@ -43,6 +53,16 @@ export type NoBrandCheckResult = {
   store_id?: string | null;
   lookup?: NoBrandLookup | null;
   catalog_evidence?: CatalogBrandEvidence | null;
+  catalog_consistency_note?: string | null;
+  deep?: boolean | null;
+  complete?: boolean | null;
+  next_start_row?: number | null;
+  scanned_rows?: number | null;
+  total_record?: number | null;
+  candidates?: NoBrandCandidate[] | null;
+  persisted?: boolean | null;
+  seller_item_limit?: Record<string, unknown> | null;
+  image_preflight?: Record<string, unknown> | null;
   /** Client-side message (e.g. 403); never includes tokens. */
   error?: string | null;
   http_status?: number | null;
@@ -124,9 +144,39 @@ export function formatNoBrandCheckLine(result: NoBrandCheckResult): string {
       ? `matched_start_row=${lookup.matched_start_row}`
       : null,
     lookup.total_record != null ? `total_record=${lookup.total_record}` : null,
+    result.deep ? "deep=true" : null,
+    result.complete != null ? `complete=${result.complete}` : null,
+    result.scanned_rows != null ? `scanned_rows=${result.scanned_rows}` : null,
+    result.next_start_row != null ? `next_start_row=${result.next_start_row}` : null,
+    result.persisted ? "persisted=true" : null,
+    result.candidates?.length
+      ? `candidates=${result.candidates.length}`
+      : null,
     result.error ? `error=${result.error}` : null,
   ].filter(Boolean);
   return bits.join(" · ");
+}
+
+export function deepScanProgressLabel(result: NoBrandCheckResult | null | undefined): string {
+  if (!result) return "";
+  const total = result.total_record ?? result.lookup?.total_record;
+  const scanned = result.scanned_rows ?? result.lookup?.scanned_rows;
+  const next = result.next_start_row ?? result.lookup?.next_start_row;
+  const bits = [
+    scanned != null ? `scanned_rows=${scanned}` : null,
+    total != null ? `total_record=${total}` : null,
+    next != null ? `next_start_row=${next}` : null,
+    result.complete != null ? `complete=${result.complete}` : null,
+    result.lookup?.stop_reason ? `stop=${result.lookup.stop_reason}` : null,
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+export function canContinueDeepScan(result: NoBrandCheckResult | null | undefined): boolean {
+  if (!result || result.status === "NO_BRAND") return false;
+  if (result.complete === true) return false;
+  if (result.lookup?.stop_reason === "rate_limited") return false;
+  return result.next_start_row != null || result.lookup?.next_start_row != null;
 }
 
 export function formatCatalogEvidenceLines(
@@ -189,6 +239,11 @@ export function mapApiNoBrandResult(
       (lookupRaw.name_filter_ignored_for as string | undefined) ?? null,
     matched_query: (lookupRaw.matched_query as string | undefined) ?? null,
     cache_hit: (lookupRaw.cache_hit as boolean | undefined) ?? null,
+    scan_from_start_row:
+      (lookupRaw.scan_from_start_row as number | undefined) ?? null,
+    scanned_rows: (lookupRaw.scanned_rows as number | undefined) ?? null,
+    next_start_row: (lookupRaw.next_start_row as number | undefined) ?? null,
+    verified_at: (lookupRaw.verified_at as string | undefined) ?? null,
   };
   return {
     status: String(res.status || "UNVERIFIED"),
@@ -202,6 +257,27 @@ export function mapApiNoBrandResult(
     lookup,
     catalog_evidence:
       (res.catalog_evidence as CatalogBrandEvidence | null | undefined) ?? null,
+    catalog_consistency_note:
+      (res.catalog_consistency_note as string | null | undefined) ?? null,
+    deep: (res.deep as boolean | null | undefined) ?? null,
+    complete:
+      (res.complete as boolean | null | undefined) ??
+      (lookup.complete as boolean | null | undefined) ??
+      null,
+    next_start_row:
+      (res.next_start_row as number | null | undefined) ??
+      lookup.next_start_row ??
+      null,
+    scanned_rows:
+      (res.scanned_rows as number | null | undefined) ?? lookup.scanned_rows ?? null,
+    total_record:
+      (res.total_record as number | null | undefined) ?? lookup.total_record ?? null,
+    candidates: (res.candidates as NoBrandCandidate[] | null | undefined) ?? null,
+    persisted: (res.persisted as boolean | null | undefined) ?? null,
+    seller_item_limit:
+      (res.seller_item_limit as Record<string, unknown> | null | undefined) ?? null,
+    image_preflight:
+      (res.image_preflight as Record<string, unknown> | null | undefined) ?? null,
   };
 }
 

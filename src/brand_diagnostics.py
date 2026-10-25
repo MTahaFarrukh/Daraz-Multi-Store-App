@@ -7,6 +7,7 @@ from typing import Any
 
 from src.brand_resolve import (
     clear_no_brand_cache_for_tests,
+    deep_scan_no_brand,
     is_no_brand_label,
     resolve_destination_no_brand,
 )
@@ -31,6 +32,10 @@ def public_lookup_fields(
         "matched_start_row",
         "name_filter_ignored_for",
         "matched_query",
+        "scan_from_start_row",
+        "scanned_rows",
+        "next_start_row",
+        "verified_at",
     ):
         if key in src and src[key] is not None:
             out[key] = src[key]
@@ -39,6 +44,41 @@ def public_lookup_fields(
     elif "cache_hit" in src:
         out["cache_hit"] = src["cache_hit"]
     return out
+
+
+def catalog_api_consistency_note(
+    catalog_evidence: dict[str, Any] | None,
+    *,
+    api_brand: str | None,
+    api_brand_id: Any = None,
+) -> str | None:
+    """Informational note when local catalog brand string disagrees with API row."""
+    if not catalog_evidence or catalog_evidence.get("status") != "OK":
+        return None
+    dest = catalog_evidence.get("destination_store") or {}
+    top = list(dest.get("top_brands_in_category") or [])
+    if not top:
+        return None
+    top_brand = str((top[0] or {}).get("brand") or "").strip()
+    if not top_brand or top_brand == "(empty)":
+        return None
+    if api_brand and is_no_brand_label(api_brand) and is_no_brand_label(top_brand):
+        return None
+    if api_brand and top_brand and not is_no_brand_label(top_brand) and is_no_brand_label(
+        api_brand
+    ):
+        return (
+            f"Catalog top brand in category is {top_brand!r} while API No Brand "
+            f"row is {api_brand!r}"
+            + (f" (brand_id={api_brand_id})" if api_brand_id is not None else "")
+            + " — informational only"
+        )
+    if api_brand and top_brand and top_brand != api_brand:
+        return (
+            f"Catalog brand string {top_brand!r} differs from API brand "
+            f"{api_brand!r} — informational only"
+        )
+    return None
 
 
 def _category_matches(product: dict[str, Any], primary_category_id: str) -> bool:
@@ -172,13 +212,18 @@ def diagnose_category_no_brand(
     store_ref: str,
     primary_category_id: int | str,
     clear_cache: bool = False,
+    deep: bool = False,
+    scan_from_start_row: int = 0,
+    prior_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Inspect category brands for a verified No Brand option (read-only).
 
     Calls only ``/category/brands/query`` via the store client for API lookup.
+    When ``deep=true``, runs a resumable linear deep scan (≤60 pages/request).
     Catalog evidence is local synced data only. Does not call CreateProduct,
     UpdatePrice, or image migration. Never invents brand IDs. Create stays
-    blocked unless status is NO_BRAND from the brands API row.
+    blocked unless status is NO_BRAND from the brands API row (or persisted
+    verified NO_BRAND for the marketplace/category).
     """
     if clear_cache:
         clear_no_brand_cache_for_tests()
@@ -207,12 +252,81 @@ def diagnose_category_no_brand(
             "primary_category_id": cat,
         }
 
+    marketplace = str(store.get("country") or "pk").strip().lower() or "pk"
+    store_slug = str(store.get("store_id") or "")
+
+    # Definite brand rejection blocks corroboration / scan results until cleared.
+    try:
+        block = repo.get_category_brand_rejection_block(store_slug, cat)
+    except Exception:  # noqa: BLE001
+        block = None
+    if block:
+        return {
+            "status": "UNVERIFIED",
+            "reason": "brand_rejection_block",
+            "no_brand_found": False,
+            "brand": None,
+            "brand_id": None,
+            "primary_category_id": cat,
+            "store_id": store_slug,
+            "rejection_block": {
+                "detail_code": block.get("detail_code"),
+                "message": block.get("message"),
+                "blocked_at": block.get("blocked_at"),
+            },
+            "message": (
+                "Definite brand rejection recorded for this store/category — "
+                "human clear required before scan results are trusted"
+            ),
+        }
+
     catalog_evidence = build_catalog_brand_evidence(
         workspace_id,
         store_uuid=str(store.get("id") or ""),
         primary_category_id=cat,
         repo=repo,
     )
+
+    # Persisted verified NO_BRAND short-circuits scanning (create-path + diagnostic).
+    try:
+        persisted = repo.get_verified_category_no_brand(marketplace, cat)
+    except Exception:  # noqa: BLE001
+        persisted = None
+    if (
+        persisted
+        and is_no_brand_label(persisted.get("brand_name"))
+        and persisted.get("brand_id") not in (None, "")
+        and not deep
+    ):
+        brand = persisted.get("brand_name")
+        brand_id = persisted.get("brand_id")
+        consistency = catalog_api_consistency_note(
+            catalog_evidence, api_brand=brand, api_brand_id=brand_id
+        )
+        return {
+            "status": "NO_BRAND",
+            "reason": "persisted_verified_no_brand",
+            "no_brand_found": True,
+            "brand": brand,
+            "brand_id": brand_id,
+            "used_no_brand": True,
+            "primary_category_id": cat,
+            "store_id": store_slug,
+            "lookup": {
+                "strategy": "persisted_verified",
+                "pages": 0,
+                "complete": True,
+                "verified_at": persisted.get("verified_at"),
+                "matched_start_row": (persisted.get("evidence") or {}).get(
+                    "matched_start_row"
+                ),
+                "total_record": (persisted.get("evidence") or {}).get("total_record"),
+            },
+            "lookup_calls": 0,
+            "persisted": True,
+            "catalog_evidence": catalog_evidence,
+            "catalog_consistency_note": consistency,
+        }
 
     try:
         from src.ops import client_for_store
@@ -259,11 +373,20 @@ def diagnose_category_no_brand(
         return client.query_category_brands(**kwargs)
 
     try:
-        resolution = resolve_destination_no_brand(
-            primary_category_id=cat,
-            query_brands=query_brands,
-            marketplace=str(store.get("country") or "pk"),
-        )
+        if deep:
+            resolution = deep_scan_no_brand(
+                primary_category_id=cat,
+                query_brands=query_brands,
+                marketplace=marketplace,
+                scan_from_start_row=int(scan_from_start_row or 0),
+                prior_candidates=prior_candidates,
+            )
+        else:
+            resolution = resolve_destination_no_brand(
+                primary_category_id=cat,
+                query_brands=query_brands,
+                marketplace=marketplace,
+            )
     except DarazApiError as exc:
         return {
             "status": "UNVERIFIED",
@@ -301,34 +424,86 @@ def diagnose_category_no_brand(
         and bool(brand)
     )
 
-    base = {
+    consistency = catalog_api_consistency_note(
+        catalog_evidence, api_brand=brand if found else None, api_brand_id=brand_id
+    )
+
+    base: dict[str, Any] = {
         "primary_category_id": cat,
         "store_id": store.get("store_id"),
         "lookup": lookup,
         "lookup_calls": len(calls),
         "timings_ms": resolution.get("timings_ms"),
         "catalog_evidence": catalog_evidence,
+        "catalog_consistency_note": consistency,
+        "deep": bool(deep),
+        "candidates": resolution.get("candidates") or [],
+        "next_start_row": lookup.get("next_start_row"),
+        "scanned_rows": lookup.get("scanned_rows"),
+        "complete": lookup.get("complete"),
+        "total_record": lookup.get("total_record"),
     }
 
     if found:
+        # Persist only when Daraz returned a real brand_id (never invent).
+        if brand_id not in (None, ""):
+            evidence = {
+                "matched_start_row": lookup.get("matched_start_row"),
+                "total_record": lookup.get("total_record"),
+                "strategy": lookup.get("strategy"),
+                "deep": bool(deep),
+            }
+            try:
+                repo.upsert_verified_category_no_brand(
+                    {
+                        "marketplace": marketplace,
+                        "primary_category_id": cat,
+                        "brand_name": brand,
+                        "brand_id": brand_id,
+                        "evidence": evidence,
+                    }
+                )
+                clear_no_brand_cache_for_tests()
+                base["persisted"] = True
+            except Exception as exc:  # noqa: BLE001
+                base["persist_error"] = type(exc).__name__
         return {
             **base,
             "status": "NO_BRAND",
-            "reason": "confirmed_no_brand_row",
+            "reason": (
+                "confirmed_no_brand_row_deep"
+                if deep
+                else "confirmed_no_brand_row"
+            ),
             "no_brand_found": True,
             "brand": brand,
             "brand_id": brand_id,  # only if Daraz returned it — never invented
             "used_no_brand": True,
         }
 
-    # Full catalog scan completed without a No Brand row → unavailable.
-    # Status logic unchanged: complete → UNRESOLVED; otherwise UNVERIFIED.
+    # Deep scan returns its own UNRESOLVED/UNVERIFIED. Shallow create-path
+    # resolver always yields UNRESOLVED when missing — map incomplete → UNVERIFIED.
     # Catalog evidence is informational only — never unlocks create.
+    reason = str(
+        resolution.get("reason")
+        or lookup.get("stop_reason")
+        or "no_brand_scan_incomplete"
+    )
+    if deep:
+        return {
+            **base,
+            "status": str(resolution.get("status") or "UNVERIFIED"),
+            "reason": reason,
+            "no_brand_found": False,
+            "brand": None,
+            "brand_id": None,
+        }
+
     if lookup.get("complete") is True:
         return {
             **base,
             "status": "UNRESOLVED",
-            "reason": str(resolution.get("reason") or "no_brand_unavailable"),
+            "reason": reason,
             "no_brand_found": False,
             "brand": None,
             "brand_id": None,
@@ -337,11 +512,7 @@ def diagnose_category_no_brand(
     return {
         **base,
         "status": "UNVERIFIED",
-        "reason": str(
-            lookup.get("stop_reason")
-            or resolution.get("reason")
-            or "no_brand_scan_incomplete"
-        ),
+        "reason": reason,
         "no_brand_found": False,
         "brand": None,
         "brand_id": None,

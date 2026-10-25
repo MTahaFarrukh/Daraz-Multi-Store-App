@@ -40,6 +40,11 @@ def build_create_product_xml(draft: dict[str, Any]) -> str:
     attrs["name_en"] = product.get("title_en") or product.get("title") or attrs.get("name_en") or ""
     if product.get("brand"):
         attrs["brand"] = product.get("brand")
+    # Lazada CreateProduct: brand deprecated; brand_id mandatory from GetBrandByPages.
+    # We send brand_id when a verified id exists. brand name is retained for
+    # compatibility with existing fixtures/docs that still accept both.
+    if product.get("brand_id") is not None and str(product.get("brand_id")).strip() != "":
+        attrs["brand_id"] = product.get("brand_id")
     if product.get("warranty_type"):
         attrs["warranty_type"] = product.get("warranty_type")
     if product.get("package_content"):
@@ -182,6 +187,7 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
             "name": product.get("title"),
             "name_en": product.get("title_en") or product.get("title"),
             "brand": product.get("brand"),
+            "brand_id": product.get("brand_id"),
             "brand_resolution": brand_res.get("status"),
             "warranty_type": product.get("warranty_type"),
             "package_content": product.get("package_content"),
@@ -191,6 +197,8 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
         "image_count": len(images),
         "Images": [u for u in images[:8]],
         "image_strategy": media.get("image_strategy"),
+        "image_preflight": media.get("image_preflight"),
+        "seller_item_limit": draft.get("seller_item_limit"),
         "variant_count": len(variants),
         "Skus": skus,
         "validation_status": {

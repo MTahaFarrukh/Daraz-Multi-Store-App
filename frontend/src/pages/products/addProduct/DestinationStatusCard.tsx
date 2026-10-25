@@ -1,5 +1,7 @@
 import { StatusBadge } from "@/components/ui/Primitives";
 import {
+  canContinueDeepScan,
+  deepScanProgressLabel,
   formatCatalogEvidenceLines,
   formatNoBrandCheckLine,
   noBrandCheckTone,
@@ -28,6 +30,10 @@ export function DestinationStatusCard({
   noBrandDisabled,
   noBrandDisabledReason,
   onCheckNoBrand,
+  onDeepScanNoBrand,
+  onCancelDeepScan,
+  deepScanActive,
+  deepScanPaused,
 }: {
   dest: DestinationAttemptLike;
   processing?: boolean;
@@ -42,6 +48,10 @@ export function DestinationStatusCard({
   noBrandDisabled?: boolean;
   noBrandDisabledReason?: string;
   onCheckNoBrand?: () => void;
+  onDeepScanNoBrand?: () => void;
+  onCancelDeepScan?: () => void;
+  deepScanActive?: boolean;
+  deepScanPaused?: boolean;
 }) {
   const ui = destinationUiStatus(dest, { processing, checking });
   const tone = destinationStatusTone(ui);
@@ -91,19 +101,54 @@ export function DestinationStatusCard({
 
       {onCheckNoBrand ? (
         <div className="stack" style={{ gap: "0.35rem", marginTop: "0.65rem" }}>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            disabled={Boolean(noBrandDisabled) || Boolean(noBrandChecking) || actionsDisabled}
-            title={
-              noBrandDisabled
-                ? noBrandDisabledReason || "primary_category_id required from preview"
-                : "Read-only GET — does not create or migrate"
-            }
-            onClick={onCheckNoBrand}
-          >
-            {noBrandChecking ? "Checking No Brand…" : "Check No Brand (read-only)"}
-          </button>
+          <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={Boolean(noBrandDisabled) || Boolean(noBrandChecking) || actionsDisabled}
+              title={
+                noBrandDisabled
+                  ? noBrandDisabledReason || "primary_category_id required from preview"
+                  : "Read-only GET — does not create or migrate"
+              }
+              onClick={onCheckNoBrand}
+            >
+              {noBrandChecking && !deepScanActive
+                ? "Checking No Brand…"
+                : "Check No Brand (read-only)"}
+            </button>
+            {onDeepScanNoBrand ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={
+                  Boolean(noBrandDisabled) ||
+                  Boolean(noBrandChecking) ||
+                  actionsDisabled ||
+                  noBrand?.status === "NO_BRAND"
+                }
+                title="Resumable read-only deep scan — never CreateProduct"
+                onClick={onDeepScanNoBrand}
+              >
+                {deepScanActive
+                  ? deepScanPaused
+                    ? "Resume deep scan"
+                    : "Deep scanning…"
+                  : canContinueDeepScan(noBrand)
+                    ? "Continue deep scan"
+                    : "Deep scan No Brand"}
+              </button>
+            ) : null}
+            {deepScanActive && onCancelDeepScan ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={onCancelDeepScan}
+              >
+                Pause / cancel
+              </button>
+            ) : null}
+          </div>
           {noBrandDisabled && noBrandDisabledReason ? (
             <p className="muted-line" style={{ margin: 0 }}>
               {noBrandDisabledReason}
@@ -125,6 +170,31 @@ export function DestinationStatusCard({
               <p className="muted-line" style={{ margin: "0.25rem 0 0" }}>
                 {formatNoBrandCheckLine(noBrand)}
               </p>
+              {deepScanProgressLabel(noBrand) ? (
+                <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>
+                  Deep scan: {deepScanProgressLabel(noBrand)}
+                </p>
+              ) : null}
+              {noBrand.brand_id != null && noBrand.brand_id !== "" ? (
+                <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>
+                  brand_id={String(noBrand.brand_id)}
+                </p>
+              ) : null}
+              {noBrand.catalog_consistency_note ? (
+                <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>
+                  {noBrand.catalog_consistency_note}
+                </p>
+              ) : null}
+              {noBrand.seller_item_limit ? (
+                <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>
+                  Item limit: {JSON.stringify(noBrand.seller_item_limit)}
+                </p>
+              ) : null}
+              {noBrand.image_preflight ? (
+                <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>
+                  Image preflight: {JSON.stringify(noBrand.image_preflight)}
+                </p>
+              ) : null}
               {noBrand.catalog_evidence ? (
                 <div style={{ marginTop: "0.45rem" }}>
                   <p className="add-dest-card__reason-label">Local catalog evidence</p>

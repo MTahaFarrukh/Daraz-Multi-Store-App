@@ -18,6 +18,9 @@ export type DestinationAttemptLike = {
     store_id?: string | null;
     display_name?: string | null;
   } | null;
+  seller_item_limit?: Record<string, unknown> | null;
+  draft_preview?: Record<string, unknown> | null;
+  brand_resolution?: Record<string, unknown> | null;
 };
 
 export type StageHistoryEntry = {
@@ -373,6 +376,17 @@ export function formatDiagnosticsCopy(input: {
       `- ${d.store?.display_name || d.store?.store_id || "Store"} | ${destinationProgressLabel(d)} | ${reason}` +
         (d.attempt_id ? ` | attempt ${d.attempt_id}` : "")
     );
+    if (d.seller_item_limit) {
+      lines.push(`  seller_item_limit=${JSON.stringify(d.seller_item_limit)}`);
+    }
+    const preview = d.draft_preview as Record<string, unknown> | null | undefined;
+    const imgPf = preview?.image_preflight || (preview as { image_strategy?: { image_preflight?: unknown } } | undefined)?.image_strategy?.image_preflight;
+    if (imgPf) {
+      lines.push(`  image_preflight=${JSON.stringify(imgPf)}`);
+    }
+    if (d.brand_resolution) {
+      lines.push(`  brand_resolution=${JSON.stringify(d.brand_resolution)}`);
+    }
   }
   const brandEntries = Object.entries(input.noBrandByStore || {}).filter(([, v]) => Boolean(v));
   if (brandEntries.length) {
@@ -381,8 +395,24 @@ export function formatDiagnosticsCopy(input: {
     for (const [storeId, result] of brandEntries) {
       if (!result) continue;
       lines.push(`- ${storeId} | ${formatNoBrandCheckLine(result)}`);
+      if (result.catalog_consistency_note) {
+        lines.push(`  consistency: ${result.catalog_consistency_note}`);
+      }
       for (const evidenceLine of formatCatalogEvidenceLines(result.catalog_evidence)) {
         lines.push(`  ${evidenceLine}`);
+      }
+      if (result.candidates?.length) {
+        for (const c of result.candidates.slice(0, 8)) {
+          lines.push(
+            `  candidate brand=${c.brand ?? "?"} brand_id=${c.brand_id ?? "?"} row=${c.matched_start_row ?? "?"}`
+          );
+        }
+      }
+      if (result.seller_item_limit) {
+        lines.push(`  seller_item_limit=${JSON.stringify(result.seller_item_limit)}`);
+      }
+      if (result.image_preflight) {
+        lines.push(`  image_preflight=${JSON.stringify(result.image_preflight)}`);
       }
     }
   }

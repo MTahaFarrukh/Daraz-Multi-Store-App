@@ -126,6 +126,14 @@ export type CategoryNoBrandDiagnostic = {
   store_id?: string | null;
   lookup_calls?: number | null;
   used_no_brand?: boolean;
+  deep?: boolean | null;
+  complete?: boolean | null;
+  next_start_row?: number | null;
+  scanned_rows?: number | null;
+  total_record?: number | null;
+  persisted?: boolean | null;
+  candidates?: Array<Record<string, unknown>> | null;
+  catalog_consistency_note?: string | null;
   lookup?: {
     strategy?: string | null;
     pages?: number | null;
@@ -136,6 +144,9 @@ export type CategoryNoBrandDiagnostic = {
     ordering?: string | null;
     matched_start_row?: number | null;
     cache_hit?: boolean | null;
+    scan_from_start_row?: number | null;
+    scanned_rows?: number | null;
+    next_start_row?: number | null;
     [key: string]: unknown;
   } | null;
   catalog_evidence?: {
@@ -561,6 +572,9 @@ export type AddProductDestinationResult = {
   existing_daraz_item_id?: string | null;
   draft_preview?: Record<string, unknown> | null;
   timings_ms?: Record<string, number | string>;
+  seller_item_limit?: Record<string, unknown> | null;
+  brand_resolution?: Record<string, unknown> | null;
+  error_classification?: Record<string, unknown> | null;
 };
 
 export type AddProductResponse = {

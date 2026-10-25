@@ -716,6 +716,8 @@ def api_store_health_check(
 def api_category_no_brand_diagnostic(
     store_id: str,
     primary_category_id: str = Query(..., min_length=1),
+    deep: bool = Query(False),
+    scan_from_start_row: int = Query(0, ge=0),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
     """Read-only No Brand lookup for a category. Never CreateProduct or migrate_image.
@@ -723,6 +725,10 @@ def api_category_no_brand_diagnostic(
     Gated with ``product.create`` (existing capability) — create-prep diagnostic;
     viewers lack it. ``store.manage`` would also deny viewers but also blocks
     manager/staff who can create products without store-admin rights.
+
+    ``deep=true`` enables a resumable linear scan (≤60 pages/request) with
+    ``scan_from_start_row`` / ``next_start_row``. Default shallow path and
+    create-path 48-call budget are unchanged.
     """
     enforce_capability(ctx.role, "product.create")
     from src.brand_diagnostics import diagnose_category_no_brand
@@ -731,6 +737,8 @@ def api_category_no_brand_diagnostic(
         ctx.workspace_id,
         store_ref=store_id,
         primary_category_id=primary_category_id,
+        deep=bool(deep),
+        scan_from_start_row=int(scan_from_start_row or 0),
     )
 
 

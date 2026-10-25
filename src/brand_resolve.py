@@ -31,6 +31,10 @@ _MAX_LOOKUP_CALLS = 48
 _SCAN_PAGE_SIZE = 200  # Lazada/Daraz docs allow up to 200
 _NAME_FILTER_VARIANTS = ("No Brand", "No brand", "NO BRAND", "no brand")
 
+# Diagnostic-only deep scan (never used by create-path resolve).
+_DEEP_SCAN_MAX_PAGES = 60
+_DEEP_SCAN_DELAY_S = 0.05
+
 
 def clear_no_brand_cache_for_tests() -> None:
     with _NO_BRAND_LOCK:
@@ -191,6 +195,249 @@ def _query(
     return query_brands(**kwargs)
 
 
+def is_rate_limited_error(exc: BaseException) -> bool:
+    """True when Daraz/Lazada signals throttle — never blind-retry."""
+    code = str(getattr(exc, "code", "") or "")
+    msg = str(exc).lower()
+    http = getattr(exc, "http_status", None)
+    if http == 429:
+        return True
+    code_l = code.lower()
+    if "apicalllimit" in code_l or "call.limit" in code_l or "ratelimit" in code_l:
+        return True
+    if any(
+        tok in msg
+        for tok in (
+            "rate limit",
+            "too many requests",
+            "api call limit",
+            "qps",
+            "throttl",
+        )
+    ):
+        return True
+    return False
+
+
+def _persisted_no_brand_resolution(
+    *,
+    marketplace: str,
+    primary_category_id: int | str | None,
+) -> dict[str, Any] | None:
+    """Read verified NO_BRAND from local persistence (no Daraz call)."""
+    if primary_category_id is None or str(primary_category_id).strip() == "":
+        return None
+    try:
+        from src.db.repo import get_repo
+
+        row = get_repo().get_verified_category_no_brand(
+            marketplace, str(primary_category_id).strip()
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not row:
+        return None
+    brand = row.get("brand_name") or row.get("brand")
+    brand_id = row.get("brand_id")
+    if not is_no_brand_label(brand) or brand_id in (None, ""):
+        return None
+    return {
+        "status": "NO_BRAND",
+        "brand": brand,
+        "brand_id": brand_id,
+        "message": "Verified No Brand from persisted marketplace/category cache",
+        "used_no_brand": True,
+        "cache_hit": False,
+        "persisted": True,
+        "lookup": {
+            "strategy": "persisted_verified",
+            "pages": 0,
+            "complete": True,
+            "matched_start_row": (row.get("evidence") or {}).get("matched_start_row"),
+            "total_record": (row.get("evidence") or {}).get("total_record"),
+            "verified_at": row.get("verified_at"),
+        },
+    }
+
+
+def deep_scan_no_brand(
+    *,
+    primary_category_id: int | str | None,
+    query_brands: BrandLookup,
+    marketplace: str | None = None,
+    page_size: int = _SCAN_PAGE_SIZE,
+    scan_from_start_row: int = 0,
+    max_pages: int = _DEEP_SCAN_MAX_PAGES,
+    delay_s: float = _DEEP_SCAN_DELAY_S,
+    prior_candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Resumable linear brand catalog scan for diagnostics only.
+
+    Does not change create-path ``_MAX_LOOKUP_CALLS`` budget. Ordering is not
+    trusted; ``name`` filter is not used. Stops on rate limit without retry.
+    """
+    t0 = time.perf_counter()
+    mp = (marketplace or "pk").strip().lower() or "pk"
+    page_size = max(20, min(int(page_size or _SCAN_PAGE_SIZE), 200))
+    max_pages = max(1, min(int(max_pages or _DEEP_SCAN_MAX_PAGES), 60))
+    start = max(0, int(scan_from_start_row or 0))
+    delay_s = max(0.0, float(delay_s or 0.0))
+
+    # Distinct brand_id → candidate
+    candidates: dict[str, dict[str, Any]] = {}
+    for c in prior_candidates or []:
+        if not isinstance(c, dict):
+            continue
+        bid = c.get("brand_id")
+        if bid is None or str(bid).strip() == "":
+            continue
+        candidates[str(bid)] = {
+            "brand": c.get("brand") or c.get("name"),
+            "brand_id": bid,
+            "matched_start_row": c.get("matched_start_row"),
+        }
+
+    diagnostics: dict[str, Any] = {
+        "strategy": "deep_linear_scan",
+        "pages": 0,
+        "complete": False,
+        "name_filter_effective": False,
+        "scan_from_start_row": start,
+        "scanned_rows": 0,
+        "next_start_row": start,
+        "total_record": None,
+        "marketplace": mp,
+    }
+
+    try:
+        while diagnostics["pages"] < max_pages:
+            if diagnostics["pages"] > 0 and delay_s > 0:
+                time.sleep(delay_s)
+            try:
+                payload = _query(
+                    query_brands,
+                    primary_category_id=primary_category_id,
+                    start_row=start,
+                    page_size=page_size,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if is_rate_limited_error(exc):
+                    diagnostics["stop_reason"] = "rate_limited"
+                    diagnostics["error_type"] = type(exc).__name__
+                    break
+                diagnostics["stop_reason"] = "lookup_error"
+                diagnostics["error_type"] = type(exc).__name__
+                break
+
+            diagnostics["pages"] += 1
+            rows = _module_rows(payload)
+            total = _total_record(payload)
+            if total is not None:
+                diagnostics["total_record"] = total
+
+            for row in rows:
+                if not any(is_no_brand_label(label) for label in _row_labels(row)):
+                    continue
+                name = _row_primary_name(row) or "No Brand"
+                brand_id = _row_brand_id(row)
+                if brand_id is None or str(brand_id).strip() == "":
+                    continue
+                key = str(brand_id)
+                if key not in candidates:
+                    candidates[key] = {
+                        "brand": name,
+                        "brand_id": brand_id,
+                        "matched_start_row": start,
+                    }
+
+            diagnostics["scanned_rows"] = int(diagnostics["scanned_rows"]) + len(rows)
+            next_row = start + (len(rows) if rows else page_size)
+
+            if total is not None and next_row >= total:
+                diagnostics["complete"] = True
+                diagnostics["stop_reason"] = "reported_total"
+                diagnostics["next_start_row"] = total
+                break
+            if not rows or len(rows) < page_size:
+                diagnostics["complete"] = True
+                diagnostics["stop_reason"] = "empty_or_short_page"
+                diagnostics["next_start_row"] = next_row
+                break
+
+            start = next_row
+            diagnostics["next_start_row"] = start
+        else:
+            if not diagnostics.get("stop_reason"):
+                diagnostics["stop_reason"] = "page_budget"
+                diagnostics["next_start_row"] = start
+
+    except Exception as exc:  # noqa: BLE001
+        if is_rate_limited_error(exc):
+            diagnostics["stop_reason"] = "rate_limited"
+        else:
+            diagnostics["stop_reason"] = "lookup_error"
+        diagnostics["error_type"] = type(exc).__name__
+
+    cand_list = list(candidates.values())
+    timings = {
+        "brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)
+    }
+
+    if len(cand_list) == 1:
+        only = cand_list[0]
+        diagnostics["matched_start_row"] = only.get("matched_start_row")
+        return {
+            "status": "NO_BRAND",
+            "brand": only.get("brand"),
+            "brand_id": only.get("brand_id"),
+            "message": "Confirmed official No Brand row (deep scan)",
+            "used_no_brand": True,
+            "cache_hit": False,
+            "candidates": cand_list,
+            "lookup": diagnostics,
+            "timings_ms": timings,
+        }
+
+    if len(cand_list) > 1:
+        diagnostics["stop_reason"] = diagnostics.get("stop_reason") or "ambiguous_no_brand"
+        return {
+            "status": "UNRESOLVED",
+            "brand": None,
+            "brand_id": None,
+            "message": "Multiple distinct No Brand brand_id values found",
+            "used_no_brand": False,
+            "reason": "ambiguous_no_brand",
+            "candidates": cand_list,
+            "lookup": diagnostics,
+            "timings_ms": timings,
+        }
+
+    if diagnostics.get("complete"):
+        return {
+            "status": "UNRESOLVED",
+            "brand": None,
+            "brand_id": None,
+            "message": "Complete deep scan found no No Brand row",
+            "used_no_brand": False,
+            "reason": "not_found_complete_scan",
+            "candidates": [],
+            "lookup": diagnostics,
+            "timings_ms": timings,
+        }
+
+    return {
+        "status": "UNVERIFIED",
+        "brand": None,
+        "brand_id": None,
+        "message": "Deep scan incomplete — No Brand not confirmed",
+        "used_no_brand": False,
+        "reason": str(diagnostics.get("stop_reason") or "deep_scan_incomplete"),
+        "candidates": [],
+        "lookup": diagnostics,
+        "timings_ms": timings,
+    }
+
+
 def resolve_destination_no_brand(
     *,
     primary_category_id: int | str | None,
@@ -209,6 +456,17 @@ def resolve_destination_no_brand(
                 out = dict(cached)
                 out["cache_hit"] = True
                 return out
+
+    persisted = _persisted_no_brand_resolution(
+        marketplace=mp, primary_category_id=primary_category_id
+    )
+    if persisted:
+        with _NO_BRAND_LOCK:
+            _NO_BRAND_CACHE[cache_key] = (
+                now,
+                {k: v for k, v in persisted.items() if k != "timings_ms"},
+            )
+        return persisted
 
     t0 = time.perf_counter()
     page_size = max(20, min(int(page_size or _SCAN_PAGE_SIZE), 200))

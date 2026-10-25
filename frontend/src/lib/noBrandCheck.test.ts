@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   brandCheckBlocksCreate,
   canCheckNoBrand,
+  canContinueDeepScan,
   extractPreviewPrimaryCategoryId,
   formatCatalogEvidenceLines,
   formatNoBrandCheckLine,
@@ -52,11 +53,21 @@ describe("noBrandCheck helpers", () => {
       status: "UNVERIFIED",
       reason: "page_limit",
       lookup: { pages: 48, stop_reason: "page_limit", total_record: 78000 },
+      next_start_row: 9600,
+      complete: false,
     };
     expect(isNoBrandConfirmed(bad)).toBe(false);
     expect(noBrandCheckTone(bad.status)).toBe("warn");
     expect(formatNoBrandCheckLine(bad)).toContain("stop_reason=page_limit");
     expect(brandCheckBlocksCreate({ s1: bad }, ["s1"])).toBe(true);
+    expect(canContinueDeepScan(bad)).toBe(true);
+    expect(
+      canContinueDeepScan({
+        ...bad,
+        status: "NO_BRAND",
+        brand: "No Brand",
+      })
+    ).toBe(false);
   });
 
   it("formats catalog evidence for diagnostics copy", () => {

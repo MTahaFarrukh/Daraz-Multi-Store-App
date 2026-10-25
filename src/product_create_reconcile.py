@@ -347,7 +347,30 @@ def reconcile_product_create_attempt(
         except Exception:  # noqa: BLE001
             lookup_uncertain = True
 
-    # B. Search by exact persisted Seller SKUs
+    # B. GetProductItem by SellerSku (spike-proven param) — never CreateProduct retry.
+    if matched is None and not lookup_uncertain:
+        for sku in expected_skus[:5]:
+            try:
+                resp = client.get_product_item(seller_sku=sku)
+                data = _item_data(resp)
+                if data and _match_product_by_skus([data], expected_skus):
+                    matched = data
+                    break
+                if data:
+                    # Partial / unexpected product — keep searching
+                    continue
+            except DarazApiError as exc:
+                low = str(exc).lower()
+                code = str(exc.code or "")
+                if code in {"404", "NotFound"} or "not found" in low or "does not exist" in low:
+                    continue
+                lookup_uncertain = True
+                break
+            except Exception:  # noqa: BLE001
+                lookup_uncertain = True
+                break
+
+    # C. Search by exact persisted Seller SKUs via GetProducts
     if matched is None and not lookup_uncertain:
         try:
             sku_list = ",".join(expected_skus)
@@ -436,12 +459,24 @@ def reconcile_product_create_attempt(
             )
         except Exception:  # noqa: BLE001
             pass
+        # Optional GetQcStatus — informational only; never auto-retries create.
+        qc_status = None
+        try:
+            qc_status = client.get_qc_status(seller_skus=expected_skus[:20])
+        except Exception as exc:  # noqa: BLE001
+            qc_status = {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "note": "GetQcStatus unverified on Daraz PK — ignored for reconcile outcome",
+            }
         return {
             "status": "VERIFIED",
             "attempt": updated or attempt,
             "destination_item_id": dest_item,
             "destination_sku_mapping": mapping,
             "reason": "matched_seller_skus",
+            "qc_status": qc_status,
+            "auto_retry_create": False,
         }
 
     if conclusive_absent and not lookup_uncertain:
