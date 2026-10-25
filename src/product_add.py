@@ -5,10 +5,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from src.brand_resolve import resolve_brand_for_category
 from src.category_attr_resolve import (
@@ -49,6 +53,12 @@ from src.product_create_reconcile import (
     apply_attempt_seller_skus,
     build_generated_seller_skus,
     build_source_identity,
+)
+from src.product_add_trace import (
+    ProductAddTrace,
+    bind_trace,
+    current_trace,
+    reset_trace,
 )
 
 # Bounded destination create pipelines (override via env for ops/tests).
@@ -298,6 +308,14 @@ def _prepare_destination(
     t0 = time.perf_counter()
     timings: dict[str, float] = {}
     store_info = _store_label(dest)
+    trace = current_trace()
+    if trace:
+        trace.stage(
+            "destination_resolved",
+            store_id=str(store_info.get("store_id") or ""),
+            execute=bool(execute),
+            gate_on=bool(gate_on),
+        )
     if forced_seller_skus is not None:
         apply_attempt_seller_skus(draft, forced_seller_skus)
     override_report = _apply_price_override(
@@ -306,6 +324,13 @@ def _prepare_destination(
 
     unresolved = list_unresolved_price_variants(draft)
     if unresolved:
+        if trace:
+            trace.stage(
+                "validation_failed",
+                store_id=str(store_info.get("store_id") or ""),
+                reason="missing_price",
+                status="NEEDS_ATTENTION",
+            )
         return {
             "store": store_info,
             "status": "NEEDS_ATTENTION",
@@ -1059,6 +1084,12 @@ def _prepare_destination(
 
     t_create = time.perf_counter()
     xml = build_create_product_xml(draft)
+    if trace:
+        trace.stage(
+            "create_product_started",
+            store_id=str(store_info.get("store_id") or ""),
+            attempt_id=str(attempt.get("id") or ""),
+        )
     try:
         resp = client.create_product(xml)
     except DarazApiError as exc:
@@ -1087,6 +1118,15 @@ def _prepare_destination(
             retry_count=int(attempt.get("retry_count") or 0) + 1,
         )
         _finish_claim(fail_state, attempt_id=str(attempt["id"]))
+        if trace:
+            trace.stage(
+                "create_product_failed",
+                store_id=str(store_info.get("store_id") or ""),
+                status=fail_state,
+                http_status=exc.http_status,
+                error_class="DarazApiError",
+                attempt_id=str(attempt.get("id") or ""),
+            )
         return {
             **result_base,
             "status": "Failed",
@@ -1123,6 +1163,13 @@ def _prepare_destination(
 
     timings["create_product_ms"] = round((time.perf_counter() - t_create) * 1000, 1)
     timings["create_ms"] = timings["create_product_ms"]
+    if trace:
+        trace.stage(
+            "create_product_response",
+            store_id=str(store_info.get("store_id") or ""),
+            attempt_id=str(attempt.get("id") or ""),
+            status="CREATED_UNVERIFIED",
+        )
     item_id = _extract_item_id_from_create(resp)
     repo.update_product_attempt(
         workspace_id,
@@ -1363,7 +1410,11 @@ def _run_destinations_bounded(
             out[idx] = row
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(_safe, i, payload) for i, payload in jobs]
+            # Preserve correlation ContextVar across worker threads.
+            futs = [
+                pool.submit(copy_context().run, _safe, i, payload)
+                for i, payload in jobs
+            ]
             for fut in as_completed(futs):
                 idx, row = fut.result()
                 out[idx] = row
@@ -1454,6 +1505,7 @@ def add_product_from_public_url(
     resume_by_store: dict[str, str] | None = None,
     forced_attempt_id: str | None = None,
     forced_seller_skus: Any = None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """Fetch public URL once → prepare / create on each destination.
 
@@ -1467,6 +1519,46 @@ def add_product_from_public_url(
     if not dest_ids:
         raise ValueError("destination_store_ids is required")
 
+    trace = ProductAddTrace.create(workspace_id)
+    if correlation_id:
+        trace.correlation_id = str(correlation_id)
+    token = bind_trace(trace)
+    try:
+        return _add_product_from_public_url_inner(
+            workspace_id,
+            url,
+            dest_ids,
+            price_override=price_override,
+            variant_price_overrides=variant_price_overrides,
+            execute=execute,
+            allow_duplicates=allow_duplicates,
+            edit_before=edit_before,
+            resume_by_store=resume_by_store,
+            forced_attempt_id=forced_attempt_id,
+            forced_seller_skus=forced_seller_skus,
+            trace=trace,
+            t0=t0,
+        )
+    finally:
+        reset_trace(token)
+
+
+def _add_product_from_public_url_inner(
+    workspace_id: str,
+    url: str,
+    dest_ids: list[str],
+    *,
+    price_override: float | None,
+    variant_price_overrides: dict[str, float] | None,
+    execute: bool | None,
+    allow_duplicates: bool,
+    edit_before: bool,
+    resume_by_store: dict[str, str] | None,
+    forced_attempt_id: str | None,
+    forced_seller_skus: Any,
+    trace: ProductAddTrace,
+    t0: float,
+) -> dict[str, Any]:
     gate_on = product_create_enabled()
     if edit_before:
         will_execute = False
@@ -1476,6 +1568,15 @@ def add_product_from_public_url(
         will_execute = False
     else:
         will_execute = True
+
+    trace.stage(
+        "gate_checked",
+        gate_on=gate_on,
+        execute=will_execute,
+        edit_before=bool(edit_before),
+        dest_count=len(dest_ids),
+        source="public_url",
+    )
 
     extracted = fetch_public_product(url)
     fetch_ms = float((extracted.get("timings_ms") or {}).get("fetch_extract") or 0)
@@ -1531,6 +1632,7 @@ def add_product_from_public_url(
             price_override,
             variant_price_overrides,
         )
+        trace.stage("edit_before_draft", dest_count=len(dest_ids), gate_on=gate_on)
         return {
             "status": "EDIT_BEFORE",
             "source": source_meta,
@@ -1538,6 +1640,8 @@ def add_product_from_public_url(
             "draft_result": draft_result,
             "destination_store_ids": dest_ids,
             "product_create_enabled": gate_on,
+            "correlation_id": trace.correlation_id,
+            "stage_history": trace.public_history(),
             "timings_ms": _merge_timings(
                 extract_timings,
                 {
@@ -1650,11 +1754,33 @@ def add_product_from_public_url(
     if not gate_on and summary["status"] not in {"NEEDS_ATTENTION", "FAILED"}:
         summary["status"] = "BLOCKED_CREATE"
 
+    for dest_row in destinations:
+        if not isinstance(dest_row, dict):
+            continue
+        trace.stage(
+            "destination_outcome",
+            store_id=str((dest_row.get("store") or {}).get("store_id") or ""),
+            status=str(dest_row.get("status") or ""),
+            reason=str(dest_row.get("reason") or "")[:120] or None,
+            attempt_id=str(dest_row.get("attempt_id") or "") or None,
+        )
+
+    trace.stage(
+        "completed",
+        status=str(summary.get("status") or ""),
+        created_count=int(summary.get("created_count") or 0),
+        failed_count=int(summary.get("failed_count") or 0),
+        needs_attention_count=int(summary.get("needs_attention_count") or 0),
+        elapsed_ms=trace.elapsed_ms(),
+    )
+
     extract_timings = dict(extract_timings)
     return {
         **summary,
         "source": source_meta,
         "destinations": destinations,
+        "correlation_id": trace.correlation_id,
+        "stage_history": trace.public_history(),
         "timings_ms": _merge_timings(
             extract_timings,
             {
@@ -1700,6 +1826,7 @@ def add_product_from_connected(
     forced_attempt_id: str | None = None,
     forced_seller_skus: Any = None,
     claim_gate: bool = True,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """Fetch connected item once → prepare / create on each destination.
 
@@ -1713,6 +1840,50 @@ def add_product_from_connected(
     if not dest_ids:
         raise ValueError("destination_store_ids is required")
 
+    trace = ProductAddTrace.create(workspace_id)
+    if correlation_id:
+        trace.correlation_id = str(correlation_id)
+    token = bind_trace(trace)
+    try:
+        return _add_product_from_connected_inner(
+            workspace_id,
+            source_store_id,
+            daraz_item_id,
+            dest_ids,
+            price_override=price_override,
+            variant_price_overrides=variant_price_overrides,
+            execute=execute,
+            allow_duplicates=allow_duplicates,
+            edit_before=edit_before,
+            resume_by_store=resume_by_store,
+            forced_attempt_id=forced_attempt_id,
+            forced_seller_skus=forced_seller_skus,
+            claim_gate=claim_gate,
+            trace=trace,
+            t0=t0,
+        )
+    finally:
+        reset_trace(token)
+
+
+def _add_product_from_connected_inner(
+    workspace_id: str,
+    source_store_id: str,
+    daraz_item_id: str,
+    dest_ids: list[str],
+    *,
+    price_override: float | None,
+    variant_price_overrides: dict[str, float] | None,
+    execute: bool | None,
+    allow_duplicates: bool,
+    edit_before: bool,
+    resume_by_store: dict[str, str] | None,
+    forced_attempt_id: str | None,
+    forced_seller_skus: Any,
+    claim_gate: bool,
+    trace: ProductAddTrace,
+    t0: float,
+) -> dict[str, Any]:
     gate_on = product_create_enabled()
     if edit_before:
         will_execute = False
@@ -1722,6 +1893,15 @@ def add_product_from_connected(
         will_execute = False
     else:
         will_execute = True
+
+    trace.stage(
+        "gate_checked",
+        gate_on=gate_on,
+        execute=will_execute,
+        edit_before=bool(edit_before),
+        dest_count=len(dest_ids),
+        source="connected",
+    )
 
     fetched = fetch_connected_product(
         workspace_id,
@@ -1750,6 +1930,7 @@ def add_product_from_connected(
             price_override,
             variant_price_overrides,
         )
+        trace.stage("edit_before_draft", dest_count=len(dest_ids), gate_on=gate_on)
         return {
             "status": "EDIT_BEFORE",
             "source": source_meta,
@@ -1757,6 +1938,8 @@ def add_product_from_connected(
             "draft_result": draft_result,
             "destination_store_ids": dest_ids,
             "product_create_enabled": gate_on,
+            "correlation_id": trace.correlation_id,
+            "stage_history": trace.public_history(),
             "timings_ms": {
                 **(fetched.get("timings_ms") or {}),
                 "total": round((time.perf_counter() - t0) * 1000, 1),
@@ -1854,10 +2037,31 @@ def add_product_from_connected(
     if not gate_on and summary["status"] not in {"NEEDS_ATTENTION", "FAILED"}:
         summary["status"] = "BLOCKED_CREATE"
 
+    for dest_row in destinations:
+        if not isinstance(dest_row, dict):
+            continue
+        trace.stage(
+            "destination_outcome",
+            store_id=str((dest_row.get("store") or {}).get("store_id") or ""),
+            status=str(dest_row.get("status") or ""),
+            reason=str(dest_row.get("reason") or "")[:120] or None,
+            attempt_id=str(dest_row.get("attempt_id") or "") or None,
+        )
+    trace.stage(
+        "completed",
+        status=str(summary.get("status") or ""),
+        created_count=int(summary.get("created_count") or 0),
+        failed_count=int(summary.get("failed_count") or 0),
+        needs_attention_count=int(summary.get("needs_attention_count") or 0),
+        elapsed_ms=trace.elapsed_ms(),
+    )
+
     return {
         **summary,
         "source": source_meta,
         "destinations": destinations,
+        "correlation_id": trace.correlation_id,
+        "stage_history": trace.public_history(),
         "timings_ms": {
             **(fetched.get("timings_ms") or {}),
             "destination_parallelism": parallelism,

@@ -118,9 +118,9 @@ export function ConfirmDialog({
 }) {
   if (!open) return null;
   return (
-    <div className="dialog-backdrop" role="presentation" onClick={onCancel}>
+    <div className="dialog-backdrop dialog-backdrop--center" role="presentation" onClick={onCancel}>
       <div
-        className="dialog-panel card"
+        className="dialog-panel dialog-panel--md card"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"

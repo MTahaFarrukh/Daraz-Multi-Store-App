@@ -523,6 +523,9 @@ export type AddProductResponse = {
   draft_result?: ProductCloneDraftResponse & Record<string, unknown>;
   destination_store_ids?: string[];
   timings_ms?: Record<string, number | string>;
+  /** Safe request correlation ID for diagnostics (no secrets). */
+  correlation_id?: string;
+  stage_history?: Array<Record<string, unknown>>;
 };
 
 export type InventorySku = {

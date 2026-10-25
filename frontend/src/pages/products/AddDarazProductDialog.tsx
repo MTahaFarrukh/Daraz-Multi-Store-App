@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useAddProductFromConnected,
   useAddProductFromUrl,
@@ -6,18 +6,22 @@ import {
 } from "@/hooks/queries/useProducts";
 import { useProductCreateEnabled } from "@/hooks/useProductCreateEnabled";
 import { Api } from "@/lib/api";
+import { ApiError } from "@/lib/api/client";
 import {
-  destinationActionKind,
-  destinationProgressLabel,
-  destinationReasonLabel,
-  shouldShowReconcile,
-  shouldShowRetry,
+  buildAttentionSummary,
+  extractDiagnosticId,
+  type StageHistoryEntry,
 } from "@/lib/productAddProgress";
 import type { AddProductDestinationResult, AddProductResponse, StoreView } from "@/types/api";
 import { CloneDraftPreview } from "@/pages/products/CloneDraftPreview";
 import { Dialog } from "@/components/ui/Dialog";
+import { StatusBadge } from "@/components/ui/Primitives";
+import { DestinationStatusCard } from "@/pages/products/addProduct/DestinationStatusCard";
+import { DiagnosticsPanel } from "@/pages/products/addProduct/DiagnosticsPanel";
+import { ProcessingTimeline } from "@/pages/products/addProduct/ProcessingTimeline";
 
 type SourceMode = "url" | "connected";
+type Phase = "idle" | "fetching" | "preparing" | "creating" | "done" | "error";
 
 type Props = {
   open: boolean;
@@ -49,12 +53,19 @@ export function AddDarazProductDialog({
   const [priceOverride, setPriceOverride] = useState("");
   const [variantPrices, setVariantPrices] = useState<Record<string, string>>({});
   const [result, setResult] = useState<AddProductResponse | null>(null);
-  const [draftPreview, setDraftPreview] = useState<Record<string, unknown> | null>(
-    null
-  );
+  const [draftPreview, setDraftPreview] = useState<Record<string, unknown> | null>(null);
   const [fetchedUrl, setFetchedUrl] = useState<string | null>(null);
   const [extractionComplete, setExtractionComplete] = useState<boolean | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [localAlert, setLocalAlert] = useState<{ tone: "ok" | "warn" | "error"; text: string } | null>(
+    null
+  );
+  const [correlationId, setCorrelationId] = useState<string | null>(null);
+  const [stageHistory, setStageHistory] = useState<StageHistoryEntry[]>([]);
+  const [executedCreate, setExecutedCreate] = useState(false);
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
+  const startedAtRef = useRef<number | null>(null);
 
   const addUrlMutation = useAddProductFromUrl(workspaceId);
   const addConnectedMutation = useAddProductFromConnected(workspaceId);
@@ -63,8 +74,7 @@ export function AddDarazProductDialog({
   const createGateOn = productCreateEnabled === true;
 
   const destOptions = useMemo(
-    () =>
-      stores.filter((s) => (mode === "connected" ? s.store_id !== sourceStore : true)),
+    () => stores.filter((s) => (mode === "connected" ? s.store_id !== sourceStore : true)),
     [stores, sourceStore, mode]
   );
 
@@ -72,6 +82,11 @@ export function AddDarazProductDialog({
     const first = Array.from(destSelected)[0];
     return first || "";
   }, [destSelected]);
+
+  const selectedStores = useMemo(
+    () => destOptions.filter((s) => destSelected.has(s.store_id)),
+    [destOptions, destSelected]
+  );
 
   const unresolvedVariants = useMemo(() => {
     const seen = new Map<string, { key: string; label: string }>();
@@ -100,6 +115,54 @@ export function AddDarazProductDialog({
       : urlFetched && Boolean(productUrl.trim()));
   const canCreate = canPrepare && createGateOn;
 
+  const draftVariants =
+    ((draftPreview?.draft as Record<string, unknown> | undefined)?.variants as Array<
+      Record<string, unknown>
+    >) || [];
+
+  const productTitle =
+    String(
+      (draftPreview?.draft as { product?: { title?: string } } | undefined)?.product?.title ||
+        (result?.source as { title?: string } | undefined)?.title ||
+        ""
+    ) || null;
+
+  const thumb =
+    (
+      (
+        (draftPreview?.draft as { media?: { product_images?: string[] } } | undefined)?.media
+          ?.product_images || []
+      )[0] as string | undefined
+    ) || null;
+
+  const attention = useMemo(
+    () => buildAttentionSummary(result?.destinations, { diagnosticId: correlationId }),
+    [result, correlationId]
+  );
+
+  useEffect(() => {
+    if (!submitting || !startedAtRef.current) return;
+    const id = window.setInterval(() => {
+      if (startedAtRef.current) {
+        setElapsedMs(Date.now() - startedAtRef.current);
+      }
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [submitting]);
+
+  function beginWork(next: Phase) {
+    startedAtRef.current = Date.now();
+    setElapsedMs(0);
+    setPhase(next);
+  }
+
+  function endWork(next: Phase) {
+    if (startedAtRef.current) {
+      setElapsedMs(Date.now() - startedAtRef.current);
+    }
+    setPhase(next);
+  }
+
   function toggleDest(id: string) {
     setDestSelected((prev) => {
       const next = new Set(prev);
@@ -118,12 +181,13 @@ export function AddDarazProductDialog({
   }
 
   function resetAndClose() {
+    if (submitting) return;
     setMode("url");
     setProductUrl("");
     setSourceStore("");
     setItemId("");
     setDestSelected(new Set());
-    setEditBefore(true);
+    setEditBefore(false);
     setPriceOverride("");
     setVariantPrices({});
     setResult(null);
@@ -131,6 +195,13 @@ export function AddDarazProductDialog({
     setFetchedUrl(null);
     setExtractionComplete(null);
     setSubmitting(false);
+    setPhase("idle");
+    setLocalAlert(null);
+    setCorrelationId(null);
+    setStageHistory([]);
+    setExecutedCreate(false);
+    setElapsedMs(null);
+    startedAtRef.current = null;
     onClose();
   }
 
@@ -154,21 +225,46 @@ export function AddDarazProductDialog({
     return Object.keys(out).length ? out : undefined;
   }
 
+  function ingestResultMeta(res: AddProductResponse) {
+    if (res.correlation_id) setCorrelationId(String(res.correlation_id));
+    if (Array.isArray(res.stage_history)) {
+      setStageHistory(res.stage_history as StageHistoryEntry[]);
+    }
+  }
+
+  function setAlerts(tone: "ok" | "warn" | "error", text: string, alsoPage = true) {
+    setLocalAlert({ tone, text });
+    if (!alsoPage) return;
+    if (tone === "ok") {
+      onOk(text);
+      onError("");
+    } else if (tone === "error") {
+      onError(text);
+      onOk("");
+    } else {
+      onError(text);
+      onOk("");
+    }
+  }
+
   async function onFetchProduct() {
-    if (mode !== "url") return;
+    if (mode !== "url" || submitting) return;
     const url = productUrl.trim();
     if (!url) {
-      onError("Paste a Daraz product URL first");
+      setAlerts("error", "Paste a Daraz product URL first");
       return;
     }
     if (!primaryDest) {
-      onError("Select at least one destination store before fetching");
+      setAlerts("error", "Select at least one destination store before fetching");
       return;
     }
+    setLocalAlert(null);
     onError("");
     onOk("");
     setResult(null);
+    beginWork("fetching");
     setBusy("Fetching product…");
+    setSubmitting(true);
     try {
       const res = await importDraftMutation.mutateAsync({
         url,
@@ -176,7 +272,10 @@ export function AddDarazProductDialog({
       });
       setDraftPreview(res as unknown as Record<string, unknown>);
       setFetchedUrl(url);
-      const extracted = (res as { extraction_complete?: boolean; draft?: { validation?: { warnings?: string[] } } });
+      const extracted = res as {
+        extraction_complete?: boolean;
+        draft?: { validation?: { warnings?: string[] } };
+      };
       const complete =
         typeof extracted.extraction_complete === "boolean"
           ? extracted.extraction_complete
@@ -186,21 +285,27 @@ export function AddDarazProductDialog({
       setExtractionComplete(complete);
       const warnCount = (res.warnings || []).length + (res.errors || []).length;
       if (complete && !warnCount) {
-        onOk("Preview ready — review details, then Add Product.");
+        setAlerts("ok", "Preview ready — review details, then Add Product.");
       } else if (complete) {
-        onOk("Preview ready with notes — review warnings before adding.");
+        setAlerts("warn", "Preview ready with notes — review warnings before adding.");
       } else {
-        onError(
+        setAlerts(
+          "error",
           "Extraction incomplete — missing fields are shown below. Fix what you can before adding."
         );
       }
+      endWork("done");
     } catch (err) {
       setDraftPreview(null);
       setFetchedUrl(null);
       setExtractionComplete(null);
-      onError(err instanceof Error ? err.message : "Could not fetch product");
+      const diag = err instanceof ApiError ? extractDiagnosticId(err) : null;
+      if (diag) setCorrelationId(diag);
+      setAlerts("error", err instanceof Error ? err.message : "Could not fetch product");
+      endWork("error");
     } finally {
       setBusy("");
+      setSubmitting(false);
     }
   }
 
@@ -214,20 +319,22 @@ export function AddDarazProductDialog({
     if (submitting) return;
     const destIds = options?.destIds ?? Array.from(destSelected);
     if (!destIds.length) {
-      onError("Select at least one destination store");
+      setAlerts("error", "Select at least one destination store");
       return;
     }
     if (mode === "url" && !urlFetched) {
-      onError("Fetch the product first so you can review the preview");
+      setAlerts("error", "Fetch the product first so you can review the preview");
       return;
     }
     const wantEdit = options?.edit ?? false;
     if (!wantEdit && !editBefore && !createGateOn) {
-      onError(
+      setAlerts(
+        "error",
         "Product creation is disabled on this server. You can Fetch and preview, but Add Product stays blocked until ALLOW_PRODUCT_CREATE is enabled after supervised proof."
       );
       return;
     }
+    setLocalAlert(null);
     onError("");
     onOk("");
     setResult(null);
@@ -235,11 +342,11 @@ export function AddDarazProductDialog({
     const variantOverrides = parseVariantOverrides();
 
     if (mode === "url" && !productUrl.trim()) {
-      onError("Product URL is required");
+      setAlerts("error", "Product URL is required");
       return;
     }
     if (mode === "connected" && (!sourceStore || !itemId.trim())) {
-      onError("Source store and Item ID are required");
+      setAlerts("error", "Source store and Item ID are required");
       return;
     }
 
@@ -278,7 +385,9 @@ export function AddDarazProductDialog({
     setSubmitting(true);
     try {
       if (wantEdit || editBefore) {
+        beginWork("preparing");
         setBusy("Preparing draft for edit…");
+        setExecutedCreate(false);
         const res = await callApi({
           execute: false,
           confirm: false,
@@ -286,14 +395,18 @@ export function AddDarazProductDialog({
           destination_store_ids: destIds,
         });
         setResult(res);
+        ingestResultMeta(res);
         if (res.draft_result) {
           setDraftPreview(res.draft_result as Record<string, unknown>);
         }
-        onOk("Draft ready — review below, then Add Product to create.");
+        setAlerts("ok", "Draft ready — review below, then Add Product to create.");
+        endWork("done");
         return;
       }
 
+      beginWork("creating");
       setBusy("Creating product on Daraz…");
+      setExecutedCreate(true);
       const res = await callApi({
         execute: true,
         confirm: true,
@@ -302,6 +415,7 @@ export function AddDarazProductDialog({
         resume_by_store: options?.resumeByStore,
       });
       setResult(res);
+      ingestResultMeta(res);
       if (res.draft_result) {
         setDraftPreview(res.draft_result as Record<string, unknown>);
       } else {
@@ -311,13 +425,22 @@ export function AddDarazProductDialog({
         }
       }
       applyResultMessages(res);
+      endWork("done");
       for (const d of res.destinations || []) {
         if (d.attempt_id) {
-          void pollAttemptIntoResult(d.attempt_id, d.store?.store_id || null);
+          void pollAttemptIntoResult(d.attempt_id);
         }
       }
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Add product failed");
+      const diag =
+        err instanceof ApiError
+          ? extractDiagnosticId(err) ||
+            extractDiagnosticId({ detail: (err as ApiError).detail })
+          : null;
+      if (diag) setCorrelationId(diag);
+      const base = err instanceof Error ? err.message : "Add product failed";
+      setAlerts("error", diag ? `${base} (ID ${diag})` : base);
+      endWork("error");
     } finally {
       setBusy("");
       setSubmitting(false);
@@ -325,52 +448,42 @@ export function AddDarazProductDialog({
   }
 
   function applyResultMessages(res: AddProductResponse) {
+    const summary = buildAttentionSummary(res.destinations, {
+      diagnosticId: res.correlation_id || correlationId,
+    });
     if (res.status === "BLOCKED_CREATE") {
-      onOk(
-        `Validated ${res.destinations?.length || 0} store(s) · create blocked (ALLOW_PRODUCT_CREATE off)`
+      setAlerts(
+        "warn",
+        `Validated ${res.destinations?.length || 0} store(s). Create is blocked (ALLOW_PRODUCT_CREATE off) — nothing was created.`
       );
-      onError(
-        "Product create is disabled. Validation results are shown below — nothing was created."
-      );
-    } else if (res.created_count) {
-      onOk(
+      return;
+    }
+    if (res.created_count) {
+      const extra = summary.headline ? ` · ${summary.headline}` : "";
+      setAlerts(
+        summary.lines.length ? "warn" : "ok",
         `Created ${res.created_count}` +
           (res.failed_count ? ` · ${res.failed_count} failed` : "") +
-          (res.needs_attention_count
-            ? ` · ${res.needs_attention_count} need attention`
-            : "")
+          extra
       );
-    } else if (res.status === "ALREADY_EXISTS") {
-      onOk("Product already exists on destination — skipped create");
-    } else if (res.needs_attention_count) {
-      const missing = res.destinations?.some((d) => d.reason === "missing_price");
-      const recon = res.destinations?.some(
-        (d) =>
-          String(d.creation_status || "").includes("RECONCIL") ||
-          String(d.reason || "").includes("reconcil") ||
-          String(d.reason || "").includes("claim")
-      );
-      onError(
-        `${res.needs_attention_count} store(s) need attention` +
-          (missing
-            ? " — enter prices for unresolved variants (or a single override when all SKUs share one price)"
-            : recon
-              ? " — wait or use Reconcile; do not create again until resolved"
-              : "")
-      );
-    } else if (res.failed_count) {
-      onError(`${res.failed_count} store(s) failed — see details below`);
-    } else {
-      onOk(res.status || "Done");
+      return;
     }
+    if (res.status === "ALREADY_EXISTS") {
+      setAlerts("ok", "Product already exists on destination — skipped create");
+      return;
+    }
+    if (res.needs_attention_count || summary.lines.length) {
+      setAlerts("error", summary.headline || `${res.needs_attention_count} store(s) need attention`);
+      return;
+    }
+    if (res.failed_count) {
+      setAlerts("error", summary.headline || `${res.failed_count} store(s) failed — see details below`);
+      return;
+    }
+    setAlerts("ok", res.status || "Done");
   }
 
-  const retryable = (result?.destinations || []).filter((d) => shouldShowRetry(d));
-  const reconcileable = (result?.destinations || []).filter((d) =>
-    shouldShowReconcile(d)
-  );
-
-  async function pollAttemptIntoResult(attemptId: string, _storeId: string | null) {
+  async function pollAttemptIntoResult(attemptId: string) {
     try {
       const attempt = await Api.getProductCreateAttempt(attemptId);
       setResult((prev) => {
@@ -381,30 +494,27 @@ export function AddDarazProductDialog({
             ...d,
             attempt_id: attemptId,
             attempt_state: String(attempt.state || d.attempt_state || ""),
-            creation_status: String(
-              attempt.state || d.creation_status || d.status || ""
-            ),
+            creation_status: String(attempt.state || d.creation_status || d.status || ""),
             status:
               String(attempt.state) === "VERIFIED"
                 ? "Created"
                 : String(attempt.state || d.status),
-            item_id:
-              (attempt.destination_item_id as string | undefined) || d.item_id,
-            reason:
-              (attempt.last_error as string | undefined) || d.reason || undefined,
+            item_id: (attempt.destination_item_id as string | undefined) || d.item_id,
+            reason: (attempt.last_error as string | undefined) || d.reason || undefined,
           };
         });
         return { ...prev, destinations: nextDest };
       });
     } catch {
-      /* poll is best-effort */
+      /* best-effort */
     }
   }
 
   async function onRetryDestination(d: AddProductDestinationResult) {
     if (!d.attempt_id || submitting) return;
+    beginWork("creating");
     setBusy(`Retrying ${d.store?.display_name || d.store?.store_id || "store"}…`);
-    onError("");
+    setLocalAlert(null);
     setSubmitting(true);
     try {
       const res = await Api.retryProductCreateAttempt(d.attempt_id, true);
@@ -427,8 +537,7 @@ export function AddDarazProductDialog({
                         ? "Failed"
                         : state,
                   item_id:
-                    (attempt.destination_item_id as string | undefined) ||
-                    row.item_id,
+                    (attempt.destination_item_id as string | undefined) || row.item_id,
                   reason:
                     (attempt.last_error as string | undefined) ||
                     (res.reason as string | undefined) ||
@@ -438,10 +547,12 @@ export function AddDarazProductDialog({
           ),
         };
       });
-      onOk(`Retry finished · ${destinationProgressLabel({ creation_status: state })}`);
-      void pollAttemptIntoResult(d.attempt_id, d.store?.store_id || null);
+      setAlerts("ok", `Retry finished · ${state}`);
+      endWork("done");
+      void pollAttemptIntoResult(d.attempt_id);
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      setAlerts("error", e instanceof Error ? e.message : String(e));
+      endWork("error");
     } finally {
       setBusy("");
       setSubmitting(false);
@@ -450,8 +561,9 @@ export function AddDarazProductDialog({
 
   async function onReconcileDestination(d: AddProductDestinationResult) {
     if (!d.attempt_id || submitting) return;
+    beginWork("preparing");
     setBusy(`Reconciling ${d.store?.display_name || d.store?.store_id || "store"}…`);
-    onError("");
+    setLocalAlert(null);
     setSubmitting(true);
     try {
       const res = await Api.reconcileProductCreateAttempt(d.attempt_id);
@@ -474,8 +586,7 @@ export function AddDarazProductDialog({
                         ? "NEEDS_ATTENTION"
                         : state,
                   item_id:
-                    (attempt.destination_item_id as string | undefined) ||
-                    row.item_id,
+                    (attempt.destination_item_id as string | undefined) || row.item_id,
                   reason:
                     (attempt.last_error as string | undefined) ||
                     (res.reason as string | undefined) ||
@@ -485,343 +596,393 @@ export function AddDarazProductDialog({
           ),
         };
       });
-      onOk(
-        `Reconcile finished · ${destinationProgressLabel({ creation_status: state })}`
-      );
+      setAlerts("ok", `Reconcile finished · ${state}`);
+      endWork("done");
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      setAlerts("error", e instanceof Error ? e.message : String(e));
+      endWork("error");
     } finally {
       setBusy("");
       setSubmitting(false);
     }
   }
 
-  const draftVariants =
-    ((draftPreview?.draft as Record<string, unknown> | undefined)?.variants as Array<
-      Record<string, unknown>
-    >) || [];
+  const primaryLabel = submitting
+    ? phase === "fetching"
+      ? "Fetching…"
+      : phase === "preparing"
+        ? "Preparing…"
+        : phase === "creating"
+          ? "Creating…"
+          : "Working…"
+    : editBefore
+      ? "Prepare Preview"
+      : "Add Product";
 
-  return (
-    <Dialog open={open} title="Add Daraz Product" onClose={resetAndClose}>
-      <div className="tabs" role="tablist" style={{ marginBottom: "0.75rem" }}>
-        <button
-          type="button"
-          className={`tab${mode === "url" ? " active" : ""}`}
-          onClick={() => {
-            setMode("url");
-            setResult(null);
-          }}
-        >
-          Daraz Link
-        </button>
-        <button
-          type="button"
-          className={`tab${mode === "connected" ? " active" : ""}`}
-          onClick={() => {
-            setMode("connected");
-            setResult(null);
-            setFetchedUrl(null);
-          }}
-        >
-          Connected Item ID
-        </button>
+  const footer = (
+    <div className="add-footer">
+      <div className="add-footer__hint">
+        {submitting ? (
+          <span className="muted-line" aria-live="polite">
+            {busy || "Request in progress…"}
+            {elapsedMs != null ? ` · ${Math.round(elapsedMs / 1000)}s` : ""}
+          </span>
+        ) : createGateOn ? (
+          <span className="muted-line">
+            {editBefore
+              ? "Preview only — CreateProduct will not run until you Add Product."
+              : "Create runs only when you confirm Add Product."}
+          </span>
+        ) : (
+          <span className="muted-line">Creation gate is off — fetch and preview still work.</span>
+        )}
       </div>
-
-      {mode === "url" ? (
-        <label style={{ display: "block" }}>
-          Product URL
-          <input
-            value={productUrl}
-            onChange={(e) => {
-              setProductUrl(e.target.value);
-              if (fetchedUrl && e.target.value.trim() !== fetchedUrl) {
-                setFetchedUrl(null);
-                setDraftPreview(null);
-                setExtractionComplete(null);
-              }
-            }}
-            placeholder="https://www.daraz.pk/products/…"
-            disabled={Boolean(busy) || submitting}
-          />
-        </label>
-      ) : (
-        <>
-          <label>
-            Source Store
-            <select
-              value={sourceStore}
-              onChange={(e) => setSourceStore(e.target.value)}
-              disabled={Boolean(busy) || submitting}
-            >
-              <option value="">Select store…</option>
-              {stores.map((s) => (
-                <option key={s.store_id} value={s.store_id}>
-                  {s.display_name || s.store_name || s.store_id}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: "block", marginTop: "0.5rem" }}>
-            Product / Item ID
-            <input
-              value={itemId}
-              onChange={(e) => setItemId(e.target.value)}
-              placeholder="e.g. 1974026524"
-              inputMode="numeric"
-              disabled={Boolean(busy) || submitting}
-            />
-          </label>
-        </>
-      )}
-
-      <fieldset style={{ border: "none", padding: 0, margin: "0.75rem 0" }}>
-        <legend className="muted-line" style={{ padding: 0, marginBottom: "0.35rem" }}>
-          Destination stores
-        </legend>
-        <div className="row" style={{ marginBottom: "0.35rem", gap: "0.5rem" }}>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={selectAllDest}
-            disabled={Boolean(busy) || submitting}
-          >
-            Select All
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={clearDest}
-            disabled={Boolean(busy) || submitting}
-          >
-            Clear
-          </button>
-        </div>
-        <div className="stack" style={{ gap: "0.25rem", maxHeight: "10rem", overflowY: "auto" }}>
-          {destOptions.map((s) => (
-            <label key={s.store_id} className="row" style={{ gap: "0.5rem" }}>
-              <input
-                type="checkbox"
-                checked={destSelected.has(s.store_id)}
-                onChange={() => toggleDest(s.store_id)}
-                disabled={Boolean(busy) || submitting}
-              />
-              {s.display_name || s.store_name || s.store_id}
-            </label>
-          ))}
-        </div>
-      </fieldset>
-
-      {mode === "url" ? (
-        <div className="row" style={{ gap: "0.5rem", marginBottom: "0.75rem" }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={Boolean(busy) || submitting || !productUrl.trim() || !primaryDest}
-            onClick={() => void onFetchProduct()}
-          >
-            {busy.startsWith("Fetching") ? "Fetching…" : "Fetch Product"}
-          </button>
-          {urlFetched ? (
-            <span className="muted-line">
-              {extractionComplete === false
-                ? "Preview loaded (incomplete extraction)"
-                : "Preview loaded"}
-            </span>
-          ) : (
-            <span className="muted-line">Fetch to preview before adding</span>
-          )}
-        </div>
-      ) : null}
-
-      {productCreateEnabled === false ? (
-        <p className="banner banner-warn" style={{ marginBottom: "0.75rem" }}>
-          Product creation is disabled (ALLOW_PRODUCT_CREATE). Fetch and preview still work; Add
-          Product is blocked until creation is enabled after supervised proof.
-        </p>
-      ) : null}
-
-      <label className="row" style={{ gap: "0.5rem", marginBottom: "0.5rem" }}>
-        <input
-          type="checkbox"
-          checked={editBefore}
-          onChange={(e) => setEditBefore(e.target.checked)}
-          disabled={Boolean(busy) || submitting}
-        />
-        Review draft before creating
-      </label>
-
-      <label style={{ display: "block", marginBottom: "0.75rem" }}>
-        Price override (optional — single SKU / same-price variants only)
-        <input
-          value={priceOverride}
-          onChange={(e) => setPriceOverride(e.target.value)}
-          placeholder="Will not flatten differently priced variants"
-          inputMode="decimal"
-          disabled={Boolean(busy) || submitting}
-        />
-      </label>
-
-      {unresolvedVariants.length ? (
-        <fieldset
-          style={{
-            border: "1px solid var(--border, #ddd)",
-            borderRadius: 6,
-            padding: "0.75rem",
-            marginBottom: "0.75rem",
-          }}
-        >
-          <legend style={{ padding: "0 0.35rem" }}>Price information required</legend>
-          <p className="muted-line" style={{ marginTop: 0 }}>
-            Enter regular price only for unresolved variants, then Continue Adding.
-          </p>
-          <div className="stack" style={{ gap: "0.5rem" }}>
-            {unresolvedVariants.map((v) => (
-              <label key={v.key} style={{ display: "block" }}>
-                {v.label}
-                <input
-                  value={variantPrices[v.key] || ""}
-                  onChange={(e) =>
-                    setVariantPrices((prev) => ({ ...prev, [v.key]: e.target.value }))
-                  }
-                  placeholder="Rs."
-                  inputMode="decimal"
-                  disabled={Boolean(busy) || submitting}
-                />
-              </label>
-            ))}
-          </div>
-          <div className="row" style={{ marginTop: "0.75rem" }}>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={!canCreate}
-              onClick={() => void runAdd({ edit: false })}
-            >
-              Continue Adding
-            </button>
-          </div>
-        </fieldset>
-      ) : null}
-
-      <div className="row" style={{ gap: "0.5rem" }}>
-        <button
-          type="button"
-          className="btn btn-primary"
-          disabled={editBefore ? !canPrepare : !canCreate}
-          onClick={() => void runAdd({ edit: editBefore })}
-        >
-          {busy.includes("Creating") || busy.includes("Preparing")
-            ? "Working…"
-            : editBefore
-              ? "Prepare Preview"
-              : "Add Product"}
-        </button>
+      <div className="row" style={{ gap: "0.5rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
         <button
           type="button"
           className="btn btn-ghost"
           onClick={resetAndClose}
           disabled={submitting}
         >
-          Cancel
+          {submitting ? "Close unavailable" : "Cancel"}
+        </button>
+        {mode === "url" ? (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={submitting || !productUrl.trim() || !primaryDest}
+            onClick={() => void onFetchProduct()}
+          >
+            {phase === "fetching" && submitting ? "Fetching…" : "Fetch Product"}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={editBefore ? !canPrepare : !canCreate}
+          onClick={() => void runAdd({ edit: editBefore })}
+        >
+          {primaryLabel}
         </button>
       </div>
+    </div>
+  );
 
-      {busy ? (
-        <p className="muted-line" style={{ marginTop: "0.75rem" }} aria-live="polite">
-          {busy}
-        </p>
-      ) : null}
+  return (
+    <Dialog
+      open={open}
+      title="Add Product"
+      subtitle="Add a Daraz listing to the selected destination store(s) with gated create and clear diagnostics."
+      onClose={resetAndClose}
+      size="drawer"
+      closeOnBackdrop={!submitting}
+      closeDisabled={submitting}
+      footer={footer}
+    >
+      <div className="add-workspace">
+        <div className="add-workspace__dest-chip">
+          <span className="muted-line">Destination</span>
+          {selectedStores.length === 0 ? (
+            <StatusBadge tone="muted">None selected</StatusBadge>
+          ) : selectedStores.length === 1 ? (
+            <StatusBadge tone="ok">
+              {selectedStores[0].display_name || selectedStores[0].store_name || selectedStores[0].store_id}
+            </StatusBadge>
+          ) : (
+            <StatusBadge tone="ok">{selectedStores.length} stores</StatusBadge>
+          )}
+          {productCreateEnabled === false ? (
+            <StatusBadge tone="warn">Create disabled</StatusBadge>
+          ) : null}
+        </div>
 
-      {result?.status === "BLOCKED_CREATE" ? (
-        <p className="muted-line" style={{ marginTop: "0.75rem" }}>
-          Create is blocked until ALLOW_PRODUCT_CREATE (or probe) is enabled after supervised
-          proof. Per-store validation below is still accurate.
-        </p>
-      ) : null}
+        {localAlert ? (
+          <div
+            className={`banner ${
+              localAlert.tone === "ok"
+                ? "banner-ok"
+                : localAlert.tone === "warn"
+                  ? "banner-warn"
+                  : "banner-error"
+            }`}
+            role={localAlert.tone === "ok" ? "status" : "alert"}
+          >
+            {localAlert.text}
+          </div>
+        ) : null}
 
-      {result?.destinations?.length ? (
-        <section style={{ marginTop: "1rem" }}>
-          <h4 style={{ margin: "0 0 0.5rem" }}>Per-store progress</h4>
-          <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
-            {result.destinations.map((d, i) => {
-              const action = destinationActionKind(d);
-              const reasonText = destinationReasonLabel(d.reason);
-              return (
-                <li
-                  key={`${d.store?.store_id || i}-${d.attempt_id || d.status}`}
-                  style={{ marginBottom: "0.35rem" }}
-                >
-                  <strong>{d.store?.display_name || d.store?.store_id || "Store"}</strong>{" "}
-                  — {destinationProgressLabel(d)}
-                  {d.item_id ? ` · item ${d.item_id}` : ""}
-                  {d.existing_daraz_item_id
-                    ? ` · existing ${d.existing_daraz_item_id}`
-                    : ""}
-                  {d.used_no_brand ? " · No Brand" : ""}
-                  {reasonText ? ` · ${reasonText}` : ""}
-                  {action === "retry" ? (
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      style={{ marginLeft: "0.5rem" }}
-                      disabled={Boolean(busy) || submitting}
-                      onClick={() => void onRetryDestination(d)}
-                    >
-                      Retry
-                    </button>
-                  ) : null}
-                  {action === "reconcile" ? (
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      style={{ marginLeft: "0.5rem" }}
-                      disabled={Boolean(busy) || submitting}
-                      onClick={() => void onReconcileDestination(d)}
-                    >
-                      Reconcile
-                    </button>
-                  ) : null}
+        {attention.lines.length > 0 ? (
+          <div className="add-attention-list" role="alert">
+            <h4>Stores needing attention</h4>
+            <ul>
+              {attention.lines.map((line) => (
+                <li key={`${line.storeLabel}-${line.reasonLabel}`}>
+                  <strong>{line.storeLabel}</strong> — {line.statusLabel}
+                  <div className="add-attention-list__reason">{line.reasonLabel}</div>
+                  <div className="muted-line">{line.recovery}</div>
                 </li>
-              );
-            })}
-          </ul>
-          {retryable.length || reconcileable.length ? (
-            <p className="muted-line" style={{ marginTop: "0.5rem" }}>
-              {retryable.length
-                ? `${retryable.length} store(s) safe to retry (keeps Seller SKUs). `
-                : ""}
-              {reconcileable.length
-                ? `${reconcileable.length} store(s) need reconciliation — do not create again until resolved.`
-                : ""}
-            </p>
-          ) : null}
-          {result.timings_ms?.total != null || result.timings_ms?.total_ms != null ? (
-            <p className="muted-line" style={{ marginBottom: 0 }}>
-              {Math.round(
-                Number(result.timings_ms.total_ms ?? result.timings_ms.total) || 0
-              )}
-              ms
-              {result.timings_ms.destination_parallelism != null
-                ? ` · parallel ${result.timings_ms.destination_parallelism}`
-                : ""}
-              {result.timings_ms.catalog_strategy
-                ? ` · catalog ${String(result.timings_ms.catalog_strategy)}`
-                : ""}
-              {result.timings_ms.fetch_extract != null
-                ? ` · fetch ${Math.round(Number(result.timings_ms.fetch_extract) || 0)}ms`
-                : ""}
-            </p>
-          ) : null}
-        </section>
-      ) : null}
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
-      {draftPreview ? (
-        <CloneDraftPreview
-          result={draftPreview as any}
-          variants={draftVariants as any}
-          extractionComplete={extractionComplete}
+        <div className="tabs" role="tablist">
+          <button
+            type="button"
+            className={`tab${mode === "url" ? " active" : ""}`}
+            onClick={() => {
+              if (submitting) return;
+              setMode("url");
+              setResult(null);
+            }}
+            disabled={submitting}
+          >
+            Daraz Link
+          </button>
+          <button
+            type="button"
+            className={`tab${mode === "connected" ? " active" : ""}`}
+            onClick={() => {
+              if (submitting) return;
+              setMode("connected");
+              setResult(null);
+              setFetchedUrl(null);
+            }}
+            disabled={submitting}
+          >
+            Connected Item ID
+          </button>
+        </div>
+
+        {mode === "url" ? (
+          <label className="add-field">
+            Product URL
+            <input
+              value={productUrl}
+              onChange={(e) => {
+                setProductUrl(e.target.value);
+                if (fetchedUrl && e.target.value.trim() !== fetchedUrl) {
+                  setFetchedUrl(null);
+                  setDraftPreview(null);
+                  setExtractionComplete(null);
+                }
+              }}
+              placeholder="https://www.daraz.pk/products/…"
+              disabled={submitting}
+            />
+          </label>
+        ) : (
+          <div className="stack" style={{ gap: "0.65rem" }}>
+            <label className="add-field">
+              Source store
+              <select
+                value={sourceStore}
+                onChange={(e) => setSourceStore(e.target.value)}
+                disabled={submitting}
+              >
+                <option value="">Select store…</option>
+                {stores.map((s) => (
+                  <option key={s.store_id} value={s.store_id}>
+                    {s.display_name || s.store_name || s.store_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="add-field">
+              Product / Item ID
+              <input
+                value={itemId}
+                onChange={(e) => setItemId(e.target.value)}
+                placeholder="e.g. 1974026524"
+                inputMode="numeric"
+                disabled={submitting}
+              />
+            </label>
+          </div>
+        )}
+
+        <fieldset className="add-dest-select">
+          <legend>Destination stores</legend>
+          <div className="row" style={{ gap: "0.5rem", marginBottom: "0.45rem" }}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={selectAllDest} disabled={submitting}>
+              Select all
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearDest} disabled={submitting}>
+              Clear
+            </button>
+          </div>
+          <div className="add-dest-select__list">
+            {destOptions.map((s) => (
+              <label key={s.store_id} className="add-dest-select__row">
+                <input
+                  type="checkbox"
+                  checked={destSelected.has(s.store_id)}
+                  onChange={() => toggleDest(s.store_id)}
+                  disabled={submitting}
+                />
+                <span>{s.display_name || s.store_name || s.store_id}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        {(draftPreview || productTitle) && (
+          <section className="add-product-summary">
+            <div className="add-product-summary__media">
+              {thumb ? (
+                <img src={thumb} alt="" className="add-product-summary__thumb" />
+              ) : (
+                <div className="add-product-summary__thumb add-product-summary__thumb--empty">No image</div>
+              )}
+            </div>
+            <div className="add-product-summary__body">
+              <h4>{productTitle || "Product preview"}</h4>
+              <p className="muted-line" style={{ margin: 0 }}>
+                {mode === "url" ? productUrl.trim() || "URL pending" : `Item ${itemId.trim() || "—"}`}
+              </p>
+              <div className="add-chip-row">
+                <span className="add-chip">{draftVariants.length || 0} variants</span>
+                <span className="add-chip">
+                  {(
+                    (draftPreview?.draft as { media?: { product_images?: string[] } } | undefined)
+                      ?.media?.product_images || []
+                  ).length}{" "}
+                  images
+                </span>
+                {extractionComplete === false ? (
+                  <span className="add-chip add-chip--warn">Incomplete extraction</span>
+                ) : urlFetched ? (
+                  <span className="add-chip add-chip--ok">Fetched</span>
+                ) : null}
+              </div>
+              {draftVariants[0] ? (
+                <p className="muted-line" style={{ margin: "0.35rem 0 0" }}>
+                  PKR {String((draftVariants[0] as { price?: unknown }).price ?? "—")} · qty{" "}
+                  {String((draftVariants[0] as { quantity?: unknown }).quantity ?? "—")} · SKU{" "}
+                  <code>{String((draftVariants[0] as { seller_sku?: unknown }).seller_sku ?? "—")}</code>
+                </p>
+              ) : null}
+            </div>
+          </section>
+        )}
+
+        <label className="add-check">
+          <input
+            type="checkbox"
+            checked={editBefore}
+            onChange={(e) => setEditBefore(e.target.checked)}
+            disabled={submitting}
+          />
+          Review draft before creating
+        </label>
+
+        <label className="add-field">
+          Price override (optional — single SKU / same-price variants only)
+          <input
+            value={priceOverride}
+            onChange={(e) => setPriceOverride(e.target.value)}
+            placeholder="Will not flatten differently priced variants"
+            inputMode="decimal"
+            disabled={submitting}
+          />
+        </label>
+
+        {unresolvedVariants.length ? (
+          <fieldset className="add-price-required">
+            <legend>Price information required</legend>
+            <p className="muted-line">
+              Enter regular price only for unresolved variants, then Continue Adding.
+            </p>
+            <div className="stack" style={{ gap: "0.5rem" }}>
+              {unresolvedVariants.map((v) => (
+                <label key={v.key} className="add-field">
+                  {v.label}
+                  <input
+                    value={variantPrices[v.key] || ""}
+                    onChange={(e) =>
+                      setVariantPrices((prev) => ({ ...prev, [v.key]: e.target.value }))
+                    }
+                    placeholder="Rs."
+                    inputMode="decimal"
+                    disabled={submitting}
+                  />
+                </label>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ marginTop: "0.75rem" }}
+              disabled={!canCreate}
+              onClick={() => void runAdd({ edit: false })}
+            >
+              Continue Adding
+            </button>
+          </fieldset>
+        ) : null}
+
+        <ProcessingTimeline
+          phase={phase}
+          hasResult={Boolean(result) || Boolean(draftPreview)}
+          executedCreate={executedCreate && phase !== "preparing"}
+          elapsedMs={elapsedMs}
         />
-      ) : null}
+
+        <div className="add-dest-results">
+          <h4>Destination status</h4>
+          {result?.destinations?.length ? (
+            <div className="stack" style={{ gap: "0.65rem" }}>
+              {result.destinations.map((d, i) => (
+                <DestinationStatusCard
+                  key={`${d.store?.store_id || i}-${d.attempt_id || d.status}`}
+                  dest={d}
+                  processing={submitting && phase === "creating"}
+                  actionsDisabled={submitting}
+                  onRetry={() => void onRetryDestination(d)}
+                  onReconcile={() => void onReconcileDestination(d)}
+                />
+              ))}
+            </div>
+          ) : selectedStores.length ? (
+            <div className="stack" style={{ gap: "0.65rem" }}>
+              {selectedStores.map((s) => (
+                <DestinationStatusCard
+                  key={s.store_id}
+                  dest={{
+                    store: { store_id: s.store_id, display_name: s.display_name || s.store_name },
+                    status: submitting ? (phase === "fetching" ? "Checking" : "Processing") : "READY",
+                  }}
+                  checking={submitting && phase === "fetching"}
+                  processing={submitting && (phase === "creating" || phase === "preparing")}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="muted-line">Select a destination to see readiness and outcomes.</p>
+          )}
+        </div>
+
+        <DiagnosticsPanel
+          correlationId={correlationId || result?.correlation_id}
+          phase={phase}
+          message={localAlert?.text}
+          destinations={result?.destinations}
+          stageHistory={stageHistory}
+          elapsedMs={elapsedMs}
+          requestRunning={submitting}
+        />
+
+        {draftPreview ? (
+          <details className="add-draft-details">
+            <summary>Full draft preview</summary>
+            <CloneDraftPreview
+              result={draftPreview as any}
+              variants={draftVariants as any}
+              extractionComplete={extractionComplete}
+            />
+          </details>
+        ) : null}
+      </div>
     </Dialog>
   );
 }

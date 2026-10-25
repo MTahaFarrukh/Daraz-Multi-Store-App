@@ -2025,9 +2025,18 @@ def api_add_product_from_url(
     """One-click add from public Daraz URL → multi-store (create gated)."""
     enforce_capability(ctx.role, "product.create")
     from src.product_add import add_product_from_public_url
+    from src.product_add_trace import ProductAddTrace, safe_error_detail
     from src.product_fetch import ProductFetchError
     from src.public_daraz import PublicDarazError
 
+    trace = ProductAddTrace.create(ctx.workspace_id)
+    trace.stage(
+        "request_received",
+        source="public_url",
+        dest_count=len(body.destination_store_ids or []),
+        execute=bool(body.execute),
+        edit_before=bool(body.edit_before),
+    )
     try:
         result = add_product_from_public_url(
             ctx.workspace_id,
@@ -2040,7 +2049,11 @@ def api_add_product_from_url(
             allow_duplicates=body.allow_duplicates,
             edit_before=body.edit_before,
             resume_by_store=body.resume_by_store,
+            correlation_id=trace.correlation_id,
         )
+        result.setdefault("correlation_id", trace.correlation_id)
+        if not result.get("stage_history"):
+            result["stage_history"] = trace.public_history()
         audit_product_create_result(
             workspace_id=ctx.workspace_id,
             actor_user_id=ctx.user.id,
@@ -2049,7 +2062,31 @@ def api_add_product_from_url(
         )
         return result
     except (PublicDarazError, ProductFetchError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        trace.stage(
+            "request_failed",
+            error_class=type(exc).__name__,
+            message=str(exc)[:160],
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=safe_error_detail(
+                str(exc), diagnostic_id=trace.correlation_id, status_code=400
+            ),
+        ) from exc
+    except Exception as exc:
+        logger.exception(
+            "product_add unexpected cid=%s class=%s",
+            trace.correlation_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=safe_error_detail(
+                "Add product failed unexpectedly. Use the diagnostic ID when contacting support.",
+                diagnostic_id=trace.correlation_id,
+                status_code=500,
+            ),
+        ) from exc
 
 
 @app.post("/api/products/add-from-connected")
@@ -2060,8 +2097,17 @@ def api_add_product_from_connected(
     """One-click add from connected Item ID → multi-store (create gated)."""
     enforce_capability(ctx.role, "product.create")
     from src.product_add import add_product_from_connected
+    from src.product_add_trace import ProductAddTrace, safe_error_detail
     from src.product_fetch import ProductFetchError
 
+    trace = ProductAddTrace.create(ctx.workspace_id)
+    trace.stage(
+        "request_received",
+        source="connected",
+        dest_count=len(body.destination_store_ids or []),
+        execute=bool(body.execute),
+        edit_before=bool(body.edit_before),
+    )
     try:
         result = add_product_from_connected(
             ctx.workspace_id,
@@ -2075,7 +2121,11 @@ def api_add_product_from_connected(
             allow_duplicates=body.allow_duplicates,
             edit_before=body.edit_before,
             resume_by_store=body.resume_by_store,
+            correlation_id=trace.correlation_id,
         )
+        result.setdefault("correlation_id", trace.correlation_id)
+        if not result.get("stage_history"):
+            result["stage_history"] = trace.public_history()
         audit_product_create_result(
             workspace_id=ctx.workspace_id,
             actor_user_id=ctx.user.id,
@@ -2084,7 +2134,31 @@ def api_add_product_from_connected(
         )
         return result
     except (ProductFetchError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        trace.stage(
+            "request_failed",
+            error_class=type(exc).__name__,
+            message=str(exc)[:160],
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=safe_error_detail(
+                str(exc), diagnostic_id=trace.correlation_id, status_code=400
+            ),
+        ) from exc
+    except Exception as exc:
+        logger.exception(
+            "product_add unexpected cid=%s class=%s",
+            trace.correlation_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=safe_error_detail(
+                "Add product failed unexpectedly. Use the diagnostic ID when contacting support.",
+                diagnostic_id=trace.correlation_id,
+                status_code=500,
+            ),
+        ) from exc
 
 
 class BulkCopyCatalogBody(BaseModel):

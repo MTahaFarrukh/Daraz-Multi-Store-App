@@ -17,8 +17,14 @@ function detailMessage(data: unknown, fallback: string): string {
   const detail = (data as { detail?: unknown }).detail;
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object") {
-    const obj = detail as { message?: string; error?: string };
-    return obj.message || obj.error || fallback;
+    const obj = detail as {
+      message?: string;
+      error?: string;
+      diagnostic_id?: string;
+    };
+    const base = obj.message || obj.error || fallback;
+    if (obj.diagnostic_id) return `${base} (ID ${obj.diagnostic_id})`;
+    return base;
   }
   return fallback;
 }
