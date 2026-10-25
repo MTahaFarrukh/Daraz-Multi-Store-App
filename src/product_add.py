@@ -397,58 +397,128 @@ def _prepare_destination(
             },
         }
 
-    # Early durable-identity check (no claim yet — claim is acquired only after
-    # validation passes, and never held across Daraz HTTP).
-    if execute and claim_gate and not forced_attempt_id and not resume_item_id:
-        from src.product_copy_mapping import (
-            find_uncertain_create_attempt,
-            get_verified_copy_mapping,
-            resolve_connected_copy_identity,
-        )
+    # Early identity checks (no claim held yet — claims acquired only after
+    # validation passes, and never across Daraz HTTP).
+    if execute and not forced_attempt_id and not resume_item_id:
+        if claim_gate:
+            from src.product_copy_mapping import (
+                find_uncertain_create_attempt,
+                get_verified_copy_mapping,
+                resolve_connected_copy_identity,
+            )
 
-        early_identity = resolve_connected_copy_identity(workspace_id, draft)
-        if early_identity and dest.get("id"):
-            early_mapping = get_verified_copy_mapping(
-                workspace_id,
-                source_store_id=early_identity["source_store_id"],
-                source_daraz_item_id=early_identity["source_daraz_item_id"],
-                destination_store_id=str(dest["id"]),
-            )
-            if early_mapping:
-                return {
-                    "store": store_info,
-                    "status": "ALREADY_EXISTS",
-                    "creation_status": "VERIFIED",
-                    "reason": "already_copied_to_destination",
-                    "attempt_id": early_mapping.get("attempt_id"),
-                    "item_id": early_mapping.get("destination_item_id"),
-                    "existing_daraz_item_id": early_mapping.get("destination_item_id"),
-                    "draft_preview": build_create_product_payload_preview(draft),
-                    "timings_ms": {
-                        **timings,
-                        "dest_total": round((time.perf_counter() - t0) * 1000, 1),
-                    },
-                }
-            early_uncertain = find_uncertain_create_attempt(
-                workspace_id,
-                source_store_id=early_identity["source_store_id"],
-                source_daraz_item_id=early_identity["source_daraz_item_id"],
-                destination_store_id=str(dest["id"]),
-            )
-            if early_uncertain:
-                return {
-                    "store": store_info,
-                    "status": "NEEDS_ATTENTION",
-                    "creation_status": "NEEDS_RECONCILIATION",
-                    "reason": "product_create_attempt_requires_reconciliation",
-                    "attempt_id": early_uncertain.get("id"),
-                    "item_id": early_uncertain.get("destination_item_id"),
-                    "draft_preview": build_create_product_payload_preview(draft),
-                    "timings_ms": {
-                        **timings,
-                        "dest_total": round((time.perf_counter() - t0) * 1000, 1),
-                    },
-                }
+            early_identity = resolve_connected_copy_identity(workspace_id, draft)
+            if early_identity and dest.get("id"):
+                early_mapping = get_verified_copy_mapping(
+                    workspace_id,
+                    source_store_id=early_identity["source_store_id"],
+                    source_daraz_item_id=early_identity["source_daraz_item_id"],
+                    destination_store_id=str(dest["id"]),
+                )
+                if early_mapping:
+                    return {
+                        "store": store_info,
+                        "status": "ALREADY_EXISTS",
+                        "creation_status": "VERIFIED",
+                        "reason": "already_copied_to_destination",
+                        "attempt_id": early_mapping.get("attempt_id"),
+                        "item_id": early_mapping.get("destination_item_id"),
+                        "existing_daraz_item_id": early_mapping.get(
+                            "destination_item_id"
+                        ),
+                        "draft_preview": build_create_product_payload_preview(draft),
+                        "timings_ms": {
+                            **timings,
+                            "dest_total": round(
+                                (time.perf_counter() - t0) * 1000, 1
+                            ),
+                        },
+                    }
+                early_uncertain = find_uncertain_create_attempt(
+                    workspace_id,
+                    source_store_id=early_identity["source_store_id"],
+                    source_daraz_item_id=early_identity["source_daraz_item_id"],
+                    destination_store_id=str(dest["id"]),
+                )
+                if early_uncertain:
+                    return {
+                        "store": store_info,
+                        "status": "NEEDS_ATTENTION",
+                        "creation_status": "NEEDS_RECONCILIATION",
+                        "reason": "product_create_attempt_requires_reconciliation",
+                        "attempt_id": early_uncertain.get("id"),
+                        "item_id": early_uncertain.get("destination_item_id"),
+                        "draft_preview": build_create_product_payload_preview(draft),
+                        "timings_ms": {
+                            **timings,
+                            "dest_total": round(
+                                (time.perf_counter() - t0) * 1000, 1
+                            ),
+                        },
+                    }
+
+        # Pure public URL has no store-based mapping/claim. Still block re-create
+        # when a prior attempt for the same source_identity→dest exists, because
+        # request fingerprints include Seller SKUs that can change between runs.
+        if str(draft.get("source_type") or "") == "public_daraz_url" and dest.get(
+            "id"
+        ):
+            url_identity = build_source_identity(draft)
+            if url_identity:
+                repo_early = get_repo()
+                prior_verified = repo_early.find_product_attempts_for_source_dest(
+                    workspace_id,
+                    source_identities=[url_identity],
+                    destination_store_id=str(dest["id"]),
+                    states=["VERIFIED"],
+                )
+                for prior in prior_verified:
+                    dest_item = str(prior.get("destination_item_id") or "").strip()
+                    if not dest_item:
+                        continue
+                    return {
+                        "store": store_info,
+                        "status": "ALREADY_EXISTS",
+                        "creation_status": "VERIFIED",
+                        "reason": "product_create_attempt_already_verified",
+                        "attempt_id": prior.get("id"),
+                        "item_id": dest_item,
+                        "existing_daraz_item_id": dest_item,
+                        "draft_preview": build_create_product_payload_preview(draft),
+                        "timings_ms": {
+                            **timings,
+                            "dest_total": round(
+                                (time.perf_counter() - t0) * 1000, 1
+                            ),
+                        },
+                    }
+                prior_uncertain = repo_early.find_product_attempts_for_source_dest(
+                    workspace_id,
+                    source_identities=[url_identity],
+                    destination_store_id=str(dest["id"]),
+                    states=[
+                        "CREATING",
+                        "CREATED_UNVERIFIED",
+                        "NEEDS_RECONCILIATION",
+                    ],
+                )
+                if prior_uncertain:
+                    prior = prior_uncertain[0]
+                    return {
+                        "store": store_info,
+                        "status": "NEEDS_ATTENTION",
+                        "creation_status": "NEEDS_RECONCILIATION",
+                        "reason": "product_create_attempt_requires_reconciliation",
+                        "attempt_id": prior.get("id"),
+                        "item_id": prior.get("destination_item_id"),
+                        "draft_preview": build_create_product_payload_preview(draft),
+                        "timings_ms": {
+                            **timings,
+                            "dest_total": round(
+                                (time.perf_counter() - t0) * 1000, 1
+                            ),
+                        },
+                    }
 
     try:
         client = client_for_store(dest)

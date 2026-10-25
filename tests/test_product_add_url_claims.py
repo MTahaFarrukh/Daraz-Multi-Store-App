@@ -295,3 +295,67 @@ def test_ssrf_redirect_rejected(monkeypatch):
         normalize_daraz_product_url("http://www.daraz.pk/products/foo-i123456.html")
     with pytest.raises(PublicDarazError):
         normalize_daraz_product_url("https://127.0.0.1/products/foo-i123456.html")
+
+
+def test_public_url_verified_attempt_blocks_recreate_despite_sku_fingerprint(
+    tenancy_env,
+):
+    """Same source URL→dest must not CreateProduct again when attempt is verified.
+
+    Fingerprints include Seller SKUs; SKUs can change between runs, so identity
+    must be checked independently of the fingerprint.
+    """
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    dest = _store(tenancy_env, wid, "store_b")
+    source_url = "https://www.daraz.pk/products/x-i123456.html"
+    tenancy_env.create_product_attempt(
+        {
+            "workspace_id": wid,
+            "source_type": "public_daraz_url",
+            "source_identity": source_url,
+            "destination_store_id": dest["id"],
+            "request_fingerprint": "fp-old-skus-different",
+            "state": "VERIFIED",
+            "generated_seller_skus": [{"seller_sku": "MTF-OLD"}],
+            "verification_state": "VERIFIED",
+            "destination_item_id": "777001",
+        }
+    )
+    draft = {
+        "source_type": "public_daraz_url",
+        "source_url": source_url,
+        "source_daraz_item_id": "123456",
+        "product": {"title": "Public Toy", "primary_category_id": "100"},
+        "variants": [
+            {
+                "seller_sku": "MTF-NEW-DIFFERENT",
+                "price": 100.0,
+                "quantity": 1,
+                "package_weight": 0.5,
+                "package_length": 10,
+                "package_width": 8,
+                "package_height": 4,
+                "sale_props": {"Color": "Red"},
+            }
+        ],
+        "media": {"product_images": ["https://static-01.daraz.pk/p/a.png"]},
+        "duplicate_check_done": True,
+        "possible_duplicates": [],
+        "category_resolution": {"confidence": "high", "conflict": False},
+    }
+    mock_client = MagicMock()
+    with patch("src.product_add.client_for_store", return_value=mock_client):
+        out = _prepare_destination(
+            wid,
+            draft=draft,
+            dest=dest,
+            price_override=None,
+            allow_duplicates=False,
+            execute=True,
+            confirm=True,
+            gate_on=True,
+            claim_gate=True,
+        )
+    assert out["reason"] == "product_create_attempt_already_verified"
+    assert out["item_id"] == "777001"
+    mock_client.create_product.assert_not_called()
