@@ -1,35 +1,32 @@
-"""Supervised CreateProduct path — explicit, env-gated, never auto-run."""
+"""Supervised CreateProduct path — explicit, env-gated, never auto-run.
+
+Probe authorization (ALLOW_PRODUCT_CREATE_PROBE) is isolated from ordinary
+product creation (ALLOW_PRODUCT_CREATE). Enabling the probe must not unlock
+Add Product, URL add, connected multi-dest create, or bulk copy.
+"""
 
 from __future__ import annotations
 
 import os
 from typing import Any
 
-from src.brand_resolve import resolve_brand_for_category
-from src.category_attr_resolve import (
-    get_cached_category_attributes,
-    resolve_required_category_attributes,
-)
-from src.category_validate import validate_draft_against_category
-from src.daraz_api import DarazApiError
 from src.db.repo import get_repo
-from src.image_migrate import DarazImageMigrationService
 from src.product_clone import build_connected_clone_draft
-from src.product_create_payload import (
-    build_create_product_payload_preview,
-    build_create_product_xml,
-    redact_create_response,
-)
+from src.product_create_payload import build_create_product_payload_preview
 
 
 def create_probe_enabled() -> bool:
+    """Supervised create-probe endpoint only — does NOT authorize ordinary creates."""
     return os.getenv("ALLOW_PRODUCT_CREATE_PROBE", "").lower() in {"1", "true", "yes"}
 
 
 def product_create_enabled() -> bool:
-    """True when live CreateProduct is allowed (full flag or supervised probe)."""
-    full = os.getenv("ALLOW_PRODUCT_CREATE", "").lower() in {"1", "true", "yes"}
-    return full or create_probe_enabled()
+    """True only when ALLOW_PRODUCT_CREATE authorizes ordinary create paths.
+
+    Probe flag is intentionally excluded so supervised sessions cannot unlock
+    Add Product / URL / bulk creation by enabling PROBE alone.
+    """
+    return os.getenv("ALLOW_PRODUCT_CREATE", "").lower() in {"1", "true", "yes"}
 
 
 def run_supervised_create(
@@ -44,12 +41,15 @@ def run_supervised_create(
     """Prepare (and optionally execute) one supervised CreateProduct.
 
     Requires:
-    - ALLOW_PRODUCT_CREATE_PROBE enabled
+    - ALLOW_PRODUCT_CREATE_PROBE enabled (probe-only; not ALLOW_PRODUCT_CREATE)
     - confirm=True
-    - execute=True to actually call Daraz (otherwise dry-run validation + preview)
+    - execute=True to call Daraz CreateProduct (otherwise mutation-free dry-run)
+    - Same durable claim / mapping / uncertain-attempt gates as single-dest add
     - destination ≠ source
     - category + brand validation pass
     - no strong duplicates unless allow_duplicates=True (operator override)
+
+    Dry-run (execute=false) never calls CreateProduct, UpdatePrice, or image migrate.
     """
     if not create_probe_enabled():
         return {
@@ -70,11 +70,12 @@ def run_supervised_create(
         return {"status": "BLOCKED", "reason": "Destination store not found"}
 
     source_product = repo.get_daraz_product(workspace_id, source_product_id)
-    source_store = None
-    if source_product:
-        source_store = repo.get_store_by_uuid(
-            workspace_id, str(source_product.get("store_id") or "")
-        )
+    if not source_product:
+        return {"status": "BLOCKED", "reason": "Source product not found"}
+
+    source_store = repo.get_store_by_uuid(
+        workspace_id, str(source_product.get("store_id") or "")
+    )
     from src.workspace_connections import assert_product_copy_allowed
 
     perm = assert_product_copy_allowed(
@@ -95,186 +96,211 @@ def run_supervised_create(
             "copy_permission": perm,
         }
 
-    # Workspace-scoped encrypted store tokens only — never the legacy global vault.
-    try:
-        from src.ops import client_for_store
-        from src.token_refresh import refresh_store_tokens
-
-        try:
-            refresh_store_tokens(
-                store_ids=[str(dest.get("store_id") or dest.get("id"))],
-                within_minutes=30,
-                workspace_id=workspace_id,
-            )
-            dest = (
-                repo.get_store(workspace_id, destination_store_id)
-                or repo.get_store_by_uuid(workspace_id, destination_store_id)
-                or dest
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        client = client_for_store(dest)
-    except Exception as exc:  # noqa: BLE001
+    if source_store and str(source_store.get("id")) == str(dest.get("id")):
         return {
             "status": "BLOCKED",
-            "reason": f"Destination store has no usable workspace access token ({type(exc).__name__})",
+            "reason": "destination_must_differ_from_source",
         }
 
-    # Build draft first (without live category) to know primary category
-    base = build_connected_clone_draft(
+    # Soft token refresh — read-only for dry-run; create path still needs a client.
+    try:
+        from src.token_refresh import refresh_store_tokens
+
+        refresh_store_tokens(
+            store_ids=[str(dest.get("store_id") or dest.get("id"))],
+            within_minutes=30,
+            workspace_id=workspace_id,
+        )
+        dest = (
+            repo.get_store(workspace_id, destination_store_id)
+            or repo.get_store_by_uuid(workspace_id, destination_store_id)
+            or dest
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        base = build_connected_clone_draft(
+            workspace_id,
+            source_product_id=source_product_id,
+            destination_store_id=destination_store_id,
+            destination_store=dest,
+        )
+    except ValueError as exc:
+        return {"status": "BLOCKED", "reason": str(exc)}
+
+    draft = base.get("draft") or {}
+
+    # Reuse the same destination pipeline as Add Product (claims, mapping, attempts).
+    # gate_on=True authorizes this supervised session only — ordinary paths still
+    # require product_create_enabled() / ALLOW_PRODUCT_CREATE.
+    from src.product_add import _prepare_destination
+
+    dest_out = _prepare_destination(
         workspace_id,
+        draft=draft,
+        dest=dest,
+        price_override=None,
+        allow_duplicates=allow_duplicates,
+        execute=bool(execute),
+        confirm=True,
+        gate_on=True,
+        claim_gate=True,
+        allow_image_migrate=bool(execute),
+    )
+
+    return _map_supervised_result(
+        dest_out,
+        execute=bool(execute),
         source_product_id=source_product_id,
-        destination_store_id=destination_store_id,
+        destination_store_id=str(dest.get("store_id") or destination_store_id),
+        draft=draft,
     )
-    draft = base["draft"]
-    primary = (draft.get("product") or {}).get("primary_category_id")
 
-    try:
-        cat_payload = get_cached_category_attributes(
-            primary,
-            client.get_category_attributes,
-            marketplace=str(dest.get("country") or "pk"),
-        )
-    except DarazApiError as exc:
-        return {
-            "status": "FAILED",
-            "reason": f"category_attributes:{exc.code}:{exc}",
-            "preview": build_create_product_payload_preview(draft),
-        }
 
-    brand_resolution = resolve_brand_for_category(
-        source_brand=(
-            (draft.get("brand_resolution") or {}).get("source_brand")
-            or (draft.get("product") or {}).get("source_brand")
-        ),
-        primary_category_id=primary,
-        query_brands=client.query_category_brands,
-        marketplace=str(dest.get("country") or "pk"),
+def _map_supervised_result(
+    dest_out: dict[str, Any],
+    *,
+    execute: bool,
+    source_product_id: str,
+    destination_store_id: str,
+    draft: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize single-dest add outcomes into supervised create-probe shapes."""
+    status = str(dest_out.get("status") or "")
+    creation = str(dest_out.get("creation_status") or "")
+    reason = str(dest_out.get("reason") or "")
+    preview = dest_out.get("draft_preview") or build_create_product_payload_preview(
+        draft
     )
-    if brand_resolution.get("status") == "NO_BRAND":
-        draft["product"]["brand"] = brand_resolution.get("brand")
-        attrs = draft["product"].get("attributes") or {}
-        attrs["brand"] = brand_resolution.get("brand")
-        draft["product"]["attributes"] = attrs
-    draft["brand_resolution"] = brand_resolution
-
-    attr_report = resolve_required_category_attributes(draft, cat_payload)
-    draft.setdefault("validation", {})["attribute_resolution"] = {
-        "resolved_count": attr_report.get("resolved_count"),
-        "unresolved_count": attr_report.get("unresolved_count"),
-        "compatibility": attr_report.get("compatibility"),
+    brand = dest_out.get("brand_resolution") or draft.get("brand_resolution")
+    category = dest_out.get("category") or (draft.get("validation") or {}).get(
+        "category"
+    )
+    base: dict[str, Any] = {
+        "preview": preview,
+        "validation": dest_out.get("validation") or draft.get("validation"),
+        "brand_resolution": brand,
+        "category": category,
+        "mtf_skus": [
+            v.get("seller_sku")
+            for v in (draft.get("variants") or [])
+            if isinstance(v, dict)
+        ],
+        "image_strategy": (draft.get("media") or {}).get("image_strategy")
+        or ((preview or {}).get("image_strategy") if isinstance(preview, dict) else None),
+        "source_product_id": source_product_id,
+        "destination_store_id": destination_store_id,
+        "variant_count": dest_out.get("variant_count")
+        or len([v for v in (draft.get("variants") or []) if isinstance(v, dict)]),
+        "attempt_id": dest_out.get("attempt_id"),
+        "item_id": dest_out.get("item_id") or dest_out.get("existing_daraz_item_id"),
+        "creation_status": creation or None,
+        "copy_permission": "same_workspace_or_granted",
+        "store": dest_out.get("store"),
+        "timings_ms": dest_out.get("timings_ms"),
     }
 
-    category_result = validate_draft_against_category(draft, cat_payload)
-    draft["validation"]["category"] = category_result
-
-    errors: list[str] = list(draft["validation"].get("errors") or [])
-    if brand_resolution.get("status") == "UNRESOLVED":
-        errors.append(f"brand:{brand_resolution.get('message')}")
-    if not category_result.get("valid"):
-        errors.extend(f"category_missing:{m}" for m in category_result.get("missing_required") or [])
-        errors.extend(
-            f"category_invalid:{i.get('attribute')}"
-            for i in category_result.get("invalid_values") or []
-        )
-
-    duplicates = draft.get("possible_duplicates") or []
-    if duplicates and not allow_duplicates:
+    # Mapping / claim / uncertain blocks
+    if status in {"ALREADY_EXISTS"} or reason in {
+        "already_copied_to_destination",
+    }:
         return {
+            **base,
             "status": "NOT_RUN",
-            "reason": (
+            "reason": reason or "already_copied_to_destination",
+        }
+
+    if reason in {
+        "product_create_attempt_requires_reconciliation",
+        "stale_claim_requires_reconciliation",
+        "create_claim_uncertain_requires_reconciliation",
+        "concurrent_create_claim_held",
+    } or creation in {"NEEDS_RECONCILIATION"}:
+        return {
+            **base,
+            "status": "NOT_RUN",
+            "reason": reason or "requires_reconciliation",
+        }
+
+    if (
+        "duplicate" in reason.lower()
+        or "already exists" in reason.lower()
+        or dest_out.get("duplicates")
+    ):
+        return {
+            **base,
+            "status": "NOT_RUN",
+            "reason": reason
+            or (
                 "Possible duplicate(s) on destination — refusing create. "
-                "Pick a safe source/destination or pass allow_duplicates only with explicit operator intent."
+                "Pick a safe source/destination or pass allow_duplicates "
+                "only with explicit operator intent."
             ),
-            "duplicates": duplicates,
-            "preview": build_create_product_payload_preview(draft),
-            "validation": {**draft["validation"], "errors": errors},
-            "brand_resolution": brand_resolution,
-            "category": category_result,
+            "duplicates": dest_out.get("duplicates")
+            or draft.get("possible_duplicates"),
         }
 
-    # Resolve images (CDN reuse or migrate)
-    media = draft.get("media") or {}
-    source_images = list(media.get("product_images") or [])
-    img_svc = DarazImageMigrationService(client)
-    resolved = img_svc.resolve_many(source_images)
-    final_urls: list[str] = []
-    img_errors: list[str] = []
-    strategies: list[str] = []
-    for r in resolved:
-        strategies.append(r.strategy)
-        if r.status == "completed" and r.migrated_url:
-            final_urls.append(r.migrated_url)
-        else:
-            img_errors.append(f"{r.source_url}:{r.status}:{r.error}")
-    draft.setdefault("media", {})
-    draft["media"]["resolved_images"] = final_urls
-    draft["media"]["image_strategy"] = {
-        "strategies": strategies,
-        "resolved_count": len(final_urls),
-        "errors": img_errors,
-    }
-    if img_errors or not final_urls:
-        errors.append("images:unable_to_resolve_all")
-
-    draft["validation"]["errors"] = list(dict.fromkeys(errors))
-    draft["validation"]["can_create"] = (
-        not draft["validation"]["errors"]
-        and category_result.get("valid")
-        and brand_resolution.get("status") == "NO_BRAND"
-        and bool(final_urls)
-    )
-
-    preview = build_create_product_payload_preview(draft)
-    xml = build_create_product_xml(draft) if draft["validation"]["can_create"] else None
-
-    if not draft["validation"]["can_create"]:
+    if status == "READY" and not execute:
         return {
-            "status": "NOT_RUN",
-            "reason": "Validation failed — CreateProduct not submitted",
-            "preview": preview,
-            "validation": draft["validation"],
-            "brand_resolution": brand_resolution,
-            "category": category_result,
-            "payload_xml_length": len(xml) if xml else 0,
-        }
-
-    if not execute:
-        return {
+            **base,
             "status": "READY",
-            "reason": "Validation passed; execute=false so CreateProduct was not called",
-            "preview": preview,
-            "validation": draft["validation"],
-            "brand_resolution": brand_resolution,
-            "category": category_result,
-            "payload_xml_length": len(xml or ""),
-            "mtf_skus": [v.get("seller_sku") for v in draft.get("variants") or []],
+            "reason": (
+                "Validation passed; execute=false so CreateProduct was not called "
+                "(no image migrate / UpdatePrice)"
+            ),
+            "payload_xml_length": None,
         }
 
-    assert xml is not None
-    try:
-        resp = client.create_product(xml)
-    except DarazApiError as exc:
+    # Successful create outcomes from product_add
+    if status in {
+        "Created",
+        "CREATED",
+        "CREATED_WITH_WARNING",
+        "VERIFIED",
+    } or creation in {
+        "CREATED",
+        "VERIFIED",
+        "CREATED_WITH_WARNING",
+        "CREATED_UNVERIFIED",
+    }:
+        out_status = "PROVEN" if base.get("item_id") else "NEEDS_ATTENTION"
+        if creation == "CREATED_UNVERIFIED" or not base.get("item_id"):
+            out_status = "NEEDS_ATTENTION"
         return {
+            **base,
+            "status": out_status,
+            "reason": reason
+            or (
+                "create_succeeded"
+                if out_status == "PROVEN"
+                else "create_outcome_requires_reconciliation"
+            ),
+            "daraz_response": dest_out.get("daraz_response"),
+            "warnings": dest_out.get("warnings"),
+        }
+
+    if "CreateProduct" in reason or creation.startswith("FAILED") or status in {
+        "Failed",
+        "FAILED",
+    }:
+        return {
+            **base,
             "status": "FAILED",
-            "reason": f"CreateProduct:{exc.code}:{exc}",
-            "daraz_error": redact_create_response(exc.payload),
-            "preview": preview,
-            "validation": draft["validation"],
-            "mtf_skus": [v.get("seller_sku") for v in draft.get("variants") or []],
-            "image_strategy": draft["media"].get("image_strategy"),
+            "reason": reason or status,
+            "daraz_error": dest_out.get("daraz_error"),
+        }
+
+    if status in {"NEEDS_ATTENTION"} or not execute:
+        return {
+            **base,
+            "status": "NOT_RUN",
+            "reason": reason or "Validation failed — CreateProduct not submitted",
         }
 
     return {
-        "status": "PROVEN",
-        "daraz_response": redact_create_response(resp),
-        "preview": preview,
-        "validation": draft["validation"],
-        "brand_resolution": brand_resolution,
-        "category": category_result,
-        "mtf_skus": [v.get("seller_sku") for v in draft.get("variants") or []],
-        "image_strategy": draft["media"].get("image_strategy"),
-        "source_product_id": source_product_id,
-        "destination_store_id": str(dest.get("store_id")),
-        "variant_count": len(draft.get("variants") or []),
+        **base,
+        "status": "NOT_RUN",
+        "reason": reason or status or "unknown_supervised_outcome",
+        "daraz_error": dest_out.get("daraz_error"),
     }

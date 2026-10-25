@@ -15,16 +15,18 @@ This checklist does **not** enable `ALLOW_PRODUCT_CREATE` or `ALLOW_PRODUCT_CREA
 3. Source is either:
    - a connected product in the same workspace, or
    - a public Daraz URL (no cross-workspace peer catalog unless `copy_products` is granted).
-4. Confirm create flags are still gated:
-   - Prefer probe path: `ALLOW_PRODUCT_CREATE_PROBE=true` temporarily, `ALLOW_PRODUCT_CREATE=false`.
-   - Or full gate: `ALLOW_PRODUCT_CREATE=true` only after probe proof.
+4. Confirm create flags are still gated (Phase A2 — flags are isolated):
+   - Prefer probe path: `ALLOW_PRODUCT_CREATE_PROBE=true` temporarily, **`ALLOW_PRODUCT_CREATE=false`**.
+   - Probe alone does **not** unlock Add Product / URL / bulk create.
+   - Use `POST /api/products/{id}/create-probe` only (claims + mapping + reconcile attempts).
+   - Full gate `ALLOW_PRODUCT_CREATE=true` only after probe proof, if ordinary create UI is needed.
 5. Confirm no open **uncertain** create attempt / held claim for the same source→destination identity. If present: **reconcile first** — never create again blindly.
 
 ---
 
 ## Pre-submit verification (dry-run)
 
-Use Add Product / create-probe with **`execute=false`** (or validate-only). Confirm before any live call:
+Use **create-probe** with **`execute=false`** (mutation-free: no CreateProduct, UpdatePrice, or image migrate). Confirm before any live call. Optional: `GET /api/stores/{id}/category-brands/no-brand?primary_category_id=…` for read-only brand diagnostics.
 
 | Check | Expected |
 |-------|----------|

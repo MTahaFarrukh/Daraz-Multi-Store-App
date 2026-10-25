@@ -464,14 +464,16 @@ def spa_routes(path: str = ""):
 @app.get("/api/public-config")
 def api_public_config() -> dict:
     """Browser-safe config (publishable key only — never secret key)."""
-    from src.product_create import product_create_enabled
+    from src.product_create import create_probe_enabled, product_create_enabled
 
     return {
         "supabase_url": get_env("SUPABASE_URL"),
         "supabase_publishable_key": get_env("SUPABASE_PUBLISHABLE_KEY"),
         "auth_required": True,
-        # Non-secret gate for UI disablement; backend still enforces create.
+        # Ordinary Add/bulk create — NOT unlocked by probe flag alone.
         "product_create_enabled": bool(product_create_enabled()),
+        # Supervised create-probe endpoint only.
+        "create_probe_enabled": bool(create_probe_enabled()),
     }
 
 
@@ -708,6 +710,22 @@ def api_store_health_check(
     if result.get("reason") == "store_not_found":
         raise HTTPException(status_code=404, detail="Store not found")
     return result
+
+
+@app.get("/api/stores/{store_id}/category-brands/no-brand")
+def api_category_no_brand_diagnostic(
+    store_id: str,
+    primary_category_id: str = Query(..., min_length=1),
+    ctx: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    """Read-only No Brand lookup for a category. Never CreateProduct or migrate_image."""
+    from src.brand_diagnostics import diagnose_category_no_brand
+
+    return diagnose_category_no_brand(
+        ctx.workspace_id,
+        store_ref=store_id,
+        primary_category_id=primary_category_id,
+    )
 
 
 @app.get("/stores")

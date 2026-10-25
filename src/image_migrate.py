@@ -139,8 +139,19 @@ class DarazImageMigrationService:
         self.prefer_cdn_reuse = prefer_cdn_reuse
         self._cache: dict[str, str] = {}
 
-    def resolve_one(self, source_url: str, *, force_migrate: bool = False) -> ImageMigrationResult:
-        """Resolve a single URL to a CreateProduct-usable image URL."""
+    def resolve_one(
+        self,
+        source_url: str,
+        *,
+        force_migrate: bool = False,
+        allow_migrate: bool = True,
+    ) -> ImageMigrationResult:
+        """Resolve a single URL to a CreateProduct-usable image URL.
+
+        When ``allow_migrate`` is False (dry-run / validation), only CDN reuse
+        and local caches are used — never ``migrate_image`` / batch migrate.
+        Non-CDN URLs are reported as unresolved instead of silently migrating.
+        """
         url = (source_url or "").strip()
         if not url:
             return ImageMigrationResult(
@@ -171,6 +182,14 @@ class DarazImageMigrationService:
                 status="completed",
                 strategy="reuse_cdn",
                 migrated_url=url,
+            )
+
+        if not allow_migrate:
+            return ImageMigrationResult(
+                source_url=url,
+                status="failed",
+                strategy="migration_disabled",
+                error="image_migration_disabled_in_validation",
             )
 
         # Prefer singular migrate for one URL (immediate URL, no poll).
@@ -208,7 +227,9 @@ class DarazImageMigrationService:
         """Force migrate path (no CDN short-circuit). Kept for tests/scripts."""
         return self.resolve_one(source_url, force_migrate=True)
 
-    def resolve_many(self, urls: list[str]) -> list[ImageMigrationResult]:
+    def resolve_many(
+        self, urls: list[str], *, allow_migrate: bool = True
+    ) -> list[ImageMigrationResult]:
         """Resolve URLs with dedupe + bounded concurrency for unique sources."""
         ordered: list[str] = []
         seen: set[str] = set()
@@ -224,10 +245,13 @@ class DarazImageMigrationService:
         workers = max(1, min(DEFAULT_IMAGE_WORKERS, len(unique) or 1))
         if len(unique) <= 1 or workers == 1:
             for key in unique:
-                resolved[key] = self.resolve_one(key)
+                resolved[key] = self.resolve_one(key, allow_migrate=allow_migrate)
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futs = {pool.submit(self.resolve_one, key): key for key in unique}
+                futs = {
+                    pool.submit(self.resolve_one, key, allow_migrate=allow_migrate): key
+                    for key in unique
+                }
                 for fut in as_completed(futs):
                     key = futs[fut]
                     resolved[key] = fut.result()

@@ -75,14 +75,18 @@ def _fake_extract(**overrides: Any) -> dict[str, Any]:
 
 
 def test_product_create_enabled_flags(monkeypatch):
+    from src.product_create import create_probe_enabled
+
     monkeypatch.delenv("ALLOW_PRODUCT_CREATE", raising=False)
     monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "false")
     assert product_create_enabled() is False
     monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "true")
     assert product_create_enabled() is True
+    # Probe alone must NOT unlock ordinary Add/bulk create paths.
     monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
     monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "yes")
-    assert product_create_enabled() is True
+    assert create_probe_enabled() is True
+    assert product_create_enabled() is False
 
 
 def test_public_url_fetched_once_for_two_destinations(tenancy_env):

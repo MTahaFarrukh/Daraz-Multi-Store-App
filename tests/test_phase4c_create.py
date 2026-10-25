@@ -461,7 +461,9 @@ def test_duplicate_safety_blocks_supervised(tenancy_env, monkeypatch):
         def query_category_brands(self, **_k):
             return {"module": [{"name": "No Brand", "brand_id": 1}]}
 
-    monkeypatch.setattr("src.ops.client_for_store", lambda store: FakeClient())
+    fake = FakeClient()
+    monkeypatch.setattr("src.ops.client_for_store", lambda store: fake)
+    monkeypatch.setattr("src.product_add.client_for_store", lambda store: fake)
     monkeypatch.setattr(
         "src.token_refresh.refresh_store_tokens",
         lambda **kwargs: None,
@@ -475,7 +477,8 @@ def test_duplicate_safety_blocks_supervised(tenancy_env, monkeypatch):
         allow_duplicates=False,
     )
     assert out["status"] == "NOT_RUN"
-    assert "duplicate" in out["reason"].lower()
+    reason_l = out["reason"].lower()
+    assert "duplicate" in reason_l or "already exists" in reason_l
 
 
 def test_product_detail_includes_sanitized_html(client, tenancy_env):

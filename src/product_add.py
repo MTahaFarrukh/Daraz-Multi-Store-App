@@ -328,6 +328,7 @@ def _prepare_destination(
     forced_attempt_id: str | None = None,
     forced_seller_skus: Any = None,
     claim_gate: bool = True,
+    allow_image_migrate: bool | None = None,
 ) -> dict[str, Any]:
     """Validate one destination draft; optionally CreateProduct when gated+confirmed.
 
@@ -335,8 +336,14 @@ def _prepare_destination(
     connected identities before CreateProduct. Bulk copy passes False after it
     already holds the claim. Forced retries skip the gate so they can continue
     an owned attempt without being blocked by their own uncertain row.
+
+    Image migration is allowed only when ``allow_image_migrate`` is True.
+    Default: True only when both ``gate_on`` and ``execute`` (live create path).
+    Dry-run / validation never calls migrate_image / UpdatePrice / CreateProduct.
     """
     del confirm  # probe-only concept; kept for call-site compatibility
+    if allow_image_migrate is None:
+        allow_image_migrate = bool(gate_on and execute)
     t0 = time.perf_counter()
     timings: dict[str, float] = {}
     store_info = _store_label(dest)
@@ -868,24 +875,33 @@ def _prepare_destination(
     )
     t_img = time.perf_counter()
     img_svc = DarazImageMigrationService(client)
-    resolved = img_svc.resolve_many(source_images)
+    resolved = img_svc.resolve_many(
+        source_images, allow_migrate=bool(allow_image_migrate)
+    )
     timings["images_ms"] = round((time.perf_counter() - t_img) * 1000, 1)
     final_urls: list[str] = []
     img_errors: list[str] = []
     strategies: list[str] = []
+    needs_migration: list[str] = []
     for r in resolved:
         strategies.append(r.strategy)
         if r.status == "completed" and r.migrated_url:
             final_urls.append(r.migrated_url)
         else:
             img_errors.append(f"{r.source_url}:{r.status}:{r.error}")
+            if r.strategy == "migration_disabled":
+                needs_migration.append(str(r.source_url))
     draft.setdefault("media", {})["resolved_images"] = final_urls
     draft["media"]["image_strategy"] = {
         "strategies": strategies,
         "resolved_count": len(final_urls),
         "errors": img_errors,
         "unique_source_urls": len(dict.fromkeys(u for u in source_images if u)),
+        "allow_migrate": bool(allow_image_migrate),
+        "needs_migration": needs_migration,
     }
+    if needs_migration and not allow_image_migrate:
+        errors.append("images:migration_required_for_non_cdn_urls")
     if img_errors or not final_urls:
         errors.append("images:unable_to_resolve_all")
 
