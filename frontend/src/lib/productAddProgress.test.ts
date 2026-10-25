@@ -174,11 +174,26 @@ describe("productAddProgress", () => {
       primaryCategoryId: "10002730",
       noBrandByStore: {
         mtf: {
-          status: "NO_BRAND",
-          reason: "confirmed_no_brand_row",
-          brand: "No Brand",
-          brand_id: 60147,
-          lookup_calls: 1,
+          status: "UNVERIFIED",
+          reason: "page_limit",
+          brand: null,
+          brand_id: null,
+          lookup_calls: 48,
+          lookup: {
+            pages: 48,
+            stop_reason: "page_limit",
+            ordering: "unreliable_in_window",
+            total_record: 78000,
+          },
+          catalog_evidence: {
+            status: "OK",
+            workspace: {
+              product_count: 3,
+              category_product_count: 2,
+              top_brands_in_category: [{ brand: "No Brand", count: 1 }],
+              no_brand_sample_item_ids: ["99"],
+            },
+          },
         },
       },
     });
@@ -186,8 +201,9 @@ describe("productAddProgress", () => {
     expect(text).toContain("MTF");
     expect(text).toContain("primary_category_id: 10002730");
     expect(text).toContain("No Brand checks");
-    expect(text).toContain("status=NO_BRAND");
-    expect(text).toContain("brand_id=60147");
+    expect(text).toContain("stop_reason=page_limit");
+    expect(text).toContain("catalog_evidence.status=OK");
+    expect(text).toContain("no_brand sample item_ids=99");
     expect(text).toContain("No tokens");
     expect(text).not.toMatch(/bearer |password=/i);
   });

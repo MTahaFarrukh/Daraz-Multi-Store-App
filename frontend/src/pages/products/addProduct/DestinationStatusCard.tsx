@@ -1,5 +1,6 @@
 import { StatusBadge } from "@/components/ui/Primitives";
 import {
+  formatCatalogEvidenceLines,
   formatNoBrandCheckLine,
   noBrandCheckTone,
   type NoBrandCheckResult,
@@ -114,12 +115,26 @@ export function DestinationStatusCard({
               <p className="add-dest-card__reason-text">
                 <StatusBadge tone={brandTone}>{noBrand.status}</StatusBadge>
                 {noBrand.status !== "NO_BRAND" ? (
-                  <span className="muted-line"> · Create blocked until No Brand is confirmed</span>
+                  <span className="muted-line">
+                    {" "}
+                    · Create blocked until brands API returns NO_BRAND (catalog evidence is
+                    informational only)
+                  </span>
                 ) : null}
               </p>
               <p className="muted-line" style={{ margin: "0.25rem 0 0" }}>
                 {formatNoBrandCheckLine(noBrand)}
               </p>
+              {noBrand.catalog_evidence ? (
+                <div style={{ marginTop: "0.45rem" }}>
+                  <p className="add-dest-card__reason-label">Local catalog evidence</p>
+                  {formatCatalogEvidenceLines(noBrand.catalog_evidence).map((line) => (
+                    <p key={line} className="muted-line" style={{ margin: "0.15rem 0 0" }}>
+                      {line}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

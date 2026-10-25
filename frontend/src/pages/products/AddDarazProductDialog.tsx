@@ -11,6 +11,7 @@ import {
   brandCheckBlocksCreate,
   canCheckNoBrand,
   extractPreviewPrimaryCategoryId,
+  mapApiNoBrandResult,
   noBrandCheckFromHttpError,
   type NoBrandCheckResult,
 } from "@/lib/noBrandCheck";
@@ -246,22 +247,24 @@ export function AddDarazProductDialog({
     setBrandCheckingStoreId(storeId);
     try {
       const res = await Api.checkCategoryNoBrand(storeId, categoryId);
-      const mapped: NoBrandCheckResult = {
-        status: String(res.status || "UNVERIFIED"),
-        reason: res.reason ?? null,
-        brand: res.brand ?? null,
-        brand_id: res.brand_id ?? null,
-        lookup_calls: res.lookup_calls ?? null,
-        primary_category_id: res.primary_category_id ?? categoryId,
-        store_id: res.store_id ?? storeId,
-      };
+      const mapped = mapApiNoBrandResult(
+        res as unknown as Record<string, unknown>,
+        storeId,
+        categoryId
+      );
       setNoBrandByStore((prev) => ({ ...prev, [storeId]: mapped }));
       if (mapped.status === "NO_BRAND") {
         setAlerts("ok", `No Brand confirmed for ${storeId} (read-only).`, false);
       } else {
+        const evidenceNote =
+          mapped.catalog_evidence?.status === "NOT_SYNCED"
+            ? " Catalog not synced — sync products for local brand evidence."
+            : mapped.catalog_evidence?.status === "OK"
+              ? " See local catalog brand evidence below (informational only)."
+              : "";
         setAlerts(
           "warn",
-          `No Brand ${mapped.status} for ${storeId} — create stays blocked until confirmed.`,
+          `No Brand ${mapped.status} for ${storeId} — create stays blocked until brands API confirms NO_BRAND.${evidenceNote}`,
           false
         );
       }

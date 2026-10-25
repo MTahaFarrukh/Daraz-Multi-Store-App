@@ -1,6 +1,7 @@
 /** Per-store Add Product progress labels, recovery hints, and diagnostics helpers. */
 
 import {
+  formatCatalogEvidenceLines,
   formatNoBrandCheckLine,
   type NoBrandCheckResult,
 } from "@/lib/noBrandCheck";
@@ -380,6 +381,9 @@ export function formatDiagnosticsCopy(input: {
     for (const [storeId, result] of brandEntries) {
       if (!result) continue;
       lines.push(`- ${storeId} | ${formatNoBrandCheckLine(result)}`);
+      for (const evidenceLine of formatCatalogEvidenceLines(result.catalog_evidence)) {
+        lines.push(`  ${evidenceLine}`);
+      }
     }
   }
   if (input.stageHistory?.length) {

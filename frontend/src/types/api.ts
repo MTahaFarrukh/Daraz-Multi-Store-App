@@ -126,7 +126,25 @@ export type CategoryNoBrandDiagnostic = {
   store_id?: string | null;
   lookup_calls?: number | null;
   used_no_brand?: boolean;
-  lookup?: Record<string, unknown> | null;
+  lookup?: {
+    strategy?: string | null;
+    pages?: number | null;
+    name_filter_effective?: boolean | null;
+    complete?: boolean | null;
+    stop_reason?: string | null;
+    total_record?: number | null;
+    ordering?: string | null;
+    matched_start_row?: number | null;
+    cache_hit?: boolean | null;
+    [key: string]: unknown;
+  } | null;
+  catalog_evidence?: {
+    status?: string | null;
+    message?: string | null;
+    primary_category_id?: string | null;
+    workspace?: Record<string, unknown> | null;
+    destination_store?: Record<string, unknown> | null;
+  } | null;
   timings_ms?: Record<string, unknown> | null;
 };
 
