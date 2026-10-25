@@ -252,14 +252,18 @@ def test_supervised_dry_run_never_mutates(tenancy_env, monkeypatch):
     migrate_calls: list = []
     create_calls: list = []
     price_calls: list = []
+    refresh_calls: list = []
     client = _mutation_tracking_client(
         migrate_calls=migrate_calls, create_calls=create_calls, price_calls=price_calls
     )
+
+    def _track_refresh(**kwargs):
+        refresh_calls.append(kwargs)
+        return []
+
     monkeypatch.setattr("src.ops.client_for_store", lambda *_a, **_k: client)
     monkeypatch.setattr("src.product_add.client_for_store", lambda *_a, **_k: client)
-    monkeypatch.setattr(
-        "src.token_refresh.refresh_store_tokens", lambda **_k: []
-    )
+    monkeypatch.setattr("src.token_refresh.refresh_store_tokens", _track_refresh)
 
     out = run_supervised_create(
         wid,
@@ -271,6 +275,42 @@ def test_supervised_dry_run_never_mutates(tenancy_env, monkeypatch):
     assert migrate_calls == []
     assert create_calls == []
     assert price_calls == []
+    assert refresh_calls == [], "dry-run must skip refresh_store_tokens"
+    assert out["status"] in {"READY", "NOT_RUN"}
+
+
+def test_supervised_dry_run_skips_token_refresh(tenancy_env, monkeypatch):
+    """execute=false must not call refresh_store_tokens (token write path)."""
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "true")
+    from src.brand_resolve import clear_no_brand_cache_for_tests
+
+    clear_no_brand_cache_for_tests()
+    wid = tenancy_env.create_workspace_with_owner("u1", "W")["workspace"]["id"]
+    src = _add_store(tenancy_env, wid, "store_a")
+    _add_store(tenancy_env, wid, "store_b")
+    product = _seed_product(tenancy_env, wid, src)
+
+    refresh_calls: list = []
+
+    def boom_refresh(**_k):
+        refresh_calls.append(1)
+        raise AssertionError("refresh_store_tokens must not run on dry-run")
+
+    client = _mutation_tracking_client(
+        migrate_calls=[], create_calls=[], price_calls=[]
+    )
+    monkeypatch.setattr("src.token_refresh.refresh_store_tokens", boom_refresh)
+    monkeypatch.setattr("src.product_add.client_for_store", lambda *_a, **_k: client)
+    monkeypatch.setattr("src.ops.client_for_store", lambda *_a, **_k: client)
+
+    out = run_supervised_create(
+        wid,
+        source_product_id=str(product["id"]),
+        destination_store_id="store_b",
+        confirm=True,
+        execute=False,
+    )
+    assert refresh_calls == []
     assert out["status"] in {"READY", "NOT_RUN"}
 
 

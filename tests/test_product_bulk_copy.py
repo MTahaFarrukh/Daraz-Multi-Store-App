@@ -406,6 +406,24 @@ def test_bulk_start_blocked_when_create_disabled(tenancy_env, monkeypatch):
     )
 
 
+def test_bulk_retry_blocked_when_create_disabled(tenancy_env, monkeypatch):
+    """Retry Failed must require ALLOW_PRODUCT_CREATE (probe alone insufficient)."""
+    from src.product_bulk_copy import retry_failed_bulk_copy_items
+
+    repo = tenancy_env
+    wid, client, headers = _bootstrap(repo, "u-retry-gate")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "true")
+    with pytest.raises(ValueError, match="Product creation is disabled"):
+        retry_failed_bulk_copy_items(wid, "00000000-0000-0000-0000-000000000001")
+    res = client.post(
+        "/api/products/bulk-copy/jobs/00000000-0000-0000-0000-000000000001/retry-failed",
+        headers=headers,
+    )
+    assert res.status_code == 400
+    assert "Product creation is disabled" in str(res.json().get("detail") or "")
+
+
 def test_bulk_start_reuses_existing_job_when_create_disabled(tenancy_env, monkeypatch):
     """Duplicate fingerprint short-circuit still works before the create gate."""
     repo = tenancy_env

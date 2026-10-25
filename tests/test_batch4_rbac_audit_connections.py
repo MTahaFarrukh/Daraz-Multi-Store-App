@@ -119,6 +119,41 @@ def test_viewer_denied_mutations(client: TestClient, tenancy_env):
     assert client.get("/api/audit-events", headers=owner_h).status_code == 200
     # Viewer cannot read audit
     assert client.get("/api/audit-events", headers=vh).status_code == 403
+    # Viewer lacks product.create — No Brand diagnostic is create-prep gated
+    assert (
+        client.get(
+            "/api/stores/s1/category-brands/no-brand",
+            headers=vh,
+            params={"primary_category_id": "10002730"},
+        ).status_code
+        == 403
+    )
+
+
+def test_viewer_denied_category_no_brand_diagnostic(client: TestClient, tenancy_env):
+    wid, _owner_h = _bootstrap(client, "u-owner-nb", "owner-nb@x.com")
+    tenancy_env.add_member(wid, "u-viewer-nb", "viewer")
+    tenancy_env.upsert_store(
+        wid,
+        {
+            "store_id": "nb-store",
+            "account": "nb@x.com",
+            "seller_id": "snb",
+            "display_name": "NB",
+            "access_token": "tok",
+            "refresh_token": "ref",
+            "expires_in": 86400,
+        },
+    )
+    vh = _auth("u-viewer-nb", "viewer-nb@x.com")
+    vh["X-Workspace-Id"] = wid
+    res = client.get(
+        "/api/stores/nb-store/category-brands/no-brand",
+        headers=vh,
+        params={"primary_category_id": "10002730"},
+    )
+    assert res.status_code == 403
+    assert "capability" in str(res.json().get("detail") or "").lower()
 
 
 def test_owner_admin_allowed_settings(client: TestClient, tenancy_env):

@@ -102,22 +102,23 @@ def run_supervised_create(
             "reason": "destination_must_differ_from_source",
         }
 
-    # Soft token refresh — read-only for dry-run; create path still needs a client.
-    try:
-        from src.token_refresh import refresh_store_tokens
+    # Soft token refresh only when executing — dry-run must not write tokens.
+    if execute:
+        try:
+            from src.token_refresh import refresh_store_tokens
 
-        refresh_store_tokens(
-            store_ids=[str(dest.get("store_id") or dest.get("id"))],
-            within_minutes=30,
-            workspace_id=workspace_id,
-        )
-        dest = (
-            repo.get_store(workspace_id, destination_store_id)
-            or repo.get_store_by_uuid(workspace_id, destination_store_id)
-            or dest
-        )
-    except Exception:  # noqa: BLE001
-        pass
+            refresh_store_tokens(
+                store_ids=[str(dest.get("store_id") or dest.get("id"))],
+                within_minutes=30,
+                workspace_id=workspace_id,
+            )
+            dest = (
+                repo.get_store(workspace_id, destination_store_id)
+                or repo.get_store_by_uuid(workspace_id, destination_store_id)
+                or dest
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     try:
         base = build_connected_clone_draft(

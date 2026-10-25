@@ -718,7 +718,13 @@ def api_category_no_brand_diagnostic(
     primary_category_id: str = Query(..., min_length=1),
     ctx: WorkspaceContext = Depends(get_workspace_context),
 ) -> dict:
-    """Read-only No Brand lookup for a category. Never CreateProduct or migrate_image."""
+    """Read-only No Brand lookup for a category. Never CreateProduct or migrate_image.
+
+    Gated with ``product.create`` (existing capability) — create-prep diagnostic;
+    viewers lack it. ``store.manage`` would also deny viewers but also blocks
+    manager/staff who can create products without store-admin rights.
+    """
+    enforce_capability(ctx.role, "product.create")
     from src.brand_diagnostics import diagnose_category_no_brand
 
     return diagnose_category_no_brand(

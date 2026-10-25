@@ -194,47 +194,68 @@ def test_create_probe_uses_workspace_client(tenancy_env, monkeypatch):
 
     class FakeClient:
         def get_category_attributes(self, *_a, **_k):
-            return {"data": {"attributes": []}}
+            return {
+                "data": {
+                    "attributes": [
+                        {
+                            "name": "brand",
+                            "label": "Brand",
+                            "is_mandatory": True,
+                            "input_type": "singleSelect",
+                            "options": [{"name": "No Brand", "id": 1}],
+                        }
+                    ]
+                }
+            }
 
         def query_category_brands(self, **_k):
             return {"module": [{"name": "No Brand", "brand_id": 1}]}
+
+        def query_product_brand(self, **_k):
+            return {"data": {"brandId": 1, "name": "No Brand"}}
+
+        def migrate_image(self, *_a, **_k):
+            raise AssertionError("dry-run must not migrate images")
+
+        def create_product(self, *_a, **_k):
+            raise AssertionError("dry-run must not CreateProduct")
+
+        def update_price(self, *_a, **_k):
+            raise AssertionError("dry-run must not UpdatePrice")
 
     def _client_for_store(store):
         seen["store_id"] = store.get("store_id")
         seen["has_access"] = bool(store.get("access_token"))
         return FakeClient()
 
+    # Supervised create uses product_add._prepare_destination + workspace client.
     monkeypatch.setattr("src.ops.client_for_store", _client_for_store)
+    monkeypatch.setattr("src.product_add.client_for_store", _client_for_store)
     monkeypatch.setattr("src.token_refresh.refresh_store_tokens", lambda **kw: None)
     monkeypatch.setattr(
         "src.product_create.build_connected_clone_draft",
         lambda *a, **k: {
             "draft": {
-                "product": {"primary_category_id": 10001, "attributes": {}},
-                "brand_resolution": {},
+                "product": {
+                    "primary_category_id": 10001,
+                    "attributes": {"brand": "No Brand"},
+                    "name": "Probe",
+                },
+                "brand_resolution": {"status": "OK", "brand": "No Brand"},
                 "media": {"resolved_images": []},
-                "variants": [],
+                "variants": [
+                    {
+                        "seller_sku": "SELL-9001",
+                        "price": 10,
+                        "quantity": 1,
+                        "sale_prop": {},
+                    }
+                ],
             },
             "warnings": [],
             "errors": [],
             "possible_duplicates": [],
         },
-    )
-    monkeypatch.setattr(
-        "src.product_create.validate_draft_against_category",
-        lambda *a, **k: {"ok": True, "errors": []},
-    )
-    monkeypatch.setattr(
-        "src.product_create.resolve_required_category_attributes",
-        lambda *a, **k: {"ok": True},
-    )
-    monkeypatch.setattr(
-        "src.product_create.resolve_brand_for_category",
-        lambda **k: {"status": "OK", "brand": "No Brand"},
-    )
-    monkeypatch.setattr(
-        "src.product_create.build_create_product_payload_preview",
-        lambda *a, **k: {"xml_bytes": 1},
     )
 
     from src.product_create import run_supervised_create
@@ -250,6 +271,9 @@ def test_create_probe_uses_workspace_client(tenancy_env, monkeypatch):
     assert seen.get("store_id") == "probe-b"
     assert seen.get("has_access") is True
     assert "token store" not in str(out.get("reason") or "").lower()
+    assert out.get("status") not in {None, "BLOCKED"} or "ALLOW_PRODUCT_CREATE_PROBE" not in str(
+        out.get("reason") or ""
+    )
 
 
 def test_log_redaction_hides_tokens_and_signed_urls():

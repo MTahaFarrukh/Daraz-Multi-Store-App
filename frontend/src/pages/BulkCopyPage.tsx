@@ -481,8 +481,19 @@ export function BulkCopyPage() {
                 <button
                   type="button"
                   className="btn"
-                  disabled={Boolean(busy)}
+                  disabled={Boolean(busy) || !createGateOn}
+                  title={
+                    createGateOn
+                      ? "Re-queue safe failed items"
+                      : "Blocked while ALLOW_PRODUCT_CREATE is off"
+                  }
                   onClick={() => {
+                    if (!createGateOn) {
+                      setError(
+                        "Retry Failed is blocked while product creation is disabled on this server."
+                      );
+                      return;
+                    }
                     void (async () => {
                       setBusy("Retrying…");
                       try {

@@ -11,7 +11,8 @@
 
 - Primary UI: **+ Add Daraz Product** (URL or connected Item ID → multi-store → Add).
 - `POST /api/products/add-from-url` / `add-from-connected` — fetch once, per-dest create.
-- Gate: `ALLOW_PRODUCT_CREATE` or probe. Supervised live CreateProduct still requires human-enabled env + confirm.
+- Ordinary Add Product / URL / connected / bulk: gated by `ALLOW_PRODUCT_CREATE` only.
+- `ALLOW_PRODUCT_CREATE_PROBE` does **not** unlock ordinary create; it only authorizes the supervised create-probe path (still requires confirm + human-enabled env).
 
 ## Validation (local)
 

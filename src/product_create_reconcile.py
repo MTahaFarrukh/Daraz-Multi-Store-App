@@ -512,6 +512,7 @@ def retry_product_create_attempt(
         add_product_from_connected,
         add_product_from_public_url,
     )
+    from src.product_create import product_create_enabled
 
     repo = get_repo()
     attempt = repo.get_product_attempt(workspace_id, attempt_id)
@@ -531,6 +532,15 @@ def retry_product_create_attempt(
             "state": attempt.get("state"),
         },
     )
+
+    # Fail closed: live retry requires ordinary create gate (probe alone is insufficient).
+    if execute and not product_create_enabled():
+        return {
+            "status": "BLOCKED",
+            "attempt": attempt,
+            "reason": "ALLOW_PRODUCT_CREATE is not enabled",
+            "create_product_called": False,
+        }
 
     state = str(attempt.get("state") or "")
     if state in VERIFIED_STATES:

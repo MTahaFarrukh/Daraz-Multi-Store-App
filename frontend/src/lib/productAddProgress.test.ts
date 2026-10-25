@@ -22,7 +22,7 @@ describe("productAddProgress", () => {
     expect(destinationProgressLabel({ creation_status: "VERIFIED" })).toBe("Succeeded");
     expect(
       destinationProgressLabel({ creation_status: "NEEDS_RECONCILIATION" })
-    ).toBe("Needs attention");
+    ).toBe("Needs reconciliation");
     expect(
       destinationProgressLabel({ creation_status: "FAILED_SAFE_TO_RETRY" })
     ).toBe("Failed");
@@ -62,6 +62,12 @@ describe("productAddProgress", () => {
         attempt_id: "a1",
       })
     ).toBe(false);
+    expect(
+      shouldShowRetry({
+        creation_status: "NEEDS_RECONCILIATION",
+        attempt_id: "a1",
+      })
+    ).toBe(false);
   });
 
   it("shows Reconcile only for NEEDS_RECONCILIATION", () => {
@@ -84,6 +90,12 @@ describe("productAddProgress", () => {
         attempt_id: "x",
       })
     ).toBe("reconcile");
+    expect(
+      shouldShowRetry({
+        creation_status: "NEEDS_RECONCILIATION",
+        attempt_id: "x",
+      })
+    ).toBe(false);
     expect(
       destinationActionKind({
         creation_status: "FAILED_SAFE_TO_RETRY",

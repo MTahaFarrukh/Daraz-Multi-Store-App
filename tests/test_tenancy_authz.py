@@ -347,6 +347,8 @@ def test_public_config_has_no_secrets(client: TestClient) -> None:
     assert body["supabase_publishable_key"] == "sb_publishable_test_key"
     assert "product_create_enabled" in body
     assert isinstance(body["product_create_enabled"], bool)
+    assert "create_probe_enabled" in body
+    assert isinstance(body["create_probe_enabled"], bool)
     assert "ALLOW_PRODUCT_CREATE" not in body
     assert "app_secret" not in str(body).lower()
 
@@ -359,11 +361,22 @@ def test_public_config_product_create_enabled_flag(
     off = client.get("/api/public-config")
     assert off.status_code == 200
     assert off.json()["product_create_enabled"] is False
+    assert off.json()["create_probe_enabled"] is False
 
     monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "true")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "false")
     on = client.get("/api/public-config")
     assert on.status_code == 200
     assert on.json()["product_create_enabled"] is True
+    assert on.json()["create_probe_enabled"] is False
+
+    # Probe alone must not flip ordinary create UI gate.
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "true")
+    probe = client.get("/api/public-config")
+    assert probe.status_code == 200
+    assert probe.json()["product_create_enabled"] is False
+    assert probe.json()["create_probe_enabled"] is True
 
 
 def test_invalid_rename_rejected(client: TestClient, tenancy_env) -> None:

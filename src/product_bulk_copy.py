@@ -887,6 +887,11 @@ def retry_failed_bulk_copy_items(
 ) -> dict[str, Any]:
     """Re-queue failed / needs_attention items that have safe retry attempts."""
     del actor_user_id
+    if not product_create_enabled():
+        raise ValueError(
+            "Product creation is disabled. Enable ALLOW_PRODUCT_CREATE after "
+            "supervised proof before retrying failed bulk-copy items."
+        )
     repo = get_repo()
     job = repo.get_product_copy_job(workspace_id, job_id)
     if not job:

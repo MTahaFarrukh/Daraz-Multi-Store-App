@@ -66,6 +66,8 @@ export function AddDarazProductDialog({
   const [executedCreate, setExecutedCreate] = useState(false);
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  /** Synchronous lock — closes React double-click TOCTOU before setSubmitting re-renders. */
+  const inFlightRef = useRef(false);
 
   const addUrlMutation = useAddProductFromUrl(workspaceId);
   const addConnectedMutation = useAddProductFromConnected(workspaceId);
@@ -316,7 +318,7 @@ export function AddDarazProductDialog({
     edit?: boolean;
     resumeByStore?: Record<string, string>;
   }) {
-    if (submitting) return;
+    if (submitting || inFlightRef.current) return;
     const destIds = options?.destIds ?? Array.from(destSelected);
     if (!destIds.length) {
       setAlerts("error", "Select at least one destination store");
@@ -382,6 +384,7 @@ export function AddDarazProductDialog({
       });
     }
 
+    inFlightRef.current = true;
     setSubmitting(true);
     try {
       if (wantEdit || editBefore) {
@@ -442,6 +445,7 @@ export function AddDarazProductDialog({
       setAlerts("error", diag ? `${base} (ID ${diag})` : base);
       endWork("error");
     } finally {
+      inFlightRef.current = false;
       setBusy("");
       setSubmitting(false);
     }
@@ -511,7 +515,15 @@ export function AddDarazProductDialog({
   }
 
   async function onRetryDestination(d: AddProductDestinationResult) {
-    if (!d.attempt_id || submitting) return;
+    if (!d.attempt_id || submitting || inFlightRef.current) return;
+    if (!createGateOn) {
+      setAlerts(
+        "error",
+        "Retry is blocked while ALLOW_PRODUCT_CREATE is off. Reconcile if needed; do not create."
+      );
+      return;
+    }
+    inFlightRef.current = true;
     beginWork("creating");
     setBusy(`Retrying ${d.store?.display_name || d.store?.store_id || "store"}…`);
     setLocalAlert(null);
@@ -554,13 +566,14 @@ export function AddDarazProductDialog({
       setAlerts("error", e instanceof Error ? e.message : String(e));
       endWork("error");
     } finally {
+      inFlightRef.current = false;
       setBusy("");
       setSubmitting(false);
     }
   }
 
   async function onReconcileDestination(d: AddProductDestinationResult) {
-    if (!d.attempt_id || submitting) return;
+    if (!d.attempt_id || submitting || inFlightRef.current) return;
     beginWork("preparing");
     setBusy(`Reconciling ${d.store?.display_name || d.store?.store_id || "store"}…`);
     setLocalAlert(null);
@@ -938,6 +951,7 @@ export function AddDarazProductDialog({
                   dest={d}
                   processing={submitting && phase === "creating"}
                   actionsDisabled={submitting}
+                  retryDisabled={!createGateOn}
                   onRetry={() => void onRetryDestination(d)}
                   onReconcile={() => void onReconcileDestination(d)}
                 />

@@ -57,4 +57,20 @@ describe("bulk copy UI helpers", () => {
     expect(createGateOn).toBe(false);
     expect(startDisabled).toBe(true);
   });
+
+  it("disables Retry Failed when product create gate is off", () => {
+    const createGateOn = false;
+    const busy = "";
+    const retryDisabled = Boolean(busy) || !createGateOn;
+    expect(retryDisabled).toBe(true);
+  });
+
+  it("probe alone does not unlock createGateOn", () => {
+    // UI reads product_create_enabled only; create_probe_enabled is separate.
+    const productCreateEnabled = false as boolean | null;
+    const createProbeEnabled = true;
+    const createGateOn = productCreateEnabled === true;
+    expect(createProbeEnabled).toBe(true);
+    expect(createGateOn).toBe(false);
+  });
 });

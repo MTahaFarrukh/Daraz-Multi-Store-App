@@ -1582,8 +1582,9 @@ def add_product_from_public_url(
 ) -> dict[str, Any]:
     """Fetch public URL once → prepare / create on each destination.
 
-    When ``ALLOW_PRODUCT_CREATE=1`` (or probe flag), a normal Add Product call
-    executes CreateProduct. Pass ``execute=False`` for dry-run validation only.
+    Live CreateProduct requires ``ALLOW_PRODUCT_CREATE`` via
+    ``product_create_enabled()``. Probe flag alone does not authorize this path.
+    Pass ``execute=False`` for mutation-free dry-run validation only.
     ``confirm`` is ignored here (probe-only concept).
     """
     del confirm

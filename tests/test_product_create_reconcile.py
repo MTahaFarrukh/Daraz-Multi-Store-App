@@ -334,6 +334,22 @@ def test_retry_reuses_seller_skus(tenancy_env):
     assert [x["seller_sku"] for x in forced] == ["MTF-KEEP-1", "MTF-KEEP-2"]
 
 
+def test_retry_blocked_when_product_create_gate_off(
+    tenancy_env, monkeypatch: pytest.MonkeyPatch
+):
+    """Probe alone must not unlock live retry; ordinary create gate required."""
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "true")
+    wid, dest_uuid, _ = _boot(tenancy_env)
+    att = _attempt(tenancy_env, wid, dest_uuid, state="FAILED_SAFE_TO_RETRY")
+    with patch("src.product_add.add_product_from_public_url") as add:
+        result = retry_product_create_attempt(wid, att["id"], execute=True)
+    assert result["status"] == "BLOCKED"
+    assert result["create_product_called"] is False
+    assert "ALLOW_PRODUCT_CREATE" in str(result.get("reason") or "")
+    add.assert_not_called()
+
+
 def test_retry_blocked_from_needs_reconciliation(tenancy_env):
     wid, dest_uuid, _ = _boot(tenancy_env)
     att = _attempt(tenancy_env, wid, dest_uuid, state="NEEDS_RECONCILIATION")

@@ -16,6 +16,7 @@ export function DestinationStatusCard({
   onRetry,
   onReconcile,
   actionsDisabled,
+  retryDisabled,
 }: {
   dest: DestinationAttemptLike;
   processing?: boolean;
@@ -23,6 +24,8 @@ export function DestinationStatusCard({
   onRetry?: () => void;
   onReconcile?: () => void;
   actionsDisabled?: boolean;
+  /** When create gate is off, hide live Retry (Reconcile remains allowed). */
+  retryDisabled?: boolean;
 }) {
   const ui = destinationUiStatus(dest, { processing, checking });
   const tone = destinationStatusTone(ui);
@@ -71,7 +74,7 @@ export function DestinationStatusCard({
 
       {action !== "none" ? (
         <div className="row" style={{ gap: "0.5rem", marginTop: "0.65rem" }}>
-          {action === "retry" ? (
+          {action === "retry" && !retryDisabled ? (
             <button
               type="button"
               className="btn btn-secondary btn-sm"
@@ -80,6 +83,11 @@ export function DestinationStatusCard({
             >
               Retry (safe)
             </button>
+          ) : null}
+          {action === "retry" && retryDisabled ? (
+            <p className="muted-line" style={{ margin: 0 }}>
+              Retry blocked — product create gate is off
+            </p>
           ) : null}
           {action === "reconcile" ? (
             <button

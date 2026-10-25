@@ -38,7 +38,7 @@ const PROGRESS_LABELS: Record<string, string> = {
   Created: "Succeeded",
   "Pending QC": "Succeeded",
   NEEDS_ATTENTION: "Needs attention",
-  NEEDS_RECONCILIATION: "Needs attention",
+  NEEDS_RECONCILIATION: "Needs reconciliation",
   FAILED_SAFE_TO_RETRY: "Failed",
   FAILED: "Failed",
   Failed: "Failed",
