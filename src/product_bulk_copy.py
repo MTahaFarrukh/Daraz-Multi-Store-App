@@ -719,6 +719,12 @@ def start_bulk_copy_job(
             {"request_fingerprint": f"{fp}:retired:{existing['id']}", "updated_at": _now()},
         )
 
+    if not product_create_enabled():
+        raise ValueError(
+            "Product creation is disabled. Enable ALLOW_PRODUCT_CREATE after "
+            "supervised proof before starting a bulk copy."
+        )
+
     # Build title lookup from catalog walk
     title_by_item: dict[str, str] = {}
     product_id_by_item: dict[str, str] = {}

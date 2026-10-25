@@ -33,7 +33,7 @@ def tenancy_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DARAZ_APP_KEY", "appkey")
     monkeypatch.setenv("DARAZ_APP_SECRET", "appsecret")
     monkeypatch.setenv("DATABASE_URL", "")
-    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "true")
     monkeypatch.setenv("PRODUCT_BULK_COPY_CONCURRENCY", "2")
     monkeypatch.setattr("src.crypto_tokens.TOKEN_KEY_PATH", key_path)
     monkeypatch.setattr("src.token_store.TOKEN_KEY_PATH", key_path)
@@ -172,6 +172,7 @@ def test_workspace_isolation_and_authz(tenancy_env):
             destination_store_id="dst-a",
             select_all=True,
             refresh_catalog=False,
+            spawn_worker=False,
         )
     job_id = started["job"]["id"]
 
@@ -333,9 +334,9 @@ def test_api_start_and_list_items(tenancy_env):
         return_value={
             "destinations": [
                 {
-                    "status": "NEEDS_ATTENTION",
-                    "reason": "create_blocked_or_not_executed",
-                    "attempt_id": None,
+                    "status": "VERIFIED",
+                    "attempt_id": "a55",
+                    "item_id": "dest-55",
                 }
             ]
         },
@@ -351,6 +352,7 @@ def test_api_start_and_list_items(tenancy_env):
             },
         )
         assert res.status_code == 200
+        assert res.json().get("product_create_enabled") is True
         job_id = res.json()["job"]["id"]
         # Wait for background worker under the same mock patch.
         for _ in range(80):
@@ -365,3 +367,84 @@ def test_api_start_and_list_items(tenancy_env):
     body = items.json()
     assert body["total"] == 1
     assert body["items"][0]["status_label"]
+
+
+def test_bulk_start_blocked_when_create_disabled(tenancy_env, monkeypatch):
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "false")
+    repo = tenancy_env
+    wid, client, headers = _bootstrap(repo, "u-gate")
+    src = _add_store(repo, wid, "src")
+    _add_store(repo, wid, "dst")
+    _seed_product(repo, wid, src, item_id="88", title="Blocked")
+
+    with patch("src.product_bulk_copy.sync_store_products", return_value={"sync_status": "ok"}):
+        with pytest.raises(ValueError, match="Product creation is disabled"):
+            start_bulk_copy_job(
+                wid,
+                source_store_id="src",
+                destination_store_id="dst",
+                select_all=True,
+                refresh_catalog=False,
+                spawn_worker=False,
+            )
+        res = client.post(
+            "/api/products/bulk-copy/jobs",
+            headers=headers,
+            json={
+                "source_store_id": "src",
+                "destination_store_id": "dst",
+                "select_all": True,
+                "refresh_catalog": False,
+            },
+        )
+    assert res.status_code == 400
+    assert "Product creation is disabled" in str(res.json().get("detail") or "")
+    assert not any(
+        str(j.get("workspace_id")) == str(wid)
+        for j in getattr(repo, "product_copy_jobs", {}).values()
+    )
+
+
+def test_bulk_start_reuses_existing_job_when_create_disabled(tenancy_env, monkeypatch):
+    """Duplicate fingerprint short-circuit still works before the create gate."""
+    repo = tenancy_env
+    wid, _, _ = _bootstrap(repo, "u-reuse")
+    src = _add_store(repo, wid, "src")
+    _add_store(repo, wid, "dst")
+    _seed_product(repo, wid, src, item_id="99", title="Reuse")
+
+    with patch("src.product_bulk_copy.sync_store_products", return_value={"sync_status": "ok"}), patch(
+        "src.product_bulk_copy.add_product_from_connected",
+        return_value={
+            "destinations": [
+                {"status": "VERIFIED", "attempt_id": "a99", "item_id": "d99"}
+            ]
+        },
+    ):
+        first = start_bulk_copy_job(
+            wid,
+            source_store_id="src",
+            destination_store_id="dst",
+            select_all=True,
+            refresh_catalog=False,
+            spawn_worker=False,
+        )
+        repo.update_product_copy_job(
+            wid,
+            str(first["job"]["id"]),
+            {"status": "completed", "verified_count": 1, "completed_items": 1},
+        )
+
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "false")
+    second = start_bulk_copy_job(
+        wid,
+        source_store_id="src",
+        destination_store_id="dst",
+        select_all=True,
+        refresh_catalog=False,
+        spawn_worker=False,
+    )
+    assert second["duplicate_prevented"] is True
+    assert second["job"]["id"] == first["job"]["id"]

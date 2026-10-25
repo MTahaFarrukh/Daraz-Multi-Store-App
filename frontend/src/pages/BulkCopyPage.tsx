@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Api } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import { useStores } from "@/hooks/queries/useStores";
+import { useProductCreateEnabled } from "@/hooks/useProductCreateEnabled";
 import { hasCapability } from "@/lib/capabilities";
 import {
   ConfirmDialog,
@@ -68,8 +69,10 @@ export function BulkCopyPage() {
   const { me } = useAuth();
   const workspaceId = me?.workspace?.id;
   const canCreate = hasCapability(me?.workspace, "product.create");
+  const productCreateEnabled = useProductCreateEnabled();
   const storesQuery = useStores(workspaceId);
   const stores = storesQuery.data || [];
+  const createGateOn = productCreateEnabled === true;
 
   const [sourceId, setSourceId] = useState("");
   const [destId, setDestId] = useState("");
@@ -165,6 +168,13 @@ export function BulkCopyPage() {
 
   async function startCopy() {
     if (!sourceId || !destId || sameStore) return;
+    if (!createGateOn) {
+      setConfirmStart(false);
+      setError(
+        "Product creation is disabled on this server. Enable ALLOW_PRODUCT_CREATE after supervised proof before starting a bulk copy."
+      );
+      return;
+    }
     setConfirmStart(false);
     setBusy("Starting copy job…");
     setError("");
@@ -196,11 +206,6 @@ export function BulkCopyPage() {
         setOk("Existing job reused — duplicate submission prevented.");
       } else {
         setOk(`Copy started for ${job.total_items ?? selectedCount} products.`);
-      }
-      if (!res.product_create_enabled) {
-        setError(
-          "Live CreateProduct is disabled (ALLOW_PRODUCT_CREATE). Job still records outcomes as Needs Attention until enabled."
-        );
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -312,6 +317,12 @@ export function BulkCopyPage() {
             Source and destination must be different stores.
           </p>
         ) : null}
+        {productCreateEnabled === false ? (
+          <p className="banner banner-warn" style={{ marginTop: "0.75rem" }}>
+            Product creation is disabled (ALLOW_PRODUCT_CREATE). You can load the catalog, but
+            starting a copy is blocked until creation is enabled after supervised proof.
+          </p>
+        ) : null}
       </section>
 
       {busy && !jobId ? <LoadingState label={busy} /> : null}
@@ -357,7 +368,13 @@ export function BulkCopyPage() {
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={sameStore || !destId || selectedCount === 0 || Boolean(busy)}
+                disabled={
+                  sameStore ||
+                  !destId ||
+                  selectedCount === 0 ||
+                  Boolean(busy) ||
+                  !createGateOn
+                }
                 onClick={() => setConfirmStart(true)}
               >
                 Copy Products ({selectedCount})

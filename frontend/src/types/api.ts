@@ -2,6 +2,8 @@ export type PublicConfig = {
   supabase_url: string;
   supabase_publishable_key: string;
   auth_required: boolean;
+  /** Server create gate for UI only — backend still enforces ALLOW_PRODUCT_CREATE. */
+  product_create_enabled?: boolean;
 };
 
 export type MeResponse = {

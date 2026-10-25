@@ -464,10 +464,14 @@ def spa_routes(path: str = ""):
 @app.get("/api/public-config")
 def api_public_config() -> dict:
     """Browser-safe config (publishable key only — never secret key)."""
+    from src.product_create import product_create_enabled
+
     return {
         "supabase_url": get_env("SUPABASE_URL"),
         "supabase_publishable_key": get_env("SUPABASE_PUBLISHABLE_KEY"),
         "auth_required": True,
+        # Non-secret gate for UI disablement; backend still enforces create.
+        "product_create_enabled": bool(product_create_enabled()),
     }
 
 

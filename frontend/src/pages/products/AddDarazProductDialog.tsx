@@ -4,6 +4,7 @@ import {
   useAddProductFromUrl,
   useImportUrlDraft,
 } from "@/hooks/queries/useProducts";
+import { useProductCreateEnabled } from "@/hooks/useProductCreateEnabled";
 import { Api } from "@/lib/api";
 import {
   destinationActionKind,
@@ -58,6 +59,8 @@ export function AddDarazProductDialog({
   const addUrlMutation = useAddProductFromUrl(workspaceId);
   const addConnectedMutation = useAddProductFromConnected(workspaceId);
   const importDraftMutation = useImportUrlDraft(workspaceId);
+  const productCreateEnabled = useProductCreateEnabled();
+  const createGateOn = productCreateEnabled === true;
 
   const destOptions = useMemo(
     () =>
@@ -88,13 +91,14 @@ export function AddDarazProductDialog({
     fetchedUrl === productUrl.trim() &&
     Boolean(draftPreview);
 
-  const canAdd =
+  const canPrepare =
     !busy &&
     !submitting &&
     destSelected.size > 0 &&
     (mode === "connected"
       ? Boolean(sourceStore && itemId.trim())
       : urlFetched && Boolean(productUrl.trim()));
+  const canCreate = canPrepare && createGateOn;
 
   function toggleDest(id: string) {
     setDestSelected((prev) => {
@@ -217,11 +221,16 @@ export function AddDarazProductDialog({
       onError("Fetch the product first so you can review the preview");
       return;
     }
+    const wantEdit = options?.edit ?? false;
+    if (!wantEdit && !editBefore && !createGateOn) {
+      onError(
+        "Product creation is disabled on this server. You can Fetch and preview, but Add Product stays blocked until ALLOW_PRODUCT_CREATE is enabled after supervised proof."
+      );
+      return;
+    }
     onError("");
     onOk("");
     setResult(null);
-
-    const wantEdit = options?.edit ?? false;
     const price = parsePrice();
     const variantOverrides = parseVariantOverrides();
 
@@ -624,6 +633,13 @@ export function AddDarazProductDialog({
         </div>
       ) : null}
 
+      {productCreateEnabled === false ? (
+        <p className="banner banner-warn" style={{ marginBottom: "0.75rem" }}>
+          Product creation is disabled (ALLOW_PRODUCT_CREATE). Fetch and preview still work; Add
+          Product is blocked until creation is enabled after supervised proof.
+        </p>
+      ) : null}
+
       <label className="row" style={{ gap: "0.5rem", marginBottom: "0.5rem" }}>
         <input
           type="checkbox"
@@ -678,7 +694,7 @@ export function AddDarazProductDialog({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={!canAdd}
+              disabled={!canCreate}
               onClick={() => void runAdd({ edit: false })}
             >
               Continue Adding
@@ -691,7 +707,7 @@ export function AddDarazProductDialog({
         <button
           type="button"
           className="btn btn-primary"
-          disabled={!canAdd}
+          disabled={editBefore ? !canPrepare : !canCreate}
           onClick={() => void runAdd({ edit: editBefore })}
         >
           {busy.includes("Creating") || busy.includes("Preparing")

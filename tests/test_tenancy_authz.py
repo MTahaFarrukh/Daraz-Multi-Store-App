@@ -345,6 +345,25 @@ def test_public_config_has_no_secrets(client: TestClient) -> None:
     assert "secret" not in body
     assert "jwt" not in str(body).lower()
     assert body["supabase_publishable_key"] == "sb_publishable_test_key"
+    assert "product_create_enabled" in body
+    assert isinstance(body["product_create_enabled"], bool)
+    assert "ALLOW_PRODUCT_CREATE" not in body
+    assert "app_secret" not in str(body).lower()
+
+
+def test_public_config_product_create_enabled_flag(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "false")
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE_PROBE", "false")
+    off = client.get("/api/public-config")
+    assert off.status_code == 200
+    assert off.json()["product_create_enabled"] is False
+
+    monkeypatch.setenv("ALLOW_PRODUCT_CREATE", "true")
+    on = client.get("/api/public-config")
+    assert on.status_code == 200
+    assert on.json()["product_create_enabled"] is True
 
 
 def test_invalid_rename_rejected(client: TestClient, tenancy_env) -> None:
