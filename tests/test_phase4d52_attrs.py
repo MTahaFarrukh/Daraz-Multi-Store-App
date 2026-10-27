@@ -367,7 +367,7 @@ def test_multi_store_source_once_dest_schema_twice(tenancy_env):
                 mock_client = MagicMock()
                 mock_client.get_category_attributes.return_value = LIVE_ATTR_SCHEMA
                 mock_client.query_category_brands.return_value = {
-                    "data": {"module": [{"name": "No Brand", "brand_id": 1}]}
+                    "data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
                 }
                 client_fn.return_value = mock_client
                 with patch(

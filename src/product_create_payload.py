@@ -155,17 +155,154 @@ def build_create_product_xml(draft: dict[str, Any]) -> str:
     return xml
 
 
-def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any]:
-    """Operator-safe redacted CreateProduct preview."""
+def _field_provenance_rows(
+    draft: dict[str, Any],
+    *,
+    price_override_report: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Field-by-field list: value + origin (source / workspace default / override)."""
+    product = draft.get("product") or {}
+    media = draft.get("media") or {}
+    brand_res = draft.get("brand_resolution") or {}
+    rows: list[dict[str, Any]] = [
+        {
+            "field": "PrimaryCategory",
+            "value": product.get("primary_category_id"),
+            "origin": "source",
+        },
+        {
+            "field": "Attributes.name",
+            "value": product.get("title"),
+            "origin": "source",
+        },
+        {
+            "field": "Attributes.brand",
+            "value": product.get("brand") or brand_res.get("brand"),
+            "origin": "destination_no_brand_resolution",
+        },
+        {
+            "field": "Attributes.brand_id",
+            "value": product.get("brand_id") or brand_res.get("brand_id"),
+            "origin": "destination_no_brand_resolution",
+        },
+        {
+            "field": "brand_resolution.status",
+            "value": brand_res.get("status"),
+            "origin": "destination_no_brand_resolution",
+        },
+        {
+            "field": "brand_resolution.uniqueness_verified",
+            "value": bool(brand_res.get("uniqueness_verified")),
+            "origin": "destination_no_brand_resolution",
+        },
+    ]
+    images = list(media.get("resolved_images") or media.get("product_images") or [])
+    for idx, url in enumerate(images[:8]):
+        strategy = None
+        strategies = (media.get("image_strategy") or {}).get("strategies") or []
+        if idx < len(strategies):
+            strategy = strategies[idx]
+        rows.append(
+            {
+                "field": f"Images[{idx}]",
+                "value": url,
+                "origin": strategy or "source_or_cdn_reuse",
+            }
+        )
+
+    override_keys = set()
+    if isinstance(price_override_report, dict):
+        for key in ("applied_keys", "variant_keys", "keys"):
+            raw = price_override_report.get(key)
+            if isinstance(raw, list):
+                override_keys.update(str(x) for x in raw)
+
+    for idx, v in enumerate(draft.get("variants") or []):
+        if not isinstance(v, dict):
+            continue
+        sku = v.get("seller_sku")
+        prefix = f"Skus[{idx}]"
+        pkg = v.get("package_sources") or {}
+        price_origin = str(v.get("price_source") or "source")
+        if sku and str(sku) in override_keys:
+            price_origin = "operator_override"
+        elif price_origin in {"price_override", "variant_override"}:
+            price_origin = "operator_override"
+        rows.extend(
+            [
+                {
+                    "field": f"{prefix}.SellerSku",
+                    "value": sku,
+                    "origin": "generated_mtf",
+                },
+                {
+                    "field": f"{prefix}.price",
+                    "value": v.get("price"),
+                    "origin": price_origin,
+                },
+                {
+                    "field": f"{prefix}.special_price",
+                    "value": v.get("special_price"),
+                    "origin": price_origin,
+                },
+                {
+                    "field": f"{prefix}.quantity",
+                    "value": v.get("quantity"),
+                    "origin": (
+                        "source"
+                        if v.get("quantity_source") == "source"
+                        else str(v.get("quantity_source") or "workspace_default")
+                    ),
+                },
+                {
+                    "field": f"{prefix}.package_weight",
+                    "value": v.get("package_weight"),
+                    "origin": str(pkg.get("package_weight") or "workspace_default"),
+                },
+                {
+                    "field": f"{prefix}.package_length",
+                    "value": v.get("package_length"),
+                    "origin": str(pkg.get("package_length") or "workspace_default"),
+                },
+                {
+                    "field": f"{prefix}.package_width",
+                    "value": v.get("package_width"),
+                    "origin": str(pkg.get("package_width") or "workspace_default"),
+                },
+                {
+                    "field": f"{prefix}.package_height",
+                    "value": v.get("package_height"),
+                    "origin": str(pkg.get("package_height") or "workspace_default"),
+                },
+            ]
+        )
+    return rows
+
+
+def build_create_product_payload_preview(
+    draft: dict[str, Any],
+    *,
+    include_xml: bool = False,
+    price_override_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Operator-safe redacted CreateProduct preview.
+
+    When ``include_xml=True``, attaches the exact CreateProduct XML that would be
+    sent (built locally — no Daraz calls, no tokens). Field provenance lists
+    source vs workspace default vs operator override for key create fields.
+    """
     product = draft.get("product") or {}
     variants = draft.get("variants") or []
     media = draft.get("media") or {}
     images = list(media.get("resolved_images") or media.get("product_images") or [])
     validation = draft.get("validation") or {}
     brand_res = draft.get("brand_resolution") or {}
+    override_report = price_override_report or draft.get("price_override_report")
 
     skus = []
     for v in variants:
+        if not isinstance(v, dict):
+            continue
         skus.append(
             {
                 "SellerSku": v.get("seller_sku"),
@@ -177,11 +314,13 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
                 "package_width": v.get("package_width"),
                 "package_height": v.get("package_height"),
                 "saleProp": v.get("sale_props"),
+                "price_source": v.get("price_source"),
+                "package_sources": v.get("package_sources"),
             }
         )
 
     desc_html = product.get("description_html") or ""
-    return {
+    out: dict[str, Any] = {
         "PrimaryCategory": product.get("primary_category_id"),
         "Attributes": {
             "name": product.get("title"),
@@ -189,6 +328,7 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
             "brand": product.get("brand"),
             "brand_id": product.get("brand_id"),
             "brand_resolution": brand_res.get("status"),
+            "brand_uniqueness_verified": bool(brand_res.get("uniqueness_verified")),
             "warranty_type": product.get("warranty_type"),
             "package_content": product.get("package_content"),
             "description_en": f"[html redacted — length {len(desc_html)}]",
@@ -201,12 +341,16 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
         "seller_item_limit": draft.get("seller_item_limit"),
         "variant_count": len(variants),
         "Skus": skus,
+        "field_provenance": _field_provenance_rows(
+            draft, price_override_report=override_report
+        ),
         "validation_status": {
             "can_create": validation.get("can_create"),
             "category_valid": (validation.get("category") or {}).get("valid"),
             "missing_required": (validation.get("category") or {}).get("missing_required")
             or validation.get("missing_mandatory"),
             "brand_status": brand_res.get("status"),
+            "brand_uniqueness_verified": bool(brand_res.get("uniqueness_verified")),
             "duplicate_count": len(draft.get("possible_duplicates") or []),
             "errors": validation.get("errors") or [],
             "warnings": validation.get("warnings") or [],
@@ -215,8 +359,17 @@ def build_create_product_payload_preview(draft: dict[str, Any]) -> dict[str, Any
             "Preview only — live CreateProduct requires ALLOW_PRODUCT_CREATE_PROBE + supervised path",
             "Video not included",
             f"Description enhancement: {(media.get('description_enhancement') or {}).get('status')}",
+            "Create blocked unless brand uniqueness_verified=true",
         ],
     }
+    if include_xml:
+        # Local XML only — never tokens/secrets. Safe for Copy diagnostics.
+        try:
+            out["create_product_xml"] = build_create_product_xml(draft)
+        except Exception as exc:  # noqa: BLE001
+            out["create_product_xml"] = None
+            out["create_product_xml_error"] = type(exc).__name__
+    return out
 
 
 def redact_create_response(payload: dict[str, Any] | None) -> dict[str, Any]:

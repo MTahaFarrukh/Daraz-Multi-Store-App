@@ -387,6 +387,21 @@ export function formatDiagnosticsCopy(input: {
     if (d.brand_resolution) {
       lines.push(`  brand_resolution=${JSON.stringify(d.brand_resolution)}`);
     }
+    if (preview?.create_product_xml && typeof preview.create_product_xml === "string") {
+      lines.push("  create_product_xml:");
+      lines.push(String(preview.create_product_xml));
+    }
+    const provenance = preview?.field_provenance;
+    if (Array.isArray(provenance) && provenance.length) {
+      lines.push("  field_provenance:");
+      for (const row of provenance.slice(0, 80)) {
+        if (!row || typeof row !== "object") continue;
+        const r = row as Record<string, unknown>;
+        lines.push(
+          `    ${String(r.field)}=${String(r.value ?? "")} · origin=${String(r.origin ?? "")}`
+        );
+      }
+    }
   }
   const brandEntries = Object.entries(input.noBrandByStore || {}).filter(([, v]) => Boolean(v));
   if (brandEntries.length) {

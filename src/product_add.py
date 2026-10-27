@@ -775,6 +775,14 @@ def _prepare_destination(
                 errors.append(
                     f"brand:{reason}:{brand_resolution.get('message')}"
                 )
+            elif brand_resolution.get("status") == "NO_BRAND" and not bool(
+                brand_resolution.get("uniqueness_verified")
+            ):
+                errors.append(
+                    "brand:uniqueness_unverified:"
+                    "No Brand candidate found but catalog uniqueness not verified — "
+                    "run Verify uniqueness deep scan before create"
+                )
             # Prefer clear semantic conflict messages over opaque category_invalid
             semantic_msgs = [
                 u.get("message")
@@ -868,12 +876,19 @@ def _prepare_destination(
             for e in errors
         )
         or brand_resolution.get("status") == "UNRESOLVED"
+        or (
+            brand_resolution.get("status") == "NO_BRAND"
+            and not bool(brand_resolution.get("uniqueness_verified"))
+        )
         or (category_result is not None and not category_result.get("valid"))
         or not primary
     )
     if blocking_pre_image:
         draft.setdefault("validation", {})["errors"] = list(dict.fromkeys(errors))
         draft["validation"]["can_create"] = False
+        draft["validation"]["brand_uniqueness_verified"] = bool(
+            brand_resolution.get("uniqueness_verified")
+        )
         draft.setdefault("media", {})["resolved_images"] = []
         draft["media"]["image_strategy"] = {
             "strategies": [],
@@ -881,7 +896,11 @@ def _prepare_destination(
             "errors": [],
             "skipped": "preflight_blocked",
         }
-        preview = build_create_product_payload_preview(draft)
+        preview = build_create_product_payload_preview(
+            draft,
+            include_xml=True,
+            price_override_report=override_report,
+        )
         return {
             "store": store_info,
             "status": "NEEDS_ATTENTION",
@@ -962,12 +981,20 @@ def _prepare_destination(
         not draft["validation"]["errors"]
         and (category_result is None or category_result.get("valid"))
         and brand_resolution.get("status") == "NO_BRAND"
+        and bool(brand_resolution.get("uniqueness_verified"))
         and bool(final_urls)
         and bool(primary)
     )
     draft["validation"]["can_create"] = can_create
+    draft["validation"]["brand_uniqueness_verified"] = bool(
+        brand_resolution.get("uniqueness_verified")
+    )
     t_payload = time.perf_counter()
-    preview = build_create_product_payload_preview(draft)
+    preview = build_create_product_payload_preview(
+        draft,
+        include_xml=True,
+        price_override_report=override_report,
+    )
     timings["payload_build_ms"] = round((time.perf_counter() - t_payload) * 1000, 1)
 
     result_base = {

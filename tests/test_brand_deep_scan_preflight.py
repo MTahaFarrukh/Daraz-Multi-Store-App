@@ -169,6 +169,9 @@ def test_deep_scan_finds_no_brand_in_synthetic_78k():
     assert second["status"] == "NO_BRAND"
     assert second["brand_id"] == 99
     assert second["brand"] == "No Brand"
+    # Incomplete catalog → candidate only; uniqueness not proven yet.
+    assert second["uniqueness_verified"] is False
+    assert second["lookup"]["complete"] is False
 
 
 def test_deep_scan_rate_limited_stops_without_retry():
@@ -430,13 +433,17 @@ def test_diagnose_deep_persists_and_blocks_without_no_brand(tenancy_env, monkeyp
         store_ref=store["store_id"],
         primary_category_id="10000719",
         deep=True,
+        verify_uniqueness=True,
         scan_from_start_row=0,
+        prior_brand_id=55,
     )
     assert out["status"] == "NO_BRAND"
     assert out["brand_id"] == 55
+    assert out["uniqueness_verified"] is True
     assert out.get("persisted") is True
     persisted = repo.get_verified_category_no_brand("pk", "10000719")
     assert persisted and str(persisted["brand_id"]) == "55"
+    assert (persisted.get("evidence") or {}).get("uniqueness_verified") is True
 
     # Rejection block prevents trusting scan
     repo.upsert_category_brand_rejection_block(

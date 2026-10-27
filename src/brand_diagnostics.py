@@ -36,6 +36,9 @@ def public_lookup_fields(
         "scanned_rows",
         "next_start_row",
         "verified_at",
+        "verify_uniqueness",
+        "uniqueness_verified",
+        "candidates_total",
     ):
         if key in src and src[key] is not None:
             out[key] = src[key]
@@ -215,6 +218,8 @@ def diagnose_category_no_brand(
     deep: bool = False,
     scan_from_start_row: int = 0,
     prior_candidates: list[dict[str, Any]] | None = None,
+    verify_uniqueness: bool = False,
+    prior_brand_id: Any = None,
 ) -> dict[str, Any]:
     """Inspect category brands for a verified No Brand option (read-only).
 
@@ -298,34 +303,49 @@ def diagnose_category_no_brand(
         and persisted.get("brand_id") not in (None, "")
         and not deep
     ):
+        from src.brand_resolve import _evidence_uniqueness_verified
+
         brand = persisted.get("brand_name")
         brand_id = persisted.get("brand_id")
+        evidence = (
+            persisted.get("evidence")
+            if isinstance(persisted.get("evidence"), dict)
+            else {}
+        )
+        uniqueness_ok = _evidence_uniqueness_verified(evidence)
         consistency = catalog_api_consistency_note(
             catalog_evidence, api_brand=brand, api_brand_id=brand_id
         )
         return {
             "status": "NO_BRAND",
-            "reason": "persisted_verified_no_brand",
+            "reason": (
+                "persisted_uniqueness_verified_no_brand"
+                if uniqueness_ok
+                else "persisted_no_brand_uniqueness_unverified"
+            ),
             "no_brand_found": True,
             "brand": brand,
             "brand_id": brand_id,
             "used_no_brand": True,
+            "uniqueness_verified": uniqueness_ok,
             "primary_category_id": cat,
             "store_id": store_slug,
             "lookup": {
                 "strategy": "persisted_verified",
                 "pages": 0,
-                "complete": True,
+                "complete": bool(evidence.get("complete")) if evidence else uniqueness_ok,
                 "verified_at": persisted.get("verified_at"),
-                "matched_start_row": (persisted.get("evidence") or {}).get(
-                    "matched_start_row"
-                ),
-                "total_record": (persisted.get("evidence") or {}).get("total_record"),
+                "matched_start_row": evidence.get("matched_start_row"),
+                "total_record": evidence.get("total_record"),
+                "candidates_total": evidence.get("candidates_total"),
+                "uniqueness_verified": uniqueness_ok,
             },
             "lookup_calls": 0,
             "persisted": True,
             "catalog_evidence": catalog_evidence,
             "catalog_consistency_note": consistency,
+            "candidates_total": evidence.get("candidates_total"),
+            "complete": bool(evidence.get("complete")) if evidence else uniqueness_ok,
         }
 
     try:
@@ -372,6 +392,20 @@ def diagnose_category_no_brand(
         )
         return client.query_category_brands(**kwargs)
 
+    seeded = list(prior_candidates or [])
+    if prior_brand_id not in (None, "") and not any(
+        str(c.get("brand_id")) == str(prior_brand_id)
+        for c in seeded
+        if isinstance(c, dict)
+    ):
+        seeded.append(
+            {
+                "brand": "No Brand",
+                "brand_id": prior_brand_id,
+                "matched_start_row": None,
+            }
+        )
+
     try:
         if deep:
             resolution = deep_scan_no_brand(
@@ -379,7 +413,8 @@ def diagnose_category_no_brand(
                 query_brands=query_brands,
                 marketplace=marketplace,
                 scan_from_start_row=int(scan_from_start_row or 0),
-                prior_candidates=prior_candidates,
+                prior_candidates=seeded,
+                verify_uniqueness=bool(verify_uniqueness),
             )
         else:
             resolution = resolve_destination_no_brand(
@@ -418,11 +453,13 @@ def diagnose_category_no_brand(
     )
     brand = resolution.get("brand")
     brand_id = resolution.get("brand_id")
+    uniqueness_verified = bool(resolution.get("uniqueness_verified"))
     found = (
         resolution.get("status") == "NO_BRAND"
         and is_no_brand_label(brand)
         and bool(brand)
     )
+    candidates = resolution.get("candidates") or []
 
     consistency = catalog_api_consistency_note(
         catalog_evidence, api_brand=brand if found else None, api_brand_id=brand_id
@@ -437,21 +474,42 @@ def diagnose_category_no_brand(
         "catalog_evidence": catalog_evidence,
         "catalog_consistency_note": consistency,
         "deep": bool(deep),
-        "candidates": resolution.get("candidates") or [],
+        "verify_uniqueness": bool(verify_uniqueness),
+        "uniqueness_verified": uniqueness_verified,
+        "candidates": candidates,
+        "candidates_total": lookup.get("candidates_total")
+        if lookup.get("candidates_total") is not None
+        else len(candidates),
         "next_start_row": lookup.get("next_start_row"),
         "scanned_rows": lookup.get("scanned_rows"),
         "complete": lookup.get("complete"),
         "total_record": lookup.get("total_record"),
     }
 
+    # Ambiguous → clear any persisted verified row (no longer trustworthy).
+    if resolution.get("reason") == "ambiguous_no_brand" or (
+        resolution.get("status") == "UNRESOLVED"
+        and len(candidates) > 1
+    ):
+        try:
+            cleared = repo.delete_verified_category_no_brand(marketplace, cat)
+            clear_no_brand_cache_for_tests()
+            base["persisted_cleared"] = bool(cleared)
+        except Exception as exc:  # noqa: BLE001
+            base["persist_clear_error"] = type(exc).__name__
+
     if found:
-        # Persist only when Daraz returned a real brand_id (never invent).
-        if brand_id not in (None, ""):
+        # Persist only uniqueness-verified NO_BRAND (complete scan, one brand_id).
+        if uniqueness_verified and brand_id not in (None, ""):
             evidence = {
                 "matched_start_row": lookup.get("matched_start_row"),
                 "total_record": lookup.get("total_record"),
                 "strategy": lookup.get("strategy"),
                 "deep": bool(deep),
+                "complete": True,
+                "candidates_total": 1,
+                "uniqueness_verified": True,
+                "verify_uniqueness": bool(verify_uniqueness),
             }
             try:
                 repo.upsert_verified_category_no_brand(
@@ -471,14 +529,19 @@ def diagnose_category_no_brand(
             **base,
             "status": "NO_BRAND",
             "reason": (
-                "confirmed_no_brand_row_deep"
-                if deep
-                else "confirmed_no_brand_row"
+                "confirmed_unique_no_brand_complete"
+                if uniqueness_verified
+                else (
+                    "confirmed_no_brand_row_deep_uniqueness_unverified"
+                    if deep
+                    else "confirmed_no_brand_row_uniqueness_unverified"
+                )
             ),
             "no_brand_found": True,
             "brand": brand,
             "brand_id": brand_id,  # only if Daraz returned it — never invented
             "used_no_brand": True,
+            "uniqueness_verified": uniqueness_verified,
         }
 
     # Deep scan returns its own UNRESOLVED/UNVERIFIED. Shallow create-path
@@ -490,13 +553,21 @@ def diagnose_category_no_brand(
         or "no_brand_scan_incomplete"
     )
     if deep:
+        # Keep candidate brand_id visible during uniqueness resume.
+        keep_brand = None
+        keep_id = None
+        if len(candidates) == 1 and is_no_brand_label(
+            (candidates[0] or {}).get("brand")
+        ):
+            keep_brand = (candidates[0] or {}).get("brand")
+            keep_id = (candidates[0] or {}).get("brand_id")
         return {
             **base,
             "status": str(resolution.get("status") or "UNVERIFIED"),
             "reason": reason,
-            "no_brand_found": False,
-            "brand": None,
-            "brand_id": None,
+            "no_brand_found": bool(keep_id is not None),
+            "brand": keep_brand or brand,
+            "brand_id": keep_id if keep_id is not None else brand_id,
         }
 
     if lookup.get("complete") is True:

@@ -219,12 +219,27 @@ def is_rate_limited_error(exc: BaseException) -> bool:
     return False
 
 
+def _evidence_uniqueness_verified(evidence: dict[str, Any] | None) -> bool:
+    ev = evidence or {}
+    if ev.get("uniqueness_verified") is True:
+        return True
+    try:
+        candidates_total = int(ev.get("candidates_total") or 0)
+    except (TypeError, ValueError):
+        candidates_total = 0
+    return bool(ev.get("complete") is True and candidates_total == 1)
+
+
 def _persisted_no_brand_resolution(
     *,
     marketplace: str,
     primary_category_id: int | str | None,
 ) -> dict[str, Any] | None:
-    """Read verified NO_BRAND from local persistence (no Daraz call)."""
+    """Read verified NO_BRAND from local persistence (no Daraz call).
+
+    Create may only proceed when ``uniqueness_verified`` is true in evidence
+    (complete catalog scan with exactly one distinct No Brand brand_id).
+    """
     if primary_category_id is None or str(primary_category_id).strip() == "":
         return None
     try:
@@ -241,20 +256,29 @@ def _persisted_no_brand_resolution(
     brand_id = row.get("brand_id")
     if not is_no_brand_label(brand) or brand_id in (None, ""):
         return None
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    uniqueness_ok = _evidence_uniqueness_verified(evidence)
     return {
         "status": "NO_BRAND",
         "brand": brand,
         "brand_id": brand_id,
-        "message": "Verified No Brand from persisted marketplace/category cache",
+        "message": (
+            "Uniqueness-verified No Brand from persisted marketplace/category cache"
+            if uniqueness_ok
+            else "Persisted No Brand row — uniqueness not verified (create blocked)"
+        ),
         "used_no_brand": True,
         "cache_hit": False,
         "persisted": True,
+        "uniqueness_verified": uniqueness_ok,
         "lookup": {
             "strategy": "persisted_verified",
             "pages": 0,
-            "complete": True,
-            "matched_start_row": (row.get("evidence") or {}).get("matched_start_row"),
-            "total_record": (row.get("evidence") or {}).get("total_record"),
+            "complete": bool(evidence.get("complete")) if evidence else uniqueness_ok,
+            "matched_start_row": evidence.get("matched_start_row"),
+            "total_record": evidence.get("total_record"),
+            "candidates_total": evidence.get("candidates_total"),
+            "uniqueness_verified": uniqueness_ok,
             "verified_at": row.get("verified_at"),
         },
     }
@@ -270,11 +294,16 @@ def deep_scan_no_brand(
     max_pages: int = _DEEP_SCAN_MAX_PAGES,
     delay_s: float = _DEEP_SCAN_DELAY_S,
     prior_candidates: list[dict[str, Any]] | None = None,
+    verify_uniqueness: bool = False,
 ) -> dict[str, Any]:
     """Resumable linear brand catalog scan for diagnostics only.
 
     Does not change create-path ``_MAX_LOOKUP_CALLS`` budget. Ordering is not
     trusted; ``name`` filter is not used. Stops on rate limit without retry.
+
+    When ``verify_uniqueness=True``, keep scanning past the first match until
+    the catalog end (or budget/rate-limit). Uniqueness is proven only when
+    ``complete=True`` and exactly one distinct No Brand ``brand_id`` exists.
     """
     t0 = time.perf_counter()
     mp = (marketplace or "pk").strip().lower() or "pk"
@@ -282,6 +311,7 @@ def deep_scan_no_brand(
     max_pages = max(1, min(int(max_pages or _DEEP_SCAN_MAX_PAGES), 60))
     start = max(0, int(scan_from_start_row or 0))
     delay_s = max(0.0, float(delay_s or 0.0))
+    verify_uniqueness = bool(verify_uniqueness)
 
     # Distinct brand_id → candidate
     candidates: dict[str, dict[str, Any]] = {}
@@ -298,7 +328,11 @@ def deep_scan_no_brand(
         }
 
     diagnostics: dict[str, Any] = {
-        "strategy": "deep_linear_scan",
+        "strategy": (
+            "deep_linear_scan_verify_uniqueness"
+            if verify_uniqueness
+            else "deep_linear_scan"
+        ),
         "pages": 0,
         "complete": False,
         "name_filter_effective": False,
@@ -307,6 +341,9 @@ def deep_scan_no_brand(
         "next_start_row": start,
         "total_record": None,
         "marketplace": mp,
+        "verify_uniqueness": verify_uniqueness,
+        "uniqueness_verified": False,
+        "candidates_total": len(candidates),
     }
 
     try:
@@ -379,24 +416,12 @@ def deep_scan_no_brand(
         diagnostics["error_type"] = type(exc).__name__
 
     cand_list = list(candidates.values())
+    diagnostics["candidates_total"] = len(cand_list)
+    uniqueness_ok = bool(diagnostics.get("complete") and len(cand_list) == 1)
+    diagnostics["uniqueness_verified"] = uniqueness_ok
     timings = {
         "brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)
     }
-
-    if len(cand_list) == 1:
-        only = cand_list[0]
-        diagnostics["matched_start_row"] = only.get("matched_start_row")
-        return {
-            "status": "NO_BRAND",
-            "brand": only.get("brand"),
-            "brand_id": only.get("brand_id"),
-            "message": "Confirmed official No Brand row (deep scan)",
-            "used_no_brand": True,
-            "cache_hit": False,
-            "candidates": cand_list,
-            "lookup": diagnostics,
-            "timings_ms": timings,
-        }
 
     if len(cand_list) > 1:
         diagnostics["stop_reason"] = diagnostics.get("stop_reason") or "ambiguous_no_brand"
@@ -407,6 +432,59 @@ def deep_scan_no_brand(
             "message": "Multiple distinct No Brand brand_id values found",
             "used_no_brand": False,
             "reason": "ambiguous_no_brand",
+            "uniqueness_verified": False,
+            "candidates": cand_list,
+            "lookup": diagnostics,
+            "timings_ms": timings,
+        }
+
+    if len(cand_list) == 1:
+        only = cand_list[0]
+        diagnostics["matched_start_row"] = only.get("matched_start_row")
+        if uniqueness_ok:
+            return {
+                "status": "NO_BRAND",
+                "brand": only.get("brand"),
+                "brand_id": only.get("brand_id"),
+                "message": (
+                    "Confirmed unique No Brand brand_id after complete catalog scan"
+                ),
+                "used_no_brand": True,
+                "cache_hit": False,
+                "uniqueness_verified": True,
+                "candidates": cand_list,
+                "lookup": diagnostics,
+                "timings_ms": timings,
+            }
+        # Found a candidate but catalog not fully scanned — uniqueness unproven.
+        if verify_uniqueness:
+            return {
+                "status": "UNVERIFIED",
+                "brand": only.get("brand"),
+                "brand_id": only.get("brand_id"),
+                "message": (
+                    "Uniqueness scan incomplete — continue from next_start_row"
+                ),
+                "used_no_brand": False,
+                "reason": str(
+                    diagnostics.get("stop_reason") or "uniqueness_scan_incomplete"
+                ),
+                "uniqueness_verified": False,
+                "candidates": cand_list,
+                "lookup": diagnostics,
+                "timings_ms": timings,
+            }
+        return {
+            "status": "NO_BRAND",
+            "brand": only.get("brand"),
+            "brand_id": only.get("brand_id"),
+            "message": (
+                "No Brand candidate found — uniqueness not verified "
+                "(complete catalog scan required before create)"
+            ),
+            "used_no_brand": True,
+            "cache_hit": False,
+            "uniqueness_verified": False,
             "candidates": cand_list,
             "lookup": diagnostics,
             "timings_ms": timings,
@@ -420,6 +498,7 @@ def deep_scan_no_brand(
             "message": "Complete deep scan found no No Brand row",
             "used_no_brand": False,
             "reason": "not_found_complete_scan",
+            "uniqueness_verified": False,
             "candidates": [],
             "lookup": diagnostics,
             "timings_ms": timings,
@@ -432,6 +511,7 @@ def deep_scan_no_brand(
         "message": "Deep scan incomplete — No Brand not confirmed",
         "used_no_brand": False,
         "reason": str(diagnostics.get("stop_reason") or "deep_scan_incomplete"),
+        "uniqueness_verified": False,
         "candidates": [],
         "lookup": diagnostics,
         "timings_ms": timings,
@@ -496,6 +576,11 @@ def resolve_destination_no_brand(
                 diagnostics["strategy"] = "name_filter"
                 diagnostics["name_filter_effective"] = True
                 diagnostics["matched_query"] = variant
+                total_hit = _total_record(payload)
+                if total_hit is not None:
+                    diagnostics["total_record"] = total_hit
+                    if total_hit == 1:
+                        diagnostics["complete"] = True
                 break
             if _name_filter_looks_ineffective(payload, variant):
                 filter_ineffective = True
@@ -646,14 +731,36 @@ def resolve_destination_no_brand(
         name = _row_primary_name(row)
         brand_id = _row_brand_id(row)
         if name:
+            # Uniqueness is proven only when the create-path scan completed the
+            # reported catalog, or the catalog has a single brand row (total=1).
+            total = diagnostics.get("total_record")
+            try:
+                total_i = int(total) if total is not None else None
+            except (TypeError, ValueError):
+                total_i = None
+            uniqueness_ok = bool(
+                diagnostics.get("complete") is True or total_i == 1
+            )
             result = {
                 "status": "NO_BRAND",
                 "brand": name,
                 "brand_id": brand_id,
-                "message": "Confirmed official No Brand row",
+                "message": (
+                    "Confirmed official No Brand row"
+                    if uniqueness_ok
+                    else (
+                        "Confirmed official No Brand row — uniqueness not verified "
+                        "(run Verify uniqueness deep scan before create)"
+                    )
+                ),
                 "used_no_brand": True,
                 "cache_hit": False,
-                "lookup": diagnostics,
+                "uniqueness_verified": uniqueness_ok,
+                "lookup": {
+                    **diagnostics,
+                    "uniqueness_verified": uniqueness_ok,
+                    "candidates_total": 1,
+                },
                 "timings_ms": {
                     "brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)
                 },
@@ -672,6 +779,7 @@ def resolve_destination_no_brand(
         "message": "No Brand could not be confirmed for this category",
         "used_no_brand": False,
         "reason": "no_brand_unavailable",
+        "uniqueness_verified": False,
         "lookup": diagnostics,
         "timings_ms": {
             "brand_resolution_ms": round((time.perf_counter() - t0) * 1000, 1)

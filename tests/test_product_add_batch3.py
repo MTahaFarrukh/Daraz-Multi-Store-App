@@ -223,7 +223,7 @@ def test_deterministic_ordering_with_variable_latency(tenancy_env, monkeypatch):
                         "product_images": ["https://static-01.daraz.pk/p/abc.jpg"]
                     },
                     "category_resolution": {"confidence": "high"},
-                    "brand_resolution": {"status": "NO_BRAND", "used_no_brand": True},
+                    "brand_resolution": {"status": "NO_BRAND", "used_no_brand": True, "uniqueness_verified": True, "brand": "No Brand", "brand_id": 1},
                     "validation": {"errors": []},
                     "possible_duplicates": [],
                     "duplicate_check_done": True,
@@ -281,7 +281,7 @@ def test_source_immutability_across_destinations(tenancy_env, monkeypatch):
                 ],
                 "media": {"product_images": list(extracted.get("images") or [])},
                 "category_resolution": {"confidence": "high"},
-                "brand_resolution": {"status": "NO_BRAND", "used_no_brand": True},
+                "brand_resolution": {"status": "NO_BRAND", "used_no_brand": True, "uniqueness_verified": True, "brand": "No Brand", "brand_id": 1},
                 "validation": {"errors": []},
                 "possible_duplicates": [],
                 "duplicate_check_done": True,

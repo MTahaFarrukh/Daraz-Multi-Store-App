@@ -79,7 +79,12 @@ export const Api = {
   checkCategoryNoBrand: (
     storeId: string,
     primaryCategoryId: string,
-    opts?: { deep?: boolean; scanFromStartRow?: number }
+    opts?: {
+      deep?: boolean;
+      scanFromStartRow?: number;
+      verifyUniqueness?: boolean;
+      priorBrandId?: string | number | null;
+    }
   ) => {
     const qs = new URLSearchParams({
       primary_category_id: String(primaryCategoryId).trim(),
@@ -87,6 +92,10 @@ export const Api = {
     if (opts?.deep) qs.set("deep", "true");
     if (opts?.scanFromStartRow != null && opts.scanFromStartRow > 0) {
       qs.set("scan_from_start_row", String(opts.scanFromStartRow));
+    }
+    if (opts?.verifyUniqueness) qs.set("verify_uniqueness", "true");
+    if (opts?.priorBrandId != null && String(opts.priorBrandId).trim() !== "") {
+      qs.set("prior_brand_id", String(opts.priorBrandId).trim());
     }
     return api<CategoryNoBrandDiagnostic>(
       `/api/stores/${encodeURIComponent(storeId)}/category-brands/no-brand?${qs}`

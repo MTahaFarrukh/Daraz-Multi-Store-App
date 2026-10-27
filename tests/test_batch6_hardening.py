@@ -209,7 +209,7 @@ def test_create_probe_uses_workspace_client(tenancy_env, monkeypatch):
             }
 
         def query_category_brands(self, **_k):
-            return {"module": [{"name": "No Brand", "brand_id": 1}]}
+            return {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
 
         def query_product_brand(self, **_k):
             return {"data": {"brandId": 1, "name": "No Brand"}}

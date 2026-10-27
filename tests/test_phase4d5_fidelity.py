@@ -334,7 +334,7 @@ def test_unresolved_brand_falls_back_to_no_brand():
 
     def query_brands(**kwargs):
         calls.append(kwargs.get("name"))
-        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}]}}
+        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}}
 
     res = resolve_brand_for_category(
         source_brand="Bag Street Unknown XYZ",
@@ -351,7 +351,7 @@ def test_unresolved_brand_falls_back_to_no_brand():
 
 def test_missing_brand_uses_no_brand():
     def query_brands(**kwargs):
-        return {"data": {"module": [{"name": "No Brand", "brand_id": 9}]}}
+        return {"data": {"module": [{"name": "No Brand", "brand_id": 9}], "total_record": 1}}
 
     res = resolve_brand_for_category(
         source_brand=None,
@@ -457,7 +457,7 @@ def test_multi_store_duplicate_does_not_block_other(tenancy_env):
                 mock_client = MagicMock()
                 mock_client.get_category_attributes.return_value = {"data": []}
                 mock_client.query_category_brands.return_value = {
-                    "data": {"module": [{"name": "No Brand", "brand_id": 1}]}
+                    "data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
                 }
                 client_fn.return_value = mock_client
                 with patch(

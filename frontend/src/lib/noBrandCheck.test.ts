@@ -24,12 +24,13 @@ describe("noBrandCheck helpers", () => {
     ).toBe("10002730");
   });
 
-  it("shows green only for NO_BRAND and includes lookup diagnostics", () => {
+  it("shows green only for uniqueness-verified NO_BRAND", () => {
     const ok: NoBrandCheckResult = {
       status: "NO_BRAND",
-      reason: "confirmed_no_brand_row",
+      reason: "confirmed_unique_no_brand_complete",
       brand: "No Brand",
       brand_id: 60147,
+      uniqueness_verified: true,
       lookup_calls: 2,
       lookup: {
         pages: 3,
@@ -38,14 +39,21 @@ describe("noBrandCheck helpers", () => {
         matched_start_row: 0,
         name_filter_effective: true,
         total_record: 10,
+        uniqueness_verified: true,
       },
     };
     expect(isNoBrandConfirmed(ok)).toBe(true);
-    expect(noBrandCheckTone(ok.status)).toBe("ok");
+    expect(noBrandCheckTone(ok.status, ok.uniqueness_verified)).toBe("ok");
     const line = formatNoBrandCheckLine(ok);
     expect(line).toContain("stop_reason=found");
     expect(line).toContain("pages=3");
     expect(brandCheckBlocksCreate({ s1: ok }, ["s1"])).toBe(false);
+    expect(
+      isNoBrandConfirmed({
+        ...ok,
+        uniqueness_verified: false,
+      })
+    ).toBe(false);
   });
 
   it("shows warning for UNVERIFIED and keeps create blocked", () => {

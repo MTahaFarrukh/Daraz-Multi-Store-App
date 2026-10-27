@@ -16,6 +16,9 @@ export type NoBrandLookup = {
   scanned_rows?: number | null;
   next_start_row?: number | null;
   verified_at?: string | null;
+  verify_uniqueness?: boolean | null;
+  uniqueness_verified?: boolean | null;
+  candidates_total?: number | null;
 };
 
 export type NoBrandCandidate = {
@@ -60,7 +63,10 @@ export type NoBrandCheckResult = {
   scanned_rows?: number | null;
   total_record?: number | null;
   candidates?: NoBrandCandidate[] | null;
+  candidates_total?: number | null;
   persisted?: boolean | null;
+  uniqueness_verified?: boolean | null;
+  verify_uniqueness?: boolean | null;
   seller_item_limit?: Record<string, unknown> | null;
   image_preflight?: Record<string, unknown> | null;
   /** Client-side message (e.g. 403); never includes tokens. */
@@ -90,28 +96,46 @@ export function canCheckNoBrand(categoryId: string | null | undefined): boolean 
   return Boolean(categoryId && String(categoryId).trim());
 }
 
-/** Green only for confirmed NO_BRAND. */
-export function noBrandCheckTone(status: string | null | undefined): "ok" | "warn" | "muted" {
+/** Green only for uniqueness-verified NO_BRAND. */
+export function noBrandCheckTone(
+  status: string | null | undefined,
+  uniquenessVerified?: boolean | null
+): "ok" | "warn" | "muted" {
   if (!status) return "muted";
-  return status === "NO_BRAND" ? "ok" : "warn";
+  if (status === "NO_BRAND" && uniquenessVerified) return "ok";
+  if (status === "NO_BRAND") return "warn";
+  return "warn";
 }
 
 export function isNoBrandConfirmed(
   result: NoBrandCheckResult | null | undefined
 ): boolean {
-  return result?.status === "NO_BRAND";
+  return result?.status === "NO_BRAND" && Boolean(result.uniqueness_verified);
 }
 
-/** Any non-NO_BRAND result for a selected store blocks create. */
+/** Blocks create unless uniqueness-verified NO_BRAND (or no check yet). */
 export function brandCheckBlocksCreate(
   results: Record<string, NoBrandCheckResult | undefined>,
   storeIds: string[]
 ): boolean {
   for (const id of storeIds) {
     const r = results[id];
-    if (r && r.status !== "NO_BRAND") return true;
+    if (r && !isNoBrandConfirmed(r)) return true;
   }
   return false;
+}
+
+export function canVerifyUniqueness(
+  result: NoBrandCheckResult | null | undefined
+): boolean {
+  if (!result) return false;
+  if (result.uniqueness_verified) return false;
+  if (result.brand_id == null || result.brand_id === "") return false;
+  if (result.complete === true && result.status === "NO_BRAND") return false;
+  return (
+    result.status === "NO_BRAND" ||
+    (result.status === "UNVERIFIED" && Boolean(result.brand_id))
+  );
 }
 
 function formatBrandCounts(rows: CatalogBrandCount[] | undefined, label: string): string | null {
@@ -149,9 +173,14 @@ export function formatNoBrandCheckLine(result: NoBrandCheckResult): string {
     result.scanned_rows != null ? `scanned_rows=${result.scanned_rows}` : null,
     result.next_start_row != null ? `next_start_row=${result.next_start_row}` : null,
     result.persisted ? "persisted=true" : null,
-    result.candidates?.length
-      ? `candidates=${result.candidates.length}`
+    result.uniqueness_verified != null
+      ? `uniqueness_verified=${result.uniqueness_verified}`
       : null,
+    result.candidates_total != null
+      ? `candidates_total=${result.candidates_total}`
+      : result.candidates?.length
+        ? `candidates=${result.candidates.length}`
+        : null,
     result.error ? `error=${result.error}` : null,
   ].filter(Boolean);
   return bits.join(" · ");
@@ -273,7 +302,17 @@ export function mapApiNoBrandResult(
     total_record:
       (res.total_record as number | null | undefined) ?? lookup.total_record ?? null,
     candidates: (res.candidates as NoBrandCandidate[] | null | undefined) ?? null,
+    candidates_total:
+      (res.candidates_total as number | null | undefined) ??
+      (lookup as { candidates_total?: number }).candidates_total ??
+      null,
     persisted: (res.persisted as boolean | null | undefined) ?? null,
+    uniqueness_verified:
+      (res.uniqueness_verified as boolean | null | undefined) ??
+      (lookup as { uniqueness_verified?: boolean }).uniqueness_verified ??
+      null,
+    verify_uniqueness:
+      (res.verify_uniqueness as boolean | null | undefined) ?? null,
     seller_item_limit:
       (res.seller_item_limit as Record<string, unknown> | null | undefined) ?? null,
     image_preflight:

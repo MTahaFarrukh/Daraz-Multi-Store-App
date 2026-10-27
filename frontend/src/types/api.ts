@@ -132,6 +132,9 @@ export type CategoryNoBrandDiagnostic = {
   scanned_rows?: number | null;
   total_record?: number | null;
   persisted?: boolean | null;
+  uniqueness_verified?: boolean | null;
+  verify_uniqueness?: boolean | null;
+  candidates_total?: number | null;
   candidates?: Array<Record<string, unknown>> | null;
   catalog_consistency_note?: string | null;
   lookup?: {

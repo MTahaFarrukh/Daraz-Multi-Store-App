@@ -1,6 +1,7 @@
 import { StatusBadge } from "@/components/ui/Primitives";
 import {
   canContinueDeepScan,
+  canVerifyUniqueness,
   deepScanProgressLabel,
   formatCatalogEvidenceLines,
   formatNoBrandCheckLine,
@@ -31,6 +32,7 @@ export function DestinationStatusCard({
   noBrandDisabledReason,
   onCheckNoBrand,
   onDeepScanNoBrand,
+  onVerifyUniqueness,
   onCancelDeepScan,
   deepScanActive,
   deepScanPaused,
@@ -49,6 +51,7 @@ export function DestinationStatusCard({
   noBrandDisabledReason?: string;
   onCheckNoBrand?: () => void;
   onDeepScanNoBrand?: () => void;
+  onVerifyUniqueness?: () => void;
   onCancelDeepScan?: () => void;
   deepScanActive?: boolean;
   deepScanPaused?: boolean;
@@ -64,7 +67,17 @@ export function DestinationStatusCard({
   const recovery = reasonText ? destinationRecoveryHint(dest) : "";
   const action = destinationActionKind(dest);
   const name = dest.store?.display_name || dest.store?.store_id || "Destination store";
-  const brandTone = noBrand ? noBrandCheckTone(noBrand.status) : "muted";
+  const brandTone = noBrand
+    ? noBrandCheckTone(noBrand.status, noBrand.uniqueness_verified)
+    : "muted";
+  const draftPreview = (dest.draft_preview || null) as Record<string, unknown> | null;
+  const payloadXml =
+    draftPreview && typeof draftPreview.create_product_xml === "string"
+      ? draftPreview.create_product_xml
+      : null;
+  const fieldProvenance = Array.isArray(draftPreview?.field_provenance)
+    ? (draftPreview?.field_provenance as Array<Record<string, unknown>>)
+    : null;
 
   return (
     <article className={`add-dest-card add-dest-card--${ui}`}>
@@ -125,18 +138,36 @@ export function DestinationStatusCard({
                   Boolean(noBrandDisabled) ||
                   Boolean(noBrandChecking) ||
                   actionsDisabled ||
-                  noBrand?.status === "NO_BRAND"
+                  (noBrand?.status === "NO_BRAND" && Boolean(noBrand?.uniqueness_verified))
                 }
                 title="Resumable read-only deep scan — never CreateProduct"
                 onClick={onDeepScanNoBrand}
               >
-                {deepScanActive
+                {deepScanActive && !noBrand?.verify_uniqueness
                   ? deepScanPaused
                     ? "Resume deep scan"
                     : "Deep scanning…"
-                  : canContinueDeepScan(noBrand)
+                  : canContinueDeepScan(noBrand) && !noBrand?.uniqueness_verified
                     ? "Continue deep scan"
                     : "Deep scan No Brand"}
+              </button>
+            ) : null}
+            {onVerifyUniqueness ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={
+                  Boolean(noBrandDisabled) ||
+                  Boolean(noBrandChecking) ||
+                  actionsDisabled ||
+                  !canVerifyUniqueness(noBrand)
+                }
+                title="Continue past match to end of catalog — proves unique brand_id"
+                onClick={onVerifyUniqueness}
+              >
+                {deepScanActive && noBrand?.verify_uniqueness
+                  ? "Verifying uniqueness…"
+                  : "Verify uniqueness"}
               </button>
             ) : null}
             {deepScanActive && onCancelDeepScan ? (
@@ -159,11 +190,11 @@ export function DestinationStatusCard({
               <p className="add-dest-card__reason-label">No Brand check</p>
               <p className="add-dest-card__reason-text">
                 <StatusBadge tone={brandTone}>{noBrand.status}</StatusBadge>
-                {noBrand.status !== "NO_BRAND" ? (
+                {!noBrand.uniqueness_verified ? (
                   <span className="muted-line">
                     {" "}
-                    · Create blocked until brands API returns NO_BRAND (catalog evidence is
-                    informational only)
+                    · Create blocked until uniqueness is verified across the full brand
+                    catalog (catalog evidence is informational only)
                   </span>
                 ) : null}
               </p>
@@ -178,7 +209,43 @@ export function DestinationStatusCard({
               {noBrand.brand_id != null && noBrand.brand_id !== "" ? (
                 <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>
                   brand_id={String(noBrand.brand_id)}
+                  {noBrand.uniqueness_verified
+                    ? " · uniqueness_verified=true"
+                    : " · uniqueness_verified=false"}
                 </p>
+              ) : null}
+              {payloadXml ? (
+                <details style={{ marginTop: "0.45rem" }}>
+                  <summary className="add-dest-card__reason-label">Payload preview (XML)</summary>
+                  <pre
+                    className="muted-line"
+                    style={{
+                      margin: "0.35rem 0 0",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      maxHeight: "14rem",
+                      overflow: "auto",
+                      fontSize: "0.75rem",
+                    }}
+                  >
+                    {payloadXml}
+                  </pre>
+                  {fieldProvenance?.length ? (
+                    <div style={{ marginTop: "0.35rem" }}>
+                      <p className="add-dest-card__reason-label">Field provenance</p>
+                      {fieldProvenance.slice(0, 40).map((row) => (
+                        <p
+                          key={`${row.field}-${String(row.origin)}`}
+                          className="muted-line"
+                          style={{ margin: "0.1rem 0 0" }}
+                        >
+                          {String(row.field)}={String(row.value ?? "")} · origin=
+                          {String(row.origin ?? "")}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+                </details>
               ) : null}
               {noBrand.catalog_consistency_note ? (
                 <p className="muted-line" style={{ margin: "0.15rem 0 0" }}>

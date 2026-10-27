@@ -316,6 +316,8 @@ def test_partial_multi_store_success(tenancy_env, monkeypatch):
                         return_value={
                             "status": "NO_BRAND",
                             "brand": "No Brand",
+                            "brand_id": 1,
+                            "uniqueness_verified": True,
                             "message": "ok",
                         },
                     ):
@@ -371,6 +373,8 @@ def test_partial_multi_store_success(tenancy_env, monkeypatch):
                         return_value={
                             "status": "NO_BRAND",
                             "brand": "No Brand",
+                            "brand_id": 1,
+                            "uniqueness_verified": True,
                             "message": "ok",
                         },
                     ):
@@ -489,7 +493,7 @@ def test_saas_add_does_not_require_probe_confirm(tenancy_env, monkeypatch):
                 ):
                     with patch(
                         "src.product_add.resolve_brand_for_category",
-                        return_value={"status": "NO_BRAND", "brand": "No Brand"},
+                        return_value={"status": "NO_BRAND", "brand": "No Brand", "uniqueness_verified": True, "brand_id": 1},
                     ):
                         # API-style: no execute, no confirm
                         out = add_product_from_connected(

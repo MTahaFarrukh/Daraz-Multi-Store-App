@@ -11,6 +11,7 @@ import {
   brandCheckBlocksCreate,
   canCheckNoBrand,
   canContinueDeepScan,
+  canVerifyUniqueness,
   extractPreviewPrimaryCategoryId,
   mapApiNoBrandResult,
   noBrandCheckFromHttpError,
@@ -295,7 +296,10 @@ export function AddDarazProductDialog({
     setAlerts("warn", "Deep scan pause requested — current page request will finish.", false);
   }
 
-  async function onDeepScanNoBrand(storeId: string) {
+  async function runDeepScanLoop(
+    storeId: string,
+    opts: { verifyUniqueness: boolean }
+  ) {
     if (brandCheckInFlightRef.current || submitting) return;
     const categoryId = previewCategoryId;
     if (!canCheckNoBrand(categoryId) || !categoryId) {
@@ -312,12 +316,12 @@ export function AddDarazProductDialog({
     setDeepScanStoreId(storeId);
     let startRow = 0;
     const prior = noBrandByStore[storeId];
-    if (canContinueDeepScan(prior)) {
+    if (canContinueDeepScan(prior) || opts.verifyUniqueness) {
       startRow = Number(prior?.next_start_row ?? prior?.lookup?.next_start_row ?? 0);
     }
+    const priorBrandId = prior?.brand_id ?? prior?.candidates?.[0]?.brand_id ?? null;
     try {
-      // Auto-continue across requests until complete, NO_BRAND, rate_limited, or cancel.
-      for (let hop = 0; hop < 40; hop += 1) {
+      for (let hop = 0; hop < 80; hop += 1) {
         if (deepScanCancelRef.current) {
           setAlerts("warn", `Deep scan paused for ${storeId}.`, false);
           break;
@@ -325,6 +329,8 @@ export function AddDarazProductDialog({
         const res = await Api.checkCategoryNoBrand(storeId, categoryId, {
           deep: true,
           scanFromStartRow: startRow,
+          verifyUniqueness: opts.verifyUniqueness,
+          priorBrandId: opts.verifyUniqueness ? priorBrandId : null,
         });
         const mapped = mapApiNoBrandResult(
           res as unknown as Record<string, unknown>,
@@ -332,10 +338,18 @@ export function AddDarazProductDialog({
           categoryId
         );
         setNoBrandByStore((prev) => ({ ...prev, [storeId]: mapped }));
-        if (mapped.status === "NO_BRAND") {
+        if (mapped.uniqueness_verified && mapped.status === "NO_BRAND") {
           setAlerts(
             "ok",
-            `No Brand confirmed via deep scan for ${storeId} (brand_id=${mapped.brand_id ?? "n/a"}).`,
+            `No Brand uniqueness verified for ${storeId} (brand_id=${mapped.brand_id ?? "n/a"}).`,
+            false
+          );
+          break;
+        }
+        if (mapped.status === "NO_BRAND" && !opts.verifyUniqueness) {
+          setAlerts(
+            "warn",
+            `No Brand candidate brand_id=${mapped.brand_id ?? "n/a"} for ${storeId} — run Verify uniqueness before create (scanned incomplete).`,
             false
           );
           break;
@@ -344,6 +358,14 @@ export function AddDarazProductDialog({
           setAlerts(
             "warn",
             `Deep scan rate-limited for ${storeId} — not retrying blindly. Resume later from next_start_row.`,
+            false
+          );
+          break;
+        }
+        if (mapped.status === "UNRESOLVED" && mapped.reason === "ambiguous_no_brand") {
+          setAlerts(
+            "warn",
+            `Ambiguous No Brand ids for ${storeId} — persisted verification cleared. Create stays blocked.`,
             false
           );
           break;
@@ -373,6 +395,22 @@ export function AddDarazProductDialog({
       setBrandCheckingStoreId(null);
       setDeepScanStoreId(null);
     }
+  }
+
+  async function onDeepScanNoBrand(storeId: string) {
+    await runDeepScanLoop(storeId, { verifyUniqueness: false });
+  }
+
+  async function onVerifyUniqueness(storeId: string) {
+    const prior = noBrandByStore[storeId];
+    if (!canVerifyUniqueness(prior)) {
+      setAlerts(
+        "warn",
+        "Verify uniqueness needs a No Brand candidate brand_id from deep scan first."
+      );
+      return;
+    }
+    await runDeepScanLoop(storeId, { verifyUniqueness: true });
   }
 
   function parsePrice(): number | undefined {
@@ -1146,6 +1184,9 @@ export function AddDarazProductDialog({
                     onDeepScanNoBrand={
                       sid ? () => void onDeepScanNoBrand(sid) : undefined
                     }
+                    onVerifyUniqueness={
+                      sid ? () => void onVerifyUniqueness(sid) : undefined
+                    }
                     onCancelDeepScan={
                       sid && deepScanStoreId === sid
                         ? () => onCancelDeepScan()
@@ -1183,6 +1224,7 @@ export function AddDarazProductDialog({
                   }
                   onCheckNoBrand={() => void onCheckNoBrand(s.store_id)}
                   onDeepScanNoBrand={() => void onDeepScanNoBrand(s.store_id)}
+                  onVerifyUniqueness={() => void onVerifyUniqueness(s.store_id)}
                   onCancelDeepScan={
                     deepScanStoreId === s.store_id
                       ? () => onCancelDeepScan()

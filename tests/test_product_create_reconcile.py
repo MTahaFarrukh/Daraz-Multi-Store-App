@@ -184,7 +184,7 @@ def test_timeout_needs_reconciliation_blocks_second_create(tenancy_env):
                 mock_client = MagicMock()
                 mock_client.get_category_attributes.return_value = schema
                 mock_client.query_category_brands.return_value = {
-                    "data": {"module": [{"name": "No Brand", "brand_id": 1}]}
+                    "data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
                 }
                 mock_client.create_product.side_effect = boom
                 client_fn.return_value = mock_client
@@ -503,7 +503,7 @@ def test_blocking_validation_skips_image_resolution(tenancy_env):
                 mock_client = MagicMock()
                 mock_client.get_category_attributes.return_value = schema
                 mock_client.query_category_brands.return_value = {
-                    "data": {"module": [{"name": "No Brand", "brand_id": 1}]}
+                    "data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
                 }
                 client_fn.return_value = mock_client
                 with patch(

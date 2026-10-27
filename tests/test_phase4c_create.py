@@ -313,7 +313,7 @@ def test_category_validation_passes_complete_draft(tenancy_env):
         destination_store_id="store_b",
         category_attributes_payload=SAMPLE_CATEGORY_ATTRS,
         brand_query_fn=lambda **kw: {
-            "module": [{"name": "No Brand", "brand_id": 1}]
+            "module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1
         },
     )
     cat = result["draft"]["validation"]["category"]
@@ -459,7 +459,7 @@ def test_duplicate_safety_blocks_supervised(tenancy_env, monkeypatch):
             return SAMPLE_CATEGORY_ATTRS
 
         def query_category_brands(self, **_k):
-            return {"module": [{"name": "No Brand", "brand_id": 1}]}
+            return {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
 
     fake = FakeClient()
     monkeypatch.setattr("src.ops.client_for_store", lambda store: fake)

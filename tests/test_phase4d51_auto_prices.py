@@ -318,7 +318,7 @@ def test_add_product_does_not_need_attention_when_prices_resolved(tenancy_env):
                 mock_client = MagicMock()
                 mock_client.get_category_attributes.return_value = {"data": []}
                 mock_client.query_category_brands.return_value = {
-                    "data": {"module": [{"name": "No Brand", "brand_id": 1}]}
+                    "data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
                 }
                 client_fn.return_value = mock_client
                 with patch(

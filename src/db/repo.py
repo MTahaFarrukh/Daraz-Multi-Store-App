@@ -1166,6 +1166,13 @@ class MemoryTenancyRepo:
             row["cleared_at"] = _now().isoformat()
             return deepcopy(row)
 
+    def delete_verified_category_no_brand(
+        self, marketplace: str, primary_category_id: str
+    ) -> bool:
+        key = self._verified_no_brand_key(marketplace, primary_category_id)
+        with self._lock:
+            return self.verified_category_no_brand.pop(key, None) is not None
+
     def create_workspace_with_owner(self, user_id: str, name: str) -> dict[str, Any]:
         with self._lock:
             existing = [m for m in self.members if m["user_id"] == user_id]
@@ -3540,6 +3547,25 @@ class PostgresTenancyRepo:
             "cleared_at": row[6].isoformat() if hasattr(row[6], "isoformat") else row[6],
             "evidence": row[7] if isinstance(row[7], dict) else (row[7] or {}),
         }
+
+    def delete_verified_category_no_brand(
+        self, marketplace: str, primary_category_id: str
+    ) -> bool:
+        from src.db.connection import connect
+
+        mp = (marketplace or "pk").strip().lower() or "pk"
+        cat = str(primary_category_id).strip()
+        try:
+            with connect() as conn:
+                cur = conn.execute(
+                    """DELETE FROM verified_category_no_brand
+                       WHERE marketplace=%s AND primary_category_id=%s""",
+                    (mp, cat),
+                )
+                conn.commit()
+                return bool(getattr(cur, "rowcount", 0))
+        except Exception:  # noqa: BLE001
+            return False
 
     """Postgres-backed tenancy repository."""
 

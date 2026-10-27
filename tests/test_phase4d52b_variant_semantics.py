@@ -427,7 +427,7 @@ def test_brand_source_nike_becomes_no_brand():
 
     def query(**kwargs):
         calls.append(kwargs.get("name"))
-        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}]}}
+        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}}
 
     res = resolve_brand_for_category(
         source_brand="Nike",
@@ -446,7 +446,7 @@ def test_brand_missing_still_no_brand():
     clear_no_brand_cache_for_tests()
 
     def query(**kwargs):
-        return {"data": {"module": [{"name": "No Brand", "brand_id": 2}]}}
+        return {"data": {"module": [{"name": "No Brand", "brand_id": 2}], "total_record": 1}}
 
     res = resolve_brand_for_category(
         source_brand=None,
@@ -487,7 +487,7 @@ def test_no_brand_cached_by_marketplace_category():
 
     def query(**kwargs):
         calls["n"] += 1
-        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}]}}
+        return {"data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}}
 
     a = resolve_destination_no_brand(
         primary_category_id=55, query_brands=query, marketplace="pk"
@@ -612,7 +612,7 @@ def test_multi_store_each_destination_no_brand(tenancy_env):
                 mock_client = MagicMock()
                 mock_client.get_category_attributes.return_value = schema
                 mock_client.query_category_brands.return_value = {
-                    "data": {"module": [{"name": "No Brand", "brand_id": 1}]}
+                    "data": {"module": [{"name": "No Brand", "brand_id": 1}], "total_record": 1}
                 }
                 client_fn.return_value = mock_client
                 with patch(
